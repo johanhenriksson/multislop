@@ -1,3 +1,4 @@
+use crate::map::{CELL, MAP};
 use crate::shared::*;
 use crate::sfx;
 use bevy::audio::Volume;
@@ -99,6 +100,16 @@ struct Game {
     /// Sounds to play this frame, with volume.
     sounds: Vec<(Sound, f32)>,
     died_at: Option<Instant>,
+    round: Option<Round>,
+    teams: HashMap<u32, Team>,
+    /// Clock time of the next bomb beep.
+    next_beep: f64,
+    /// Where and when (clock) the bomb went off, for the flash.
+    explosion: Option<(Vec3, f64)>,
+    /// Interpolated eye position and view of the teammate we watch while dead.
+    spectate: Option<(Vec3, f32, f32)>,
+    /// Interpolated position of a remote bomb carrier.
+    carrier_pos: Option<Vec3>,
 }
 
 #[derive(Clone, Copy)]
@@ -106,6 +117,8 @@ enum Sound {
     Shoot,
     Hit,
     Death,
+    Beep,
+    Explosion,
 }
 
 #[derive(Resource)]
@@ -113,7 +126,15 @@ struct Sounds {
     shoot: Handle<AudioSource>,
     hit: Handle<AudioSource>,
     death: Handle<AudioSource>,
+    beep: Handle<AudioSource>,
+    explosion: Handle<AudioSource>,
 }
+
+#[derive(Component)]
+struct Scoreboard;
+
+#[derive(Component)]
+struct BombModel;
 
 #[derive(Component)]
 struct DeathFade;
@@ -177,7 +198,11 @@ pub fn run(server: SocketAddr, lag_ms: u64, jitter_ms: u64, interp_ms: u64) {
         .add_systems(Startup, setup)
         .add_systems(PreUpdate, receive)
         .add_systems(FixedUpdate, net_tick)
-        .add_systems(Update, (grab_cursor, look, (render_self, render_remotes, hud, draw_tracers, play_sounds, death_fade, crosshair)).chain())
+        .add_systems(
+            Update,
+            (grab_cursor, look, (render_remotes, render_self, render_bomb, hud, scoreboard, draw_tracers, bomb_beep, play_sounds, death_fade, crosshair))
+                .chain(),
+        )
         .run();
 }
 
@@ -188,7 +213,13 @@ fn setup(
     mut audio: ResMut<Assets<AudioSource>>,
 ) {
     let mut sound = |wav: Vec<u8>| audio.add(AudioSource { bytes: wav.into() });
-    commands.insert_resource(Sounds { shoot: sound(sfx::shoot()), hit: sound(sfx::hit()), death: sound(sfx::death()) });
+    commands.insert_resource(Sounds {
+        shoot: sound(sfx::shoot()),
+        hit: sound(sfx::hit()),
+        death: sound(sfx::death()),
+        beep: sound(sfx::beep()),
+        explosion: sound(sfx::explosion()),
+    });
     commands
         .spawn((Camera3d::default(), Projection::Perspective(PerspectiveProjection { fov: 1.6, ..default() })))
         .with_child((
@@ -202,19 +233,41 @@ fn setup(
     ));
     commands.insert_resource(GlobalAmbientLight { brightness: 400.0, ..default() });
     commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(FLOOR[0] + 2.0, FLOOR[1] + 2.0))),
-        MeshMaterial3d(mats.add(Color::srgb(0.55, 0.5, 0.4))),
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(MAP.size().0, MAP.size().1))),
+        MeshMaterial3d(mats.add(Color::srgb(0.76, 0.66, 0.48))),
     ));
-    let crate_mat = mats.add(Color::srgb(0.6, 0.45, 0.25));
-    let wall_mat = mats.add(Color::srgb(0.7, 0.68, 0.6));
-    for (i, (c, h)) in BOXES.iter().enumerate() {
-        let size = Vec3::from(*h) * 2.0;
+    let crate_mat = mats.add(Color::srgb(0.55, 0.4, 0.22));
+    let wall_mat = mats.add(Color::srgb(0.82, 0.72, 0.55));
+    for &(c, h) in &MAP.boxes {
         commands.spawn((
-            Mesh3d(meshes.add(Cuboid::from_size(size))),
-            MeshMaterial3d(if i < 4 { wall_mat.clone() } else { crate_mat.clone() }),
-            Transform::from_translation(Vec3::from(*c)),
+            Mesh3d(meshes.add(Cuboid::from_size(h * 2.0))),
+            MeshMaterial3d(if h.y > 2.0 { wall_mat.clone() } else { crate_mat.clone() }),
+            Transform::from_translation(c),
         ));
     }
+    let site_mesh = meshes.add(Plane3d::default().mesh().size(CELL, CELL));
+    let site_mat = mats.add(StandardMaterial {
+        base_color: Color::srgba(0.8, 0.15, 0.1, 0.3),
+        alpha_mode: AlphaMode::Blend,
+        unlit: true,
+        ..default()
+    });
+    for p in MAP.site_cells() {
+        commands.spawn((Mesh3d(site_mesh.clone()), MeshMaterial3d(site_mat.clone()), Transform::from_translation(p + Vec3::Y * 0.02)));
+    }
+    commands.spawn((
+        BombModel,
+        Mesh3d(meshes.add(Cuboid::new(0.4, 0.15, 0.3))),
+        MeshMaterial3d(mats.add(StandardMaterial { base_color: Color::srgb(0.9, 0.1, 0.1), unlit: true, ..default() })),
+        Transform::default(),
+        Visibility::Hidden,
+    ));
+    commands.spawn((
+        Scoreboard,
+        Text::new(""),
+        TextLayout { justify: Justify::Center, ..default() },
+        Node { position_type: PositionType::Absolute, top: px(12), width: percent(100), justify_content: JustifyContent::Center, ..default() },
+    ));
     commands.spawn((
         DeathFade,
         Node { position_type: PositionType::Absolute, width: percent(100), height: percent(100), ..default() },
@@ -295,6 +348,7 @@ fn net_tick(
         yaw: g.yaw,
         pitch: g.pitch,
         jump: keys.any_pressed([KeyCode::Space, KeyCode::Backspace]),
+        use_key: keys.pressed(KeyCode::KeyE),
         fire: active && mouse.pressed(MouseButton::Left),
         view_tick: (server_tick(&g) - g.interp_ticks) as f32,
     };
@@ -304,7 +358,7 @@ fn net_tick(
         let mut pred = g.pred;
         if step_player(&mut pred, &inp) {
             let (o, d) = (eye(&pred), aim_dir(&pred));
-            let color = player_color(g.me.unwrap());
+            let color = team_color(g.teams.get(&g.me.unwrap()).copied());
             g.sounds.push((Sound::Shoot, 0.6));
             g.tracers.push((muzzle(o, d), o + d * trace_world(o, d), BEAM_SECS, color));
         }
@@ -333,6 +387,25 @@ fn on_snapshot(g: &mut Game, snap: Snapshot) {
         _ => sample,
     });
     g.me = Some(snap.you);
+    for p in &snap.players {
+        g.teams.insert(p.id, p.team);
+    }
+    let prev = g.round.replace(snap.round);
+    if prev.map(|r| r.number) != Some(snap.round.number) {
+        // New round: everyone is back in spawn, so face the way the server spawned us.
+        if let Some(me) = snap.players.iter().find(|p| p.id == snap.you) {
+            (g.yaw, g.pitch) = (me.state.yaw, 0.0);
+        }
+        g.died_at = None;
+        g.explosion = None;
+    }
+    if let Bomb::Exploded(pos) = snap.round.bomb {
+        if !matches!(prev.map(|r| r.bomb), Some(Bomb::Exploded(_))) {
+            g.explosion = Some((pos, clock()));
+            let volume = 1.0 / (1.0 + pos.distance(g.pred.pos) / 30.0);
+            g.sounds.push((Sound::Explosion, volume));
+        }
+    }
     if let Some(last) = g.net_graph.last_snap.replace(Instant::now()) {
         let gap = last.elapsed().as_secs_f64();
         g.net_graph.max_gap_ms = g.net_graph.max_gap_ms.max(gap as f32 * 1000.0);
@@ -381,7 +454,7 @@ fn on_snapshot(g: &mut Game, snap: Snapshot) {
 
     for s in snap.shots.iter().filter(|s| s.shooter != snap.you) {
         let d = (s.to - s.from).normalize_or_zero();
-        g.tracers.push((muzzle(s.from, d), s.to, BEAM_SECS, player_color(s.shooter)));
+        g.tracers.push((muzzle(s.from, d), s.to, BEAM_SECS, team_color(g.teams.get(&s.shooter).copied())));
         let volume = 0.6 / (1.0 + s.from.distance(g.pred.pos) / 8.0);
         g.sounds.push((Sound::Shoot, volume));
     }
@@ -398,6 +471,11 @@ fn render_self(
     fixed: Res<Time<Fixed>>,
 ) {
     g.smooth *= (-time.delta_secs() * 15.0).exp();
+    if let Some((eye, yaw, pitch)) = g.spectate.filter(|_| spectating(&g)) {
+        cam.translation = eye;
+        cam.rotation = look_rot(yaw, pitch);
+        return;
+    }
     let pos = g.prev_pos.lerp(g.pred.pos, fixed.overstep_fraction()) + g.smooth;
     cam.translation = pos + Vec3::Y * EYE;
     cam.rotation = look_rot(g.yaw, g.pitch);
@@ -425,21 +503,35 @@ fn render_remotes(
     // Starved: keep players moving on their last velocity for a moment rather than freezing them.
     let extrapolate = ((render_tick - newest.tick as f64) / TICK_HZ).clamp(0.0, 0.1) as f32;
 
+    let my_team = g.me.and_then(|me| g.teams.get(&me)).copied();
+    let carrier = match newest.round.bomb {
+        Bomb::Carried(id) => Some(id),
+        _ => None,
+    };
+    let (mut spectate, mut carrier_pos) = (None, None);
     let mut seen = HashMap::new();
     for p in b.players.iter().filter(|p| Some(p.id) != g.me) {
         let from = a.players.iter().find(|q| q.id == p.id).map_or(p.state, |q| q.state);
         let pos = from.pos.lerp(p.state.pos, f) + p.state.vel * extrapolate;
         let yaw = from.yaw + wrap_angle(p.state.yaw - from.yaw) * f;
+        let pitch = from.pitch + (p.state.pitch - from.pitch) * f;
         // Hide on death as soon as we hear of it, and stay hidden until the respawn is interpolated past, so the
         // respawn teleport is never drawn as a slide across the map.
         let alive_in = |s: &Snapshot| s.players.iter().find(|q| q.id == p.id).is_some_and(|q| q.hp > 0);
         let alive = alive_in(newest) && alive_in(a) && p.hp > 0;
-        seen.insert(p.id, (pos, yaw, alive));
+        if alive && spectate.is_none() && Some(p.team) == my_team {
+            spectate = Some((pos + Vec3::Y * EYE, yaw, pitch));
+        }
+        if Some(p.id) == carrier {
+            carrier_pos = Some(pos);
+        }
+        seen.insert(p.id, (pos, yaw, alive, p.team));
     }
+    (g.spectate, g.carrier_pos) = (spectate, carrier_pos);
 
     for (e, r, mut t, mut vis) in &mut q {
         match seen.remove(&r.0) {
-            Some((pos, yaw, alive)) => {
+            Some((pos, yaw, alive, _)) => {
                 t.translation = pos + Vec3::Y * HEIGHT / 2.0;
                 t.rotation = Quat::from_rotation_y(yaw);
                 *vis = if alive { Visibility::Inherited } else { Visibility::Hidden };
@@ -447,12 +539,12 @@ fn render_remotes(
             None => commands.entity(e).despawn(),
         }
     }
-    for (id, (pos, yaw, _)) in seen {
+    for (id, (pos, yaw, _, team)) in seen {
         commands
             .spawn((
                 Remote(id),
                 Mesh3d(meshes.add(Capsule3d::new(RADIUS, HEIGHT - 2.0 * RADIUS))),
-                MeshMaterial3d(mats.add(player_color(id))),
+                MeshMaterial3d(mats.add(team_color(Some(team)))),
                 Transform::from_translation(pos + Vec3::Y * HEIGHT / 2.0).with_rotation(Quat::from_rotation_y(yaw)),
             ))
             .with_child((
@@ -512,8 +604,78 @@ fn muzzle(o: Vec3, d: Vec3) -> Vec3 {
     o + right * 0.25 - up * 0.22 + d * 0.75
 }
 
-fn player_color(id: u32) -> Color {
-    Color::hsl((id * 67 % 360) as f32, 0.7, 0.5)
+fn team_color(team: Option<Team>) -> Color {
+    match team {
+        Some(Team::T) => Color::srgb(0.9, 0.6, 0.2),
+        Some(Team::Ct) => Color::srgb(0.25, 0.45, 0.95),
+        None => Color::WHITE,
+    }
+}
+
+/// Dead and the fade to black is done: watch a teammate instead.
+fn spectating(g: &Game) -> bool {
+    g.me.is_some() && g.hp <= 0 && g.died_at.is_none_or(|t| t.elapsed().as_secs_f32() > 1.6)
+}
+
+fn render_bomb(
+    mut bomb: Single<(&mut Transform, &mut Visibility), With<BombModel>>,
+    g: Res<Game>,
+    mut gizmos: Gizmos,
+) {
+    let (t, vis) = &mut *bomb;
+    let at = match g.round.map(|r| r.bomb) {
+        Some(Bomb::Dropped(p) | Bomb::Planted(p)) => Some(p + Vec3::Y * 0.08),
+        // On the carrier's back.
+        Some(Bomb::Carried(_)) => g.carrier_pos.map(|p| p + Vec3::Y * 1.1),
+        _ => None,
+    };
+    **vis = if at.is_some() { Visibility::Inherited } else { Visibility::Hidden };
+    t.translation = at.unwrap_or_default();
+    if let Some((pos, start)) = g.explosion {
+        let age = (clock() - start) as f32;
+        if age < 1.0 {
+            let color = Color::srgba(1.0, 0.6, 0.1, 1.0 - age);
+            gizmos.sphere(Isometry3d::from_translation(pos), BOMB_RADIUS * age.sqrt(), color);
+        }
+    }
+}
+
+/// Beeps speed up as the timer runs down, like the real C4.
+fn bomb_beep(mut g: ResMut<Game>) {
+    let Some(Round { bomb: Bomb::Planted(pos), time_left, .. }) = g.round else { return };
+    if clock() < g.next_beep {
+        return;
+    }
+    g.next_beep = clock() + 0.12 + 0.88 * (time_left / BOMB_SECS) as f64;
+    let volume = 0.7 / (1.0 + pos.distance(g.pred.pos) / 15.0);
+    g.sounds.push((Sound::Beep, volume));
+}
+
+fn scoreboard(mut text: Single<&mut Text, With<Scoreboard>>, g: Res<Game>) {
+    let Some(r) = g.round else { return };
+    let secs = r.time_left.ceil() as u32;
+    let my_team = g.me.and_then(|me| g.teams.get(&me)).copied();
+    let message = match (r.phase, r.bomb, r.progress) {
+        (Phase::End { winner }, Bomb::Exploded(_), _) => format!("{} win - the bomb exploded", winner.name()),
+        (Phase::End { winner }, Bomb::Defused(_), _) => format!("{} win - the bomb was defused", winner.name()),
+        (Phase::End { winner }, ..) => format!("{} win", winner.name()),
+        (Phase::Freeze, ..) => format!("Round {} - get ready", r.number),
+        (_, _, Some((id, p))) if Some(id) == g.me => {
+            let verb = if matches!(r.bomb, Bomb::Planted(_)) { "Defusing" } else { "Planting" };
+            let bar = "#".repeat((p * 20.0) as usize) + &".".repeat(20 - (p * 20.0) as usize);
+            format!("{verb} [{bar}]")
+        }
+        (_, Bomb::Planted(_), Some(_)) => "BOMB PLANTED - being defused!".into(),
+        (_, Bomb::Planted(_), None) => "BOMB PLANTED".into(),
+        (_, Bomb::Carried(id), _) if Some(id) == g.me => "You have the bomb - hold E on A or B to plant".into(),
+        (_, Bomb::Dropped(_), _) if my_team == Some(Team::T) => "The bomb was dropped - pick it up".into(),
+        _ => String::new(),
+    };
+    let side = match my_team {
+        Some(t) => t.name(),
+        None => "",
+    };
+    text.0 = format!("T {}   {}:{:02}   {} CT\n{side}\n{message}", r.score[0], secs / 60, secs % 60, r.score[1]);
 }
 
 fn play_sounds(mut commands: Commands, mut g: ResMut<Game>, sounds: Res<Sounds>) {
@@ -522,6 +684,8 @@ fn play_sounds(mut commands: Commands, mut g: ResMut<Game>, sounds: Res<Sounds>)
             Sound::Shoot => &sounds.shoot,
             Sound::Hit => &sounds.hit,
             Sound::Death => &sounds.death,
+            Sound::Beep => &sounds.beep,
+            Sound::Explosion => &sounds.explosion,
         };
         commands.spawn((
             AudioPlayer::new(handle.clone()),
@@ -531,7 +695,12 @@ fn play_sounds(mut commands: Commands, mut g: ResMut<Game>, sounds: Res<Sounds>)
 }
 
 fn death_fade(mut fade: Single<&mut BackgroundColor, With<DeathFade>>, g: Res<Game>) {
-    let alpha = g.died_at.map_or(0.0, |t| (t.elapsed().as_secs_f32() / 0.8).min(1.0));
+    // Fade to black, hold, then fade back in on a teammate's view.
+    let alpha = g.died_at.map_or(0.0, |t| match t.elapsed().as_secs_f32() {
+        t if t < 0.8 => t / 0.8,
+        t if t < 1.6 => 1.0,
+        t => (1.0 - (t - 1.6) / 0.8).max(0.0),
+    });
     fade.0 = Color::BLACK.with_alpha(alpha);
 }
 

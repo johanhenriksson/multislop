@@ -1,4 +1,5 @@
 mod client;
+mod map;
 mod server;
 mod sfx;
 mod shared;

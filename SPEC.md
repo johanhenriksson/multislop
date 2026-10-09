@@ -15,14 +15,23 @@ Deadline: playable before 00:00. One weapon, one simple map.
 
 ## Gameplay
 - Players are capsules ("rounded cylinders"): radius 0.4, height 1.8, eye at 1.6.
-- Mode: free-for-all deathmatch.
-- Map: 60x60 square arena, center pillar with pinwheel walls, cover repeated in all four quarters, 8 spawns around the edge. Boxes block movement and bullets.
 - Movement: Quake/GoldSrc style (ground friction, accel, air accel, gravity, jump). WASD + mouse, space jumps.
 - Weapon: one hitscan rifle. LMB, 700 ms between shots, instagib: any hit kills.
-- Death: respawn after 2 s at the spawn point farthest from living players with 100 HP.
 - Shots: every shot is drawn as a beam in the shooter's color, fading over 0.4 s.
 - HUD: crosshair (gray while the gun cools down), HP, kills/deaths, net_graph line (ping is network round trip only, via
   a client timestamp the server echoes with its hold time) (ping, worst snapshot gap, correction, interp starvation).
+
+## Rounds (bomb defusal)
+- Teams T and CT, auto-balanced on join, friendly fire off. Players are colored by team.
+- Map: de_dust2 approximated as an ASCII grid in `src/map.rs` (2 m cells, flat): T spawn, CT spawn, long A, short A,
+  mid with doors, upper/lower tunnels, A and B sites with crates. Site floors are tinted red.
+- Round: 5 s freeze (look only, movement frozen via `PlayerState::frozen` so prediction agrees), 1:55 live, 5 s end.
+- One random T carries the bomb; it drops where the carrier dies and any T picks it up by walking over it.
+- Plant: hold E on a site for 3 s. Defuse: CT holds E within 1.5 m of the bomb for 5 s. Bomb: 35 s, kills within 20 m.
+- Wins: eliminate the other team (a planted bomb must still be defused), bomb explodes (T), defused (CT),
+  time runs out without a plant (CT).
+- Dead players fade to black, then watch a living teammate until the next round. Joining mid-round means waiting.
+- HUD: score, timer, round/bomb messages, plant/defuse progress. Bomb beeps speed up; explosion sound and flash.
 
 ## Netcode (server authoritative, Valve-style)
 - Plain UDP, postcard-serialized messages. Fixed tick 128 Hz on both sides; snapshots sent at 32 Hz, input packets at 64 Hz
@@ -39,4 +48,4 @@ Deadline: playable before 00:00. One weapon, one simple map.
   server rewinds other players to that tick (max 400 ms back) from its position history and raycasts there.
 
 ## Out of scope (for now)
-Teams, rounds, economy, multiple weapons, real maps, anti-cheat, encryption, connection handshake/timeouts beyond the basics.
+Economy, multiple weapons, halftime/match end, team switching, map height (ramps, stairs), anti-cheat, encryption, connection handshake/timeouts beyond the basics.
