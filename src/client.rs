@@ -169,6 +169,15 @@ struct Fx {
     material: Option<Handle<StandardMaterial>>,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Life {
+    Alive,
+    /// Shown as a corpse until the round restarts.
+    Dead,
+    /// Alive again but the respawn teleport hasn't been interpolated past yet: hidden.
+    Respawning,
+}
+
 /// Bullet holes, oldest first, so only the most recent stay.
 #[derive(Resource, Default)]
 struct Decals(VecDeque<Entity>);
@@ -834,31 +843,51 @@ fn render_remotes(
         let pos = from.pos.lerp(p.state.pos, f) + p.state.vel * extrapolate;
         let yaw = from.yaw + wrap_angle(p.state.yaw - from.yaw) * f;
         let pitch = from.pitch + (p.state.pitch - from.pitch) * f;
-        // Hide on death as soon as we hear of it, and stay hidden until the respawn is interpolated past, so the
-        // respawn teleport is never drawn as a slide across the map.
+        // Dead as soon as we hear of it (the body falls and stays); hidden while a respawn is being interpolated
+        // past, so the teleport is never drawn as a slide across the map.
         let alive_in = |s: &Snapshot| s.players.iter().find(|q| q.id == p.id).is_some_and(|q| q.hp > 0);
         let alive = alive_in(newest) && alive_in(a) && p.hp > 0;
+        let life = if alive { Life::Alive } else if !alive_in(newest) { Life::Dead } else { Life::Respawning };
         if alive && spectate.is_none() && Some(p.team) == my_team {
             spectate = Some((p.id, pos + Vec3::Y * EYE, yaw, pitch));
         }
         if Some(p.id) == carrier {
             carrier_pos = Some(pos);
         }
-        seen.insert(p.id, (pos, yaw, pitch, alive, p.state.weapon()));
+        seen.insert(p.id, (pos, yaw, pitch, life, p.state.weapon()));
     }
     (g.spectate, g.carrier_pos) = (spectate, carrier_pos);
     // We're looking out of their eyes, so their own model would only block the view.
     let watched = spectate.filter(|_| spectating(&g)).map(|s| s.0);
 
     for (e, r, mut rig, mut t, mut vis) in &mut q {
-        let Some((pos, yaw, pitch, alive, weapon)) = seen.remove(&r.0) else {
+        let Some((pos, yaw, pitch, life, weapon)) = seen.remove(&r.0) else {
             commands.entity(e).despawn();
             continue;
         };
-        t.translation = pos;
-        t.rotation = Quat::from_rotation_y(yaw);
-        *vis = if alive && watched != Some(r.0) { Visibility::Inherited } else { Visibility::Hidden };
+        let alive = life == Life::Alive;
+        // A dead player topples over, forwards or backwards, and stays down until the next round.
+        let fall = match life {
+            Life::Dead => {
+                let since = *rig.died_at.get_or_insert(clock());
+                ((clock() - since) as f32 / 0.45).min(1.0).powi(2)
+            }
+            _ => {
+                rig.died_at = None;
+                0.0
+            }
+        };
+        let side = if r.0 % 2 == 0 { 1.0 } else { -1.0 };
+        t.translation = pos + Vec3::Y * 0.13 * fall;
+        t.rotation = Quat::from_rotation_y(yaw) * Quat::from_rotation_x(side * 1.5 * fall);
+        let shown = match life {
+            Life::Alive => watched != Some(r.0),
+            Life::Dead => true,
+            Life::Respawning => false,
+        };
+        *vis = if shown { Visibility::Inherited } else { Visibility::Hidden };
         let (swing, moved) = rig.animate(pos, time.delta_secs());
+        let (swing, pitch) = if alive { (swing, pitch) } else { (0.0, -0.4) };
         // Their footsteps, louder up close: how you hear someone coming.
         let speed = moved / time.delta_secs().max(1e-3);
         if alive && speed > 6.35 * WALK_SPEED + 0.3 && speed < 12.0 {

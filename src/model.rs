@@ -17,6 +17,8 @@ pub struct Rig {
     pub last_pos: Option<Vec3>,
     /// Distance run since the last footstep.
     pub stride: f32,
+    /// When (client clock) we saw this player die, for the fall.
+    pub died_at: Option<f64>,
 }
 
 impl Rig {
@@ -145,7 +147,7 @@ pub fn spawn_soldier(
         .collect();
     commands.entity(arms).add_children(&guns);
 
-    let rig = Rig { legs, arms, guns, phase: 0.0, last_pos: None, stride: 0.0 };
+    let rig = Rig { legs, arms, guns, phase: 0.0, last_pos: None, stride: 0.0, died_at: None };
     let body = commands.spawn((root, rig, Visibility::Inherited)).id();
     commands.entity(body).add_children(&body_parts).add_children(&legs).add_child(arms);
     debug_assert!(0.56 / 2.0 < RADIUS);
