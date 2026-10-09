@@ -134,6 +134,8 @@ struct Game {
     players: Vec<NetPlayer>,
     /// Distance run since the last footstep.
     stride: f32,
+    /// Big centered announcement and when it was made.
+    announce: Option<(String, Instant)>,
     /// Viewmodel kick from the last shot, 1 right after firing and decaying to 0.
     kick: f32,
     steps_played: u32,
@@ -153,7 +155,21 @@ enum Sound {
     Explosion,
     Step(u32),
     Impact,
+    Voice(Announce),
 }
+
+/// Announcer lines, CS style.
+#[derive(Clone, Copy, PartialEq)]
+enum Announce {
+    TWin,
+    CtWin,
+    Planted,
+    Defused,
+    Go,
+}
+
+#[derive(Component)]
+struct AnnounceText;
 
 /// A short-lived visual effect to spawn this frame.
 #[derive(Clone, Copy)]
@@ -202,6 +218,7 @@ struct Sounds {
     explosion: Handle<AudioSource>,
     steps: Vec<Handle<AudioSource>>,
     impact: Handle<AudioSource>,
+    voices: Vec<(Announce, Handle<AudioSource>)>,
 }
 
 /// First-person model of one weapon.
@@ -323,7 +340,7 @@ pub fn run(server: SocketAddr, lag_ms: u64, jitter_ms: u64, interp_ms: u64) {
                 look,
                 controls,
                 (render_remotes, render_self, viewmodel, render_bomb, draw_tracers, bomb_beep, play_sounds, spawn_fx, update_fx),
-                (hud, scoreboard, ammo_hud, buy_menu_hud, kill_feed, death_fade, hurt_flash, crosshair, scope, score_panel),
+                (hud, scoreboard, ammo_hud, buy_menu_hud, kill_feed, death_fade, hurt_flash, crosshair, scope, score_panel, announce),
             )
                 .chain(),
         )
@@ -351,6 +368,16 @@ fn setup(
         explosion: sound(sfx::explosion()),
         steps: (0..4).map(|v| sound(sfx::footstep(v))).collect(),
         impact: sound(sfx::impact()),
+        voices: [
+            (Announce::TWin, sfx::VOICE_T_WIN),
+            (Announce::CtWin, sfx::VOICE_CT_WIN),
+            (Announce::Planted, sfx::VOICE_PLANTED),
+            (Announce::Defused, sfx::VOICE_DEFUSED),
+            (Announce::Go, sfx::VOICE_GO),
+        ]
+        .into_iter()
+        .map(|(a, wav)| (a, sound(sfx::radio(wav))))
+        .collect(),
     });
     commands.insert_resource(Decals::default());
     // First-person weapons; each barrel tip lines up with `muzzle`.
@@ -478,6 +505,10 @@ fn setup(
             BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.78)),
             children![section(Team::T, Color::srgb(1.0, 0.45, 0.3)), section(Team::Ct, Color::srgb(0.55, 0.7, 1.0))],
         )],
+    ));
+    commands.spawn((
+        Node { position_type: PositionType::Absolute, top: percent(26), width: percent(100), justify_content: JustifyContent::Center, ..default() },
+        children![(AnnounceText, Text::new(""), TextFont { font_size: FontSize::Px(40.0), ..default() }, TextShadow::default())],
     ));
     commands.spawn((
         NetGraphText,
@@ -730,6 +761,26 @@ fn on_snapshot(g: &mut Game, snap: Snapshot) {
         }
     }
     let prev = g.round.replace(snap.round);
+    if let Some(prev) = prev {
+        let r = snap.round;
+        let mut say = |a: Announce, text: &str| {
+            g.sounds.push((Sound::Voice(a), 0.9));
+            g.announce = Some((text.into(), Instant::now()));
+        };
+        // Keyed on entering a phase, not on the exact previous one: a round can end before a live snapshot arrives.
+        match (prev.phase, r.phase) {
+            (Phase::Freeze, Phase::Live) => say(Announce::Go, ""),
+            (Phase::End { .. }, _) => {}
+            (_, Phase::End { winner: Team::T }) => say(Announce::TWin, "Terrorists Win!"),
+            (_, Phase::End { winner: Team::Ct }) => say(Announce::CtWin, "Counter-Terrorists Win!"),
+            _ => {}
+        }
+        match (prev.bomb, r.bomb) {
+            (Bomb::Carried(_), Bomb::Planted(_)) => say(Announce::Planted, "The bomb has been planted."),
+            (Bomb::Planted(_), Bomb::Defused(_)) => say(Announce::Defused, "Bomb has been defused."),
+            _ => {}
+        }
+    }
     if prev.map(|r| r.number) != Some(snap.round.number) {
         // New round: everyone is back in spawn, so face the way the server spawned us.
         if let Some(me) = snap.players.iter().find(|p| p.id == snap.you) {
@@ -1111,6 +1162,7 @@ fn play_sounds(mut commands: Commands, mut g: ResMut<Game>, sounds: Res<Sounds>)
             Sound::Explosion => &sounds.explosion,
             Sound::Step(v) => &sounds.steps[v as usize % 4],
             Sound::Impact => &sounds.impact,
+            Sound::Voice(a) => &sounds.voices.iter().find(|(v, _)| *v == a).unwrap().1,
         };
         commands.spawn((
             AudioPlayer::new(handle.clone()),
@@ -1634,4 +1686,12 @@ fn score_panel(
         }
         text.0 = out;
     }
+}
+
+/// Round-end and bomb announcements in big letters for a few seconds.
+fn announce(mut text: Single<&mut Text, With<AnnounceText>>, g: Res<Game>) {
+    text.0 = match &g.announce {
+        Some((line, at)) if at.elapsed().as_secs_f32() < 3.5 => line.clone(),
+        _ => String::new(),
+    };
 }

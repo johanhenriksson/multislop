@@ -65,6 +65,8 @@ Deadline: playable before 00:00. One weapon, one simple map.
   warm hard sun. First-person weapons are held by gloved hands.
 - Combat effects: muzzle flash with a light burst, dust puff and bullet hole where shots land (last 80 holes kept),
   blood puff on player hits. Footsteps for anyone running, by distance; Shift walks slowly and silently.
+- Announcer: "Go, go, go!", "Terrorists/Counter-terrorists win", "The bomb has been planted", "Bomb has been defused",
+  rendered at build time with macOS `say` (silent elsewhere), radio-filtered, with big centered text.
 - `FPS16_SHOT=out.png [FPS16_POSE="x,y,z,yaw,pitch"]` renders off-screen, saves a screenshot and quits, for checking
   visuals without a person at the screen.
 

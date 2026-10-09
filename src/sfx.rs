@@ -133,6 +133,37 @@ fn tone(secs: f32, hz: f32, decay: f32) -> Samples {
     samples(secs, |t| (t * hz * TAU).sin() * (-t * decay).exp())
 }
 
+/// Announcer lines rendered at build time (see build.rs).
+pub const VOICE_T_WIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/t_win.wav"));
+pub const VOICE_CT_WIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ct_win.wav"));
+pub const VOICE_PLANTED: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/planted.wav"));
+pub const VOICE_DEFUSED: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/defused.wav"));
+pub const VOICE_GO: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/go.wav"));
+
+/// Makes a clean voice recording sound like CS radio: telephone band, a little grit, and a click either side.
+pub fn radio(wav_bytes: &[u8]) -> Vec<u8> {
+    let data = wav_bytes.windows(4).position(|w| w == b"data").map_or(44, |i| i + 8);
+    let pcm: Vec<f32> = wav_bytes[data.min(wav_bytes.len())..]
+        .chunks_exact(2)
+        .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / i16::MAX as f32)
+        .collect();
+    let (mut high, mut low, mut rng) = (0.0f32, 0.0f32, 0x5A5Au32);
+    let mut out: Vec<f32> = Vec::with_capacity(pcm.len() + 2000);
+    let click = |rng: &mut u32, out: &mut Vec<f32>| {
+        for i in 0..600 {
+            out.push(noise(rng) * (-(i as f32) / 90.0).exp() * 0.5);
+        }
+    };
+    click(&mut rng, &mut out);
+    for v in pcm {
+        high += (v - high) * 0.04;
+        low += ((v - high) - low) * 0.35;
+        out.push((low * 3.0).tanh() * 0.9);
+    }
+    click(&mut rng, &mut out);
+    wav(&out)
+}
+
 /// A footstep on sand and stone; four variants so a run doesn't sound like a metronome.
 pub fn footstep(variant: u32) -> Vec<u8> {
     let (mut rng, mut low, mut phase) = (0xF00Du32 + variant * 7919, 0.0f32, 0.0f32);
@@ -248,6 +279,7 @@ mod tests {
             let guns = [Weapon::Glock, Weapon::Usp, Weapon::Deagle, Weapon::Mp5, Weapon::Ak47, Weapon::M4a1, Weapon::Awp];
             let named = guns.map(|g| (g.spec().name, super::gunshot(g)));
             let extra = [("knife", super::knife()), ("reload", super::reload()), ("buy", super::buy()), ("headshot", super::headshot())];
+            let extra = extra.into_iter().chain([("radio_go", super::radio(super::VOICE_GO)), ("radio_t_win", super::radio(super::VOICE_T_WIN))]);
             for (name, wav) in named.into_iter().chain(extra).chain([("hit", super::hit()), ("death", w)]) {
                 std::fs::write(std::path::Path::new(&dir).join(format!("{name}.wav")), wav).unwrap();
             }
