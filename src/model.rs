@@ -71,34 +71,74 @@ pub fn spawn_soldier(
     root: impl Bundle,
 ) -> Entity {
     let pal = palette(team);
-    let mut part = |size: Vec3, color: Color, at: Vec3| {
-        (Mesh3d(meshes.add(Cuboid::from_size(size))), MeshMaterial3d(mats.add(color)), Transform::from_translation(at))
+    let dark = Color::srgb(0.08, 0.08, 0.08);
+    let gear = Color::srgb(0.22, 0.2, 0.16);
+    // A box: size, center, and yaw (radians) so forearms can angle in towards the gun.
+    let mut spawn = |commands: &mut Commands, size: [f32; 3], at: [f32; 3], yaw: f32, color: Color| {
+        let t = Transform::from_translation(Vec3::from(at)).with_rotation(Quat::from_rotation_y(yaw));
+        commands.spawn((Mesh3d(meshes.add(Cuboid::from_size(Vec3::from(size)))), MeshMaterial3d(mats.add(color)), t)).id()
     };
-    let boots = Color::srgb(0.08, 0.08, 0.08);
-    let legs = [-0.11, 0.11].map(|x| {
-        let pants = part(Vec3::new(0.17, 0.78, 0.2), pal.pants, Vec3::new(0.0, -0.39, 0.0));
-        let boot = part(Vec3::new(0.19, 0.14, 0.28), boots, Vec3::new(0.0, -0.83, -0.04));
-        commands.spawn((Transform::from_xyz(x, 0.9, 0.0), Visibility::Inherited, children![pants, boot])).id()
+
+    // Legs swing from the hips: thigh to shin in one, knee pad, boot.
+    let legs = [-0.11f32, 0.11].map(|x| {
+        let parts = [
+            spawn(commands, [0.19, 0.84, 0.21], [0.0, -0.42, 0.0], 0.0, pal.pants),
+            spawn(commands, [0.2, 0.11, 0.06], [0.0, -0.46, -0.11], 0.0, gear),
+            spawn(commands, [0.21, 0.15, 0.3], [0.0, -0.85, -0.04], 0.0, dark),
+        ];
+        let hip = commands.spawn((Transform::from_xyz(x, 0.92, 0.0), Visibility::Inherited)).id();
+        commands.entity(hip).add_children(&parts);
+        hip
     });
-    let torso = part(Vec3::new(0.44, 0.62, 0.26), pal.shirt, Vec3::new(0.0, 1.2, 0.0));
-    let vest = part(Vec3::new(0.47, 0.4, 0.31), pal.vest, Vec3::new(0.0, 1.27, 0.0));
-    let head = part(Vec3::new(0.24, 0.26, 0.26), pal.head, Vec3::new(0.0, 1.66, 0.0));
-    // A strip of skin around the eyes for the balaclava, or a helmet for CT.
-    let top = match pal.helmet {
-        Some(c) => part(Vec3::new(0.29, 0.11, 0.31), c, Vec3::new(0.0, 1.8, 0.0)),
-        None => part(Vec3::new(0.2, 0.05, 0.02), pal.skin, Vec3::new(0.0, 1.69, -0.131)),
-    };
-    let right_arm = part(Vec3::new(0.1, 0.1, 0.42), pal.shirt, Vec3::new(0.21, -0.05, -0.18));
-    let left_arm = part(Vec3::new(0.1, 0.1, 0.5), pal.shirt, Vec3::new(-0.11, -0.05, -0.3));
-    let hand = part(Vec3::new(0.09, 0.09, 0.09), pal.skin, Vec3::new(0.0, -0.04, -0.52));
-    let arms = commands.spawn((Transform::from_xyz(0.0, 1.45, 0.0), Visibility::Inherited, children![right_arm, left_arm, hand])).id();
+
+    let mut body_parts = vec![
+        // Hips and belt.
+        spawn(commands, [0.42, 0.16, 0.24], [0.0, 0.96, 0.0], 0.0, pal.pants),
+        spawn(commands, [0.44, 0.05, 0.26], [0.0, 1.02, 0.0], 0.0, dark),
+        // Torso, broad shoulders, vest with pouches.
+        spawn(commands, [0.44, 0.48, 0.26], [0.0, 1.27, 0.0], 0.0, pal.shirt),
+        spawn(commands, [0.56, 0.13, 0.26], [0.0, 1.47, 0.0], 0.0, pal.shirt),
+        spawn(commands, [0.47, 0.36, 0.31], [0.0, 1.27, 0.0], 0.0, pal.vest),
+        spawn(commands, [0.1, 0.1, 0.05], [-0.13, 1.17, -0.17], 0.0, gear),
+        spawn(commands, [0.1, 0.1, 0.05], [0.0, 1.17, -0.17], 0.0, gear),
+        spawn(commands, [0.1, 0.1, 0.05], [0.13, 1.17, -0.17], 0.0, gear),
+        // Neck and head.
+        spawn(commands, [0.12, 0.08, 0.12], [0.0, 1.56, 0.0], 0.0, pal.skin),
+        spawn(commands, [0.24, 0.27, 0.26], [0.0, 1.7, 0.0], 0.0, pal.head),
+    ];
+    match pal.helmet {
+        // CT: helmet with a brim, goggles strap.
+        Some(c) => {
+            body_parts.push(spawn(commands, [0.29, 0.12, 0.31], [0.0, 1.85, 0.0], 0.0, c));
+            body_parts.push(spawn(commands, [0.25, 0.04, 0.02], [0.0, 1.76, -0.135], 0.0, dark));
+            body_parts.push(spawn(commands, [0.3, 0.12, 0.12], [0.0, 1.32, 0.2], 0.0, gear));
+        }
+        // T: balaclava eye slit, and a backpack.
+        None => {
+            body_parts.push(spawn(commands, [0.2, 0.05, 0.02], [0.0, 1.73, -0.131], 0.0, pal.skin));
+            body_parts.push(spawn(commands, [0.32, 0.36, 0.14], [0.0, 1.3, 0.21], 0.0, gear));
+        }
+    }
+
+    // Arms aim with the view pitch, pivoting at the chest: upper arms from the shoulders, forearms angled in to the
+    // gun, gloved hands.
+    let arm_parts = [
+        spawn(commands, [0.12, 0.12, 0.28], [0.27, -0.06, -0.1], 0.15, pal.shirt),
+        spawn(commands, [0.11, 0.11, 0.3], [0.18, -0.07, -0.36], 0.45, pal.shirt),
+        spawn(commands, [0.1, 0.1, 0.1], [0.1, -0.06, -0.5], 0.0, dark),
+        spawn(commands, [0.12, 0.12, 0.28], [-0.27, -0.06, -0.1], -0.15, pal.shirt),
+        spawn(commands, [0.11, 0.11, 0.34], [-0.15, -0.05, -0.4], -0.6, pal.shirt),
+        spawn(commands, [0.1, 0.1, 0.1], [-0.03, -0.04, -0.58], 0.0, dark),
+    ];
+    let arms = commands.spawn((Transform::from_xyz(0.0, 1.42, 0.0), Visibility::Inherited)).id();
+    commands.entity(arms).add_children(&arm_parts);
     let guns: Vec<Entity> = ALL_WEAPONS
         .iter()
         .map(|&w| {
             let at = match w {
-                Weapon::Knife => Vec3::new(0.21, -0.05, -0.42),
-                Weapon::Glock | Weapon::Usp | Weapon::Deagle => Vec3::new(0.0, 0.0, -0.5),
-                _ => Vec3::new(0.06, 0.0, -0.22),
+                Weapon::Knife => Vec3::new(0.1, -0.06, -0.55),
+                Weapon::Glock | Weapon::Usp | Weapon::Deagle => Vec3::new(0.04, 0.0, -0.58),
+                _ => Vec3::new(0.08, 0.0, -0.45),
             };
             spawn_weapon(commands, meshes, mats, w, Transform::from_translation(at), false)
         })
@@ -106,9 +146,9 @@ pub fn spawn_soldier(
     commands.entity(arms).add_children(&guns);
 
     let rig = Rig { legs, arms, guns, phase: 0.0, last_pos: None, stride: 0.0 };
-    let body = commands.spawn((root, rig, Visibility::Inherited, children![torso, vest, head, top])).id();
-    commands.entity(body).add_children(&legs).add_child(arms);
-    debug_assert!(0.47 / 2.0 < RADIUS);
+    let body = commands.spawn((root, rig, Visibility::Inherited)).id();
+    commands.entity(body).add_children(&body_parts).add_children(&legs).add_child(arms);
+    debug_assert!(0.56 / 2.0 < RADIUS);
     body
 }
 
