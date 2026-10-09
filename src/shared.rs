@@ -160,6 +160,8 @@ pub struct NetPlayer {
     pub team: Team,
     pub bot: bool,
     pub name: String,
+    /// Round trip as the client measures it, for the scoreboard. 0 for bots.
+    pub ping: u16,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -212,6 +214,8 @@ pub struct InputPacket {
     pub build: String,
     /// Player name: the logged-in user on the client's machine.
     pub name: String,
+    /// The client's measured round trip, shown on everyone's scoreboard.
+    pub ping: u16,
     /// Client clock when sent, echoed back in snapshots to measure the network round trip.
     pub time: f64,
     /// The most recent unacked inputs, oldest first. Redundant on purpose to survive packet loss.

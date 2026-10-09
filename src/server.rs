@@ -31,6 +31,7 @@ struct Client {
     /// Server-controlled player filling a team slot.
     bot: Option<Bot>,
     name: String,
+    ping: u16,
 }
 
 /// Per-player connection quality, printed every few seconds so a bad link is easy to spot.
@@ -93,7 +94,7 @@ pub fn run(port: u16) {
             let Ok((n, addr)) = sock.recv_from(&mut buf) else { continue };
             let build = postcard::take_from_bytes::<&str>(&buf[..n]).map_or("unknown", |(b, _)| b);
             let packet = (build == BUILD).then(|| decode::<InputPacket>(&buf[..n])).flatten();
-            let Some(InputPacket { time, inputs, name, .. }) = packet else {
+            let Some(InputPacket { time, inputs, name, ping, .. }) = packet else {
                 if rejected.insert(addr) {
                     println!("rejected {addr}: client is build {build}, server is build {BUILD}");
                 }
@@ -125,13 +126,14 @@ pub fn run(port: u16) {
                     stats: LinkStats::default(),
                     bot: None,
                     name,
+                    ping,
                 });
                 next_id += 1;
             }
             let c = clients.get_mut(&addr).unwrap();
             let now = Instant::now();
             c.last_heard = now;
-            c.echo = (time, now);
+            (c.echo, c.ping) = ((time, now), ping);
             let st = &mut c.stats;
             st.packets += 1;
             if let Some(last) = st.last_packet.replace(now) {
@@ -198,6 +200,7 @@ pub fn run(port: u16) {
                     team: c.team,
                     bot: c.bot.is_some(),
                     name: c.name.clone(),
+                    ping: c.ping,
                 })
                 .collect();
             let round = net_round(&game, tick);
@@ -353,6 +356,7 @@ fn balance_bots(m: &mut Match, clients: &mut HashMap<SocketAddr, Client>, next_i
                 stats: LinkStats::default(),
                 bot: Some(Bot::new(id)),
                 name: bot_name(id),
+                ping: 0,
             });
             println!("{} joined {}", bot_name(id), team.name());
         }
@@ -683,6 +687,7 @@ mod tests {
             stats: LinkStats::default(),
             bot: None,
             name: format!("test{id}"),
+            ping: 0,
         }
     }
 

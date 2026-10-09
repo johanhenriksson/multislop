@@ -130,6 +130,8 @@ struct Game {
     kill_feed: VecDeque<(String, Instant)>,
     hurt_at: Option<Instant>,
     fx: Vec<FxKind>,
+    /// Everyone as of the newest snapshot, for the scoreboard.
+    players: Vec<NetPlayer>,
     /// Distance run since the last footstep.
     stride: f32,
     steps_played: u32,
@@ -265,6 +267,13 @@ struct MoneyText;
 #[derive(Component)]
 struct NetGraphText;
 
+/// The Tab scoreboard: panel and the two team sections.
+#[derive(Component)]
+struct ScorePanel;
+
+#[derive(Component)]
+struct ScoreSection(Team);
+
 pub fn run(server: SocketAddr, lag_ms: u64, jitter_ms: u64, interp_ms: u64) {
     let sock = UdpSocket::bind("0.0.0.0:0").expect("bind");
     sock.set_nonblocking(true).unwrap();
@@ -310,7 +319,7 @@ pub fn run(server: SocketAddr, lag_ms: u64, jitter_ms: u64, interp_ms: u64) {
                 look,
                 controls,
                 (render_remotes, render_self, viewmodel, render_bomb, draw_tracers, bomb_beep, play_sounds, spawn_fx, update_fx),
-                (hud, scoreboard, ammo_hud, buy_menu_hud, kill_feed, death_fade, hurt_flash, crosshair, scope),
+                (hud, scoreboard, ammo_hud, buy_menu_hud, kill_feed, death_fade, hurt_flash, crosshair, scope, score_panel),
             )
                 .chain(),
         )
@@ -454,6 +463,17 @@ fn setup(
         Text::new(""),
         TextLayout { justify: Justify::Center, ..default() },
         Node { position_type: PositionType::Absolute, bottom: px(90), width: percent(100), justify_content: JustifyContent::Center, ..default() },
+    ));
+    let section = |team: Team, color: Color| (ScoreSection(team), Text::new(""), TextColor(color), TextFont { font_size: FontSize::Px(17.0), ..default() });
+    commands.spawn((
+        ScorePanel,
+        Visibility::Hidden,
+        Node { position_type: PositionType::Absolute, width: percent(100), height: percent(100), justify_content: JustifyContent::Center, align_items: AlignItems::Center, ..default() },
+        children![(
+            Node { flex_direction: FlexDirection::Column, row_gap: px(18), padding: UiRect::all(px(20)), border_radius: BorderRadius::all(px(6)), ..default() },
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.78)),
+            children![section(Team::T, Color::srgb(1.0, 0.45, 0.3)), section(Team::Ct, Color::srgb(0.55, 0.7, 1.0))],
+        )],
     ));
     commands.spawn((
         NetGraphText,
@@ -657,7 +677,8 @@ fn net_tick(
     if g.seq % INPUT_EVERY == 0 {
         let start = g.pending.len().saturating_sub(REDUNDANCY);
         let inputs = g.pending.iter().skip(start).copied().collect();
-        let packet = InputPacket { build: BUILD.into(), name: player_name(), time: clock(), inputs };
+        let ping = g.ping_ms.round() as u16;
+        let packet = InputPacket { build: BUILD.into(), name: player_name(), ping, time: clock(), inputs };
         net.send(encode(&packet));
     }
 }
@@ -673,6 +694,7 @@ fn on_snapshot(g: &mut Game, snap: Snapshot) {
         _ => sample,
     });
     g.me = Some(snap.you);
+    g.players = snap.players.clone();
     for p in &snap.players {
         g.teams.insert(p.id, p.team);
         if g.names.get(&p.id) != Some(&p.name) {
@@ -1522,5 +1544,42 @@ fn update_fx(
         if let Some(mut l) = light {
             l.intensity *= 1.0 - k;
         }
+    }
+}
+
+/// CS 1.6 scoreboard while Tab is held: per team, sorted by kills, with deaths and latency; dead players, bots and
+/// the bomb carrier marked.
+fn score_panel(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut panel: Single<&mut Visibility, With<ScorePanel>>,
+    mut sections: Query<(&ScoreSection, &mut Text)>,
+    g: Res<Game>,
+) {
+    let show = keys.pressed(KeyCode::Tab) || std::env::var_os("FPS16_SCOREBOARD").is_some();
+    **panel = if show { Visibility::Inherited } else { Visibility::Hidden };
+    if !show {
+        return;
+    }
+    let carrier = match g.round.map(|r| r.bomb) {
+        Some(Bomb::Carried(id)) => Some(id),
+        _ => None,
+    };
+    for (section, mut text) in &mut sections {
+        let team = section.0;
+        let score = g.round.map_or(0, |r| r.score[team as usize]);
+        let mut rows: Vec<&NetPlayer> = g.players.iter().filter(|p| p.team == team).collect();
+        rows.sort_by_key(|p| (std::cmp::Reverse(p.kills), p.deaths));
+        let mut out = format!("{:<34}{:>6}{:>7}{:>9}\n", format!("{}  -  {score}", team.name()), "Score", "Deaths", "Latency");
+        for p in rows {
+            let tag = match (p.hp <= 0, Some(p.id) == carrier) {
+                (true, _) => "Dead",
+                (_, true) => "Bomb",
+                _ => "",
+            };
+            let you = if Some(p.id) == g.me { ">" } else { " " };
+            let ping = if p.bot { "BOT".to_string() } else { p.ping.to_string() };
+            out += &format!("{you}{:<20}{tag:<13}{:>6}{:>7}{:>9}\n", p.name, p.kills, p.deaths, ping);
+        }
+        text.0 = out;
     }
 }
