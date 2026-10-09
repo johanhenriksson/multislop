@@ -243,6 +243,7 @@ pub fn run(server: SocketAddr, lag_ms: u64, jitter_ms: u64, interp_ms: u64) {
             ..default()
         })
         .add_systems(Startup, setup)
+        .add_systems(PostUpdate, debug_shot.run_if(|| std::env::var_os("FPS16_SHOT").is_some()))
         .add_systems(PreUpdate, receive)
         .add_systems(FixedUpdate, net_tick)
         .add_systems(
@@ -264,6 +265,7 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
     mut audio: ResMut<Assets<AudioSource>>,
+    mut images: ResMut<Assets<Image>>,
 ) {
     let mut sound = |wav: Vec<u8>| audio.add(AudioSource { bytes: wav.into() });
     commands.insert_resource(Sounds {
@@ -282,28 +284,38 @@ fn setup(
     let viewmodels: Vec<Entity> = ALL_WEAPONS
         .into_iter()
         .map(|w| {
-            let e = spawn_weapon(&mut commands, &mut meshes, &mut mats, w, Transform::from_translation(viewmodel_offset(w)));
+            let e = spawn_weapon(&mut commands, &mut meshes, &mut mats, w, Transform::from_translation(viewmodel_offset(w)), true);
             commands.entity(e).insert(Viewmodel(w)).id()
         })
         .collect();
-    commands
-        .spawn((Camera3d::default(), Projection::Perspective(PerspectiveProjection { fov: FOV, ..default() })))
-        .add_children(&viewmodels);
-    commands.spawn((
-        DirectionalLight { illuminance: 8000.0, shadow_maps_enabled: true, ..default() },
-        Transform::default().looking_to(Vec3::new(-0.4, -1.0, -0.3), Vec3::Y),
-    ));
-    commands.insert_resource(GlobalAmbientLight { brightness: 400.0, ..default() });
-    commands.spawn((Mesh3d(meshes.add(terrain_mesh())), MeshMaterial3d(mats.add(Color::WHITE))));
-    let crate_mat = mats.add(Color::srgb(0.55, 0.4, 0.22));
-    let wall_mat = mats.add(Color::srgb(0.82, 0.72, 0.55));
-    for &(c, h) in &MAP.boxes {
-        commands.spawn((
-            Mesh3d(meshes.add(Cuboid::from_size(h * 2.0))),
-            MeshMaterial3d(if h.y > 2.0 { wall_mat.clone() } else { crate_mat.clone() }),
-            Transform::from_translation(c),
-        ));
+    // Desert sky, hazy distance, warm hard sunlight.
+    commands.insert_resource(ClearColor(Color::srgb(0.5, 0.68, 0.9)));
+    let camera = commands
+        .spawn((
+            Camera3d::default(),
+            Projection::Perspective(PerspectiveProjection { fov: FOV, ..default() }),
+            DistanceFog {
+                color: Color::srgb(0.72, 0.76, 0.82),
+                directional_light_color: Color::srgba(1.0, 0.9, 0.7, 0.4),
+                directional_light_exponent: 30.0,
+                falloff: FogFalloff::Linear { start: 140.0, end: 700.0 },
+            },
+        ))
+        .add_children(&viewmodels)
+        .id();
+    if std::env::var_os("FPS16_SHOT").is_some() {
+        // Render off-screen so screenshots work even when the window is hidden behind others.
+        use bevy::render::render_resource::TextureFormat;
+        let target = images.add(Image::new_target_texture(1600, 900, TextureFormat::Rgba8UnormSrgb, None));
+        commands.entity(camera).insert(bevy::camera::RenderTarget::from(target.clone()));
+        commands.insert_resource(ShotTarget(target));
     }
+    commands.spawn((
+        DirectionalLight { illuminance: 16000.0, color: Color::srgb(1.0, 0.93, 0.8), shadow_maps_enabled: true, ..default() },
+        Transform::default().looking_to(Vec3::new(-0.5, -0.9, -0.35), Vec3::Y),
+    ));
+    commands.insert_resource(GlobalAmbientLight { brightness: 350.0, color: Color::srgb(0.8, 0.85, 1.0), ..default() });
+    spawn_world(&mut commands, &mut meshes, &mut mats, &mut images);
     let site_mesh = meshes.add(Plane3d::default().mesh().size(CELL, CELL));
     let site_mat = mats.add(StandardMaterial {
         base_color: Color::srgba(0.8, 0.15, 0.1, 0.3),
@@ -983,7 +995,7 @@ fn terrain_mesh() -> Mesh {
     use bevy::asset::RenderAssetUsages;
     use bevy::mesh::{Indices, PrimitiveTopology};
     let (w, d) = MAP.size();
-    let (mut pos, mut normals, mut colors, mut idx) = (vec![], vec![], vec![], vec![]);
+    let (mut pos, mut normals, mut colors, mut uvs, mut idx) = (vec![], vec![], vec![], vec![], vec![]);
     for z in 0..MAP.depth() {
         for x in 0..MAP.width() {
             let corner = |cx: usize, cz: usize| {
@@ -997,7 +1009,9 @@ fn terrain_mesh() -> Mesh {
                 let shade = 0.55 + 0.45 * (p.y / 2.0).clamp(0.0, 1.0);
                 pos.push(p.to_array());
                 normals.push(normal.to_array());
-                colors.push([0.78 * shade, 0.67 * shade, 0.48 * shade, 1.0]);
+                // The texture carries the sand color; vertex color only darkens the low tunnels.
+                colors.push([shade, shade * 0.97, shade * 0.94, 1.0]);
+                uvs.push([p.x / 4.0, p.z / 4.0]);
             }
             idx.extend([base, base + 2, base + 1, base, base + 3, base + 2]);
         }
@@ -1006,5 +1020,204 @@ fn terrain_mesh() -> Mesh {
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, pos)
         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
         .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
         .with_inserted_indices(Indices::U32(idx))
+}
+
+/// Map geometry with textures: terrain, sandstone walls with a frieze along the top, crates, doors and shutters,
+/// and mountains on the horizon.
+fn spawn_world(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    mats: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
+) {
+    use crate::textures;
+    let mut textured = |image: Image, alpha_mask: bool| {
+        mats.add(StandardMaterial {
+            base_color_texture: Some(images.add(image)),
+            perceptual_roughness: 0.95,
+            alpha_mode: if alpha_mask { AlphaMode::Mask(0.5) } else { AlphaMode::Opaque },
+            ..default()
+        })
+    };
+    let (stone, frieze, ground) = (textured(textures::sandstone(), false), textured(textures::frieze(), false), textured(textures::ground(), false));
+    let (wood, ammo, door) = (textured(textures::wood_crate(), false), textured(textures::ammo_crate(), false), textured(textures::door(), true));
+
+    commands.spawn((Mesh3d(meshes.add(terrain_mesh())), MeshMaterial3d(ground.clone())));
+    // Desert out to the mountains, just below the lowest floor so it never shows inside the map.
+    let desert = mats.add(StandardMaterial {
+        uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(300.0)),
+        ..mats.get(&ground).unwrap().clone()
+    });
+    commands.spawn((
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(1200.0, 1200.0))),
+        MeshMaterial3d(desert),
+        Transform::from_xyz(0.0, -0.5, 0.0),
+        bevy::light::NotShadowCaster,
+    ));
+    for &(c, h) in &MAP.boxes {
+        let wall = h.y > 2.0 && c.y - h.y < 0.0;
+        if wall {
+            commands.spawn((Mesh3d(meshes.add(textured_box(c, h, Vec2::splat(4.0), true))), MeshMaterial3d(stone.clone())));
+            // The carved band just under the top, standing slightly proud of the wall.
+            let top = c.y + h.y;
+            let band = Vec3::new(c.x, top - 0.75, c.z);
+            let half = Vec3::new(h.x + 0.05, 0.25, h.z + 0.05);
+            commands.spawn((Mesh3d(meshes.add(textured_box(band, half, Vec2::new(4.0, 0.5), true))), MeshMaterial3d(frieze.clone())));
+            // Cap stone ledge along the top.
+            let cap = Vec3::new(c.x, top - 0.1, c.z);
+            let half = Vec3::new(h.x + 0.12, 0.1, h.z + 0.12);
+            commands.spawn((Mesh3d(meshes.add(textured_box(cap, half, Vec2::splat(4.0), true))), MeshMaterial3d(stone.clone())));
+        } else {
+            // Crates: wooden ones and green ammo boxes, a crate per meter (stacked on the tall ones).
+            let green = (c.x * 7.3 + c.z * 3.1).sin() > 0.2;
+            let tile = Vec2::new(1.0, h.y * 2.0 / (h.y * 2.0).round().max(1.0));
+            let mat = if green { ammo.clone() } else { wood.clone() };
+            commands.spawn((Mesh3d(meshes.add(textured_box(c, h, tile, false))), MeshMaterial3d(mat)));
+        }
+    }
+
+    // Arched doors at street level and shutters higher up, sprinkled on walls that face open ground.
+    for z in 0..MAP.depth() {
+        for x in 0..MAP.width() {
+            if !MAP.is_wall(x, z) {
+                continue;
+            }
+            for (side, (dx, dz)) in [(1isize, 0isize), (-1, 0), (0, 1), (0, -1)].into_iter().enumerate() {
+                let (nx, nz) = (x.wrapping_add_signed(dx), z.wrapping_add_signed(dz));
+                if !MAP.walkable(nx, nz) {
+                    continue;
+                }
+                let roll = ((x * 73 + z * 151 + side * 37) as f32 * 12.9898).sin().fract().abs();
+                let (size, lift) = match roll {
+                    r if r < 0.04 => (Vec2::new(1.6, 2.6), 0.0),
+                    r if r < 0.09 => (Vec2::new(1.0, 1.6), 2.4),
+                    _ => continue,
+                };
+                let normal = Vec3::new(dx as f32, 0.0, dz as f32);
+                let floor = MAP.ground(nx, nz).y;
+                let at = MAP.center(x, z) + normal * (CELL / 2.0 + 0.03) + Vec3::Y * (floor + lift + size.y / 2.0);
+                let half = if dx != 0 { Vec3::new(0.03, size.y / 2.0, size.x / 2.0) } else { Vec3::new(size.x / 2.0, size.y / 2.0, 0.03) };
+                commands.spawn((Mesh3d(meshes.add(textured_box(at, half, size, false))), MeshMaterial3d(door.clone())));
+            }
+        }
+    }
+
+    // A cloud layer high overhead, outside the fog.
+    commands.spawn((
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(2400.0, 2400.0))),
+        MeshMaterial3d(mats.add(StandardMaterial {
+            base_color_texture: Some(images.add(textures::clouds())),
+            alpha_mode: AlphaMode::Blend,
+            unlit: true,
+            fog_enabled: false,
+            cull_mode: None,
+            uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(4.0)),
+            ..default()
+        })),
+        Transform::from_xyz(0.0, 220.0, 0.0),
+        bevy::light::NotShadowCaster,
+    ));
+    // Two rings of mountains: brown ones nearer, bluish ones behind, softened by the fog.
+    // Vertex colors are linear: these are roughly sRGB (0.55, 0.45, 0.36) and (0.6, 0.6, 0.66).
+    for (radius, low, high, color, seed) in [(230.0, 25.0, 70.0, [0.24, 0.15, 0.09], 1.0), (340.0, 50.0, 130.0, [0.3, 0.27, 0.27], 4.0)] {
+        commands.spawn((
+            Mesh3d(meshes.add(mountain_ring(radius, low, high, color, seed))),
+            MeshMaterial3d(mats.add(StandardMaterial { unlit: true, fog_enabled: false, cull_mode: None, double_sided: true, ..default() })),
+            bevy::light::NotShadowCaster,
+        ));
+    }
+}
+
+/// A box whose UVs are in meters divided by `tile`: anchored to the world (so neighboring walls line up) or to the
+/// box itself (so a crate face shows whole crates).
+fn textured_box(center: Vec3, half: Vec3, tile: Vec2, world: bool) -> Mesh {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::mesh::{Indices, PrimitiveTopology};
+    // (normal, u axis, v axis) with u x v = normal, so corners in order are counter-clockwise from outside.
+    let faces = [(Vec3::X, Vec3::NEG_Z, Vec3::Y), (Vec3::NEG_X, Vec3::Z, Vec3::Y), (Vec3::Z, Vec3::X, Vec3::Y), (Vec3::NEG_Z, Vec3::NEG_X, Vec3::Y), (Vec3::Y, Vec3::Z, Vec3::X), (Vec3::NEG_Y, Vec3::X, Vec3::Z)];
+    let (mut pos, mut normals, mut uvs, mut idx) = (vec![], vec![], vec![], vec![]);
+    for (n, u, v) in faces {
+        let base = pos.len() as u32;
+        for (su, sv) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+            let local = n * n.dot(half).abs() + u * su * u.dot(half).abs() + v * sv * v.dot(half).abs();
+            let p = center + local;
+            let anchor = if world { p } else { local + half };
+            // Image rows run downwards, world up is +Y, hence the minus on v.
+            let flip = if v == Vec3::Y { -1.0 } else { 1.0 };
+            let (cu, cv) = if world { (anchor.dot(u), flip * anchor.dot(v)) } else { ((su + 1.0) * u.dot(half).abs(), (1.0 - sv) * v.dot(half).abs()) };
+            pos.push(p.to_array());
+            normals.push(n.to_array());
+            uvs.push([cu / tile.x, cv / tile.y]);
+        }
+        idx.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, pos)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+        .with_inserted_indices(Indices::U32(idx))
+}
+
+/// A jagged ring of peaks around the map, facing inwards.
+fn mountain_ring(radius: f32, low: f32, high: f32, color: [f32; 3], seed: f32) -> Mesh {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::mesh::{Indices, PrimitiveTopology};
+    const SEGMENTS: usize = 160;
+    let (mut pos, mut colors, mut idx) = (vec![], vec![], vec![]);
+    for i in 0..=SEGMENTS {
+        let a = i as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
+        let ridge = ((a * 3.0 + seed).sin() * 0.5 + (a * 7.0 + seed * 2.0).sin() * 0.3 + (a * 17.0 + seed).sin() * 0.2) * 0.5 + 0.5;
+        let peak = low + (high - low) * ridge.powf(1.5);
+        let dir = Vec3::new(a.cos(), 0.0, a.sin());
+        pos.push((dir * radius + Vec3::Y * -10.0).to_array());
+        pos.push((dir * (radius + peak * 0.6) + Vec3::Y * peak).to_array());
+        // Rocky: faces alternate lit and shaded, darker at the foot.
+        let rock = 0.8 + 0.35 * ((a * 41.0 + seed).sin() * 0.5 + 0.5);
+        colors.push([color[0] * 0.6, color[1] * 0.6, color[2] * 0.6, 1.0]);
+        colors.push([color[0] * rock, color[1] * rock, color[2] * rock, 1.0]);
+    }
+    for i in 0..SEGMENTS as u32 {
+        let (b, t, nb, nt) = (i * 2, i * 2 + 1, i * 2 + 2, i * 2 + 3);
+        idx.extend([b, t, nb, t, nt, nb]);
+    }
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, pos)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
+        .with_inserted_indices(Indices::U32(idx));
+    mesh.compute_smooth_normals();
+    mesh
+}
+
+/// For checking visuals without a person at the screen: `FPS16_SHOT=out.png` saves one screenshot after a few
+/// seconds and quits; `FPS16_POSE="x,y,z,yaw,pitch"` places the camera (degrees).
+#[derive(Resource)]
+struct ShotTarget(Handle<Image>);
+
+fn debug_shot(
+    mut commands: Commands,
+    target: Res<ShotTarget>,
+    mut cam: Single<&mut Transform, With<Camera3d>>,
+    time: Res<Time>,
+    mut taken: Local<Option<f32>>,
+) {
+    use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
+    if let Ok(pose) = std::env::var("FPS16_POSE") {
+        let v: Vec<f32> = pose.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+        if let [x, y, z, yaw, pitch] = v[..] {
+            cam.translation = Vec3::new(x, y, z);
+            cam.rotation = look_rot(yaw.to_radians(), pitch.to_radians());
+        }
+    }
+    let now = time.elapsed_secs();
+    match *taken {
+        None if now > 4.0 => {
+            let path = std::env::var("FPS16_SHOT").unwrap_or_default();
+            commands.spawn(Screenshot::image(target.0.clone())).observe(save_to_disk(path));
+            *taken = Some(now);
+        }
+        Some(at) if now > at + 1.5 => std::process::exit(0),
+        _ => {}
+    }
 }

@@ -56,6 +56,14 @@ Deadline: playable before 00:00. One weapon, one simple map.
 - Dead players fade to black, then watch a living teammate until the next round. Joining mid-round means waiting.
 - HUD: score, timer, round/bomb messages, plant/defuse progress. Bomb beeps speed up; explosion sound and flash.
 
+## Look (`src/textures.rs`, all generated at startup)
+- Sandstone block walls (world-mapped so courses line up) with a carved frieze band and a cap ledge; arched wooden
+  doors and shutters on walls facing open ground; sand-over-flagstone floor on a terrain mesh (darker in tunnels);
+  wooden X-braced and green ammo crates; clouds, two rings of mountains, desert beyond the map, distance haze,
+  warm hard sun. First-person weapons are held by gloved hands.
+- `FPS16_SHOT=out.png [FPS16_POSE="x,y,z,yaw,pitch"]` renders off-screen, saves a screenshot and quits, for checking
+  visuals without a person at the screen.
+
 ## Netcode (server authoritative, Valve-style)
 - Plain UDP, postcard-serialized messages. Fixed tick 128 Hz on both sides; snapshots sent at 32 Hz, input packets at 64 Hz
   (CS 1.6 era rates: fewer packets suit Wi-Fi).

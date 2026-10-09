@@ -4,6 +4,7 @@ mod map;
 mod model;
 mod server;
 mod sfx;
+mod textures;
 mod shared;
 mod weapons;
 

@@ -127,7 +127,7 @@ pub static MAP: LazyLock<Map> = LazyLock::new(|| Map::parse(DUST2, DUST2_HEIGHTS
 
 /// Walls go from below the lowest floor to well above the highest one.
 const WALL_BOTTOM: f32 = -1.0;
-const WALL_TOP: f32 = 9.0;
+const WALL_TOP: f32 = 6.5;
 
 pub struct Map {
     rows: Vec<Vec<u8>>,
@@ -259,6 +259,10 @@ impl Map {
         let x = ((pos.x + w / 2.0) / CELL).clamp(0.0, self.width() as f32 - 1.0);
         let z = ((pos.z + d / 2.0) / CELL).clamp(0.0, self.rows.len() as f32 - 1.0);
         (x as usize, z as usize)
+    }
+
+    pub fn is_wall(&self, x: usize, z: usize) -> bool {
+        self.rows.get(z).and_then(|r| r.get(x)) == Some(&b'#')
     }
 
     pub fn walkable(&self, x: usize, z: usize) -> bool {

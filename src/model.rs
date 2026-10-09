@@ -98,7 +98,7 @@ pub fn spawn_soldier(
                 Weapon::Glock | Weapon::Usp | Weapon::Deagle => Vec3::new(0.0, 0.0, -0.5),
                 _ => Vec3::new(0.06, 0.0, -0.22),
             };
-            spawn_weapon(commands, meshes, mats, w, Transform::from_translation(at))
+            spawn_weapon(commands, meshes, mats, w, Transform::from_translation(at), false)
         })
         .collect();
     commands.entity(arms).add_children(&guns);
@@ -118,6 +118,8 @@ enum Finish {
     Green,
     Silver,
     Steel,
+    Glove,
+    Sleeve,
 }
 
 /// A block (size, center, tilt about X) or a cylinder along Z (radius, length, center).
@@ -228,6 +230,34 @@ fn parts(weapon: Weapon) -> Vec<(Shape, Finish)> {
     }
 }
 
+/// Gloved hands and forearms for the first-person view: the shooting hand on the grip, plus a support hand under
+/// the barrel for two-handed weapons. Forearms run back towards the bottom corners of the screen.
+fn hands(weapon: Weapon) -> Vec<(Shape, Finish)> {
+    let grip = match weapon {
+        Weapon::Knife => [0.0, 0.0, 0.03],
+        Weapon::Glock | Weapon::Usp | Weapon::Deagle => [0.0, -0.05, 0.03],
+        _ => [0.0, -0.075, 0.075],
+    };
+    let mut parts = vec![
+        b([0.06, 0.07, 0.09], grip, 0.3, Glove),
+        b([0.06, 0.06, 0.3], [grip[0] + 0.03, grip[1] - 0.08, grip[2] + 0.18], 0.45, Sleeve),
+    ];
+    let support = match weapon {
+        Weapon::Ak47 => Some(-0.27),
+        Weapon::M4a1 => Some(-0.22),
+        Weapon::Mp5 => Some(-0.21),
+        Weapon::Awp => Some(-0.3),
+        Weapon::Glock | Weapon::Usp | Weapon::Deagle => Some(0.0),
+        Weapon::Knife => None,
+    };
+    if let Some(z) = support {
+        let y = if z == 0.0 { -0.06 } else { -0.05 };
+        parts.push(b([0.06, 0.06, 0.1], [-0.02, y, z + 0.01], -0.2, Glove));
+        parts.push(b([0.06, 0.06, 0.36], [-0.11, y - 0.09, z + 0.2], 0.4, Sleeve));
+    }
+    parts
+}
+
 /// Where the barrel tip is, in meters ahead of the weapon origin.
 pub fn barrel_length(weapon: Weapon) -> f32 {
     match weapon {
@@ -252,16 +282,22 @@ pub fn viewmodel_offset(weapon: Weapon) -> Vec3 {
     }
 }
 
+/// A weapon model; first person also gets gloved hands holding it.
 pub fn spawn_weapon(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     mats: &mut Assets<StandardMaterial>,
     weapon: Weapon,
     at: Transform,
+    first_person: bool,
 ) -> Entity {
     let along_z = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
     let root = commands.spawn((at, Visibility::Hidden)).id();
-    for (shape, finish) in parts(weapon) {
+    let mut shapes = parts(weapon);
+    if first_person {
+        shapes.extend(hands(weapon));
+    }
+    for (shape, finish) in shapes {
         let material = mats.add(match finish {
             Black => StandardMaterial { base_color: Color::srgb(0.07, 0.07, 0.08), perceptual_roughness: 0.5, ..default() },
             Polymer => StandardMaterial { base_color: Color::srgb(0.14, 0.14, 0.14), perceptual_roughness: 0.8, ..default() },
@@ -269,6 +305,8 @@ pub fn spawn_weapon(
             Green => StandardMaterial { base_color: Color::srgb(0.2, 0.27, 0.17), perceptual_roughness: 0.7, ..default() },
             Silver => StandardMaterial { base_color: Color::srgb(0.72, 0.72, 0.74), metallic: 0.8, perceptual_roughness: 0.35, ..default() },
             Steel => StandardMaterial { base_color: Color::srgb(0.78, 0.8, 0.83), metallic: 0.9, perceptual_roughness: 0.25, ..default() },
+            Glove => StandardMaterial { base_color: Color::srgb(0.09, 0.09, 0.08), perceptual_roughness: 0.9, ..default() },
+            Sleeve => StandardMaterial { base_color: Color::srgb(0.2, 0.22, 0.16), perceptual_roughness: 0.95, ..default() },
         });
         let (mesh, transform) = match shape {
             Block(size, pos, tilt) => (Mesh::from(Cuboid::from_size(size)), Transform::from_translation(pos).with_rotation(Quat::from_rotation_x(tilt))),
