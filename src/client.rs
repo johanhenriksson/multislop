@@ -173,6 +173,10 @@ struct KillFeed;
 #[derive(Component)]
 struct HurtFlash;
 
+/// Sniper scope overlay shown while zoomed with the AWP.
+#[derive(Component)]
+struct Scope;
+
 #[derive(Component)]
 struct Scoreboard;
 
@@ -248,7 +252,7 @@ pub fn run(server: SocketAddr, lag_ms: u64, jitter_ms: u64, interp_ms: u64) {
                 look,
                 controls,
                 (render_remotes, render_self, viewmodel, render_bomb, draw_tracers, bomb_beep, play_sounds),
-                (hud, scoreboard, ammo_hud, buy_menu_hud, kill_feed, death_fade, hurt_flash, crosshair),
+                (hud, scoreboard, ammo_hud, buy_menu_hud, kill_feed, death_fade, hurt_flash, crosshair, scope),
             )
                 .chain(),
         )
@@ -346,6 +350,31 @@ fn setup(
         Hud,
         Text::new(""),
         Node { position_type: PositionType::Absolute, left: px(12), bottom: px(12), ..default() },
+    ));
+    // Scope: a round lens whose huge black outline blacks out the rest of the screen, with thin crosshair lines
+    // through it, like CS 1.6's AWP scope.
+    let hair = |horizontal: bool| {
+        let (width, height) = if horizontal { (percent(100), px(2)) } else { (px(2), percent(100)) };
+        let (left, top) = if horizontal { (percent(0), percent(50)) } else { (percent(50), percent(0)) };
+        let margin = if horizontal { UiRect::top(px(-1)) } else { UiRect::left(px(-1)) };
+        (Node { position_type: PositionType::Absolute, left, top, width, height, margin, ..default() }, BackgroundColor(Color::BLACK))
+    };
+    commands.spawn((
+        Scope,
+        Visibility::Hidden,
+        Node {
+            position_type: PositionType::Absolute,
+            width: percent(100),
+            height: percent(100),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            ..default()
+        },
+        children![(
+            Node { width: vh(96), height: vh(96), border_radius: BorderRadius::MAX, ..default() },
+            Outline::new(px(4000), Val::ZERO, Color::BLACK),
+            children![hair(true), hair(false)],
+        )],
     ));
     commands.spawn((
         HurtFlash,
@@ -945,4 +974,8 @@ fn clock() -> f64 {
 /// Estimated current server tick (fractional), as of the latest snapshot's arrival.
 fn server_tick(g: &Game) -> f64 {
     g.tick_offset.map_or(0.0, |o| clock() * TICK_HZ + o)
+}
+
+fn scope(mut vis: Single<&mut Visibility, With<Scope>>, g: Res<Game>) {
+    **vis = if g.zoom && g.hp > 0 { Visibility::Inherited } else { Visibility::Hidden };
 }
