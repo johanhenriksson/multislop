@@ -15,6 +15,8 @@ const AIM_TURN_SPEED: f32 = 3.5;
 const AIM_ERROR: f32 = 0.05;
 const AIM_SETTLE: f32 = 0.995;
 const SIGHT_RANGE: f32 = 60.0;
+/// Half of the field of view in which bots notice enemies, in radians (60° each side).
+const VIEW_HALF_ANGLE: f32 = 1.05;
 
 /// What a bot knows about another player.
 pub struct Seen {
@@ -98,7 +100,9 @@ impl Bot {
         let eye = eye(me);
         let enemy = players
             .iter()
+            // A new enemy has to be in view; one we're already fighting is tracked while we turn.
             .filter(|p| p.alive && p.team != team && can_see(eye, p.pos))
+            .filter(|p| in_view(me, p.pos) || self.target.is_some_and(|(t, _)| t == p.id))
             .min_by(|a, b| a.pos.distance(me.pos).total_cmp(&b.pos.distance(me.pos)));
         match (enemy, self.target) {
             (Some(e), Some((t, _))) if e.id == t => {}
@@ -193,6 +197,12 @@ fn path_dir(field: &mut Vec<u16>, field_goal: &mut (usize, usize), pos: Vec3, go
         _ => goal,
     };
     (target - pos).with_y(0.0).normalize_or_zero()
+}
+
+/// Whether a position is inside this player's field of view (ignores walls).
+pub fn in_view(viewer: &PlayerState, feet: Vec3) -> bool {
+    let to = (feet + Vec3::Y * 1.2 - eye(viewer)).normalize_or_zero();
+    aim_dir(viewer).dot(to) > VIEW_HALF_ANGLE.cos()
 }
 
 /// Line of sight from an eye to a player's chest, within sight range.

@@ -1,4 +1,4 @@
-use crate::bot::{Bot, Seen, can_see};
+use crate::bot::{Bot, Seen, can_see, in_view};
 use crate::map::MAP;
 use crate::shared::*;
 use bevy::math::Vec3;
@@ -207,9 +207,9 @@ fn run_inputs(game: &Match, clients: &mut HashMap<SocketAddr, Client>, history: 
         clients.values().map(|c| Seen { id: c.id, team: c.team, pos: c.state.pos, alive: c.hp > 0 }).collect();
     // An enemy any living teammate (bot or human) can see right now, so bots can rotate to help.
     let callout = |team: Team| {
-        let spotters = clients.values().filter(|c| c.team == team && c.hp > 0);
-        let spotted = |eye: Vec3| seen.iter().find(|p| p.alive && p.team != team && can_see(eye, p.pos)).map(|p| p.pos);
-        spotters.map(|c| eye(&c.state)).find_map(spotted)
+        let mut spotters = clients.values().filter(|c| c.team == team && c.hp > 0);
+        let enemies = || seen.iter().filter(|p| p.alive && p.team != team);
+        spotters.find_map(|c| enemies().find(|p| in_view(&c.state, p.pos) && can_see(eye(&c.state), p.pos)).map(|p| p.pos))
     };
     let callouts = [callout(Team::T), callout(Team::Ct)];
     for c in clients.values_mut() {
