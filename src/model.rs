@@ -2,7 +2,7 @@
 //! Everything fits inside the hit capsule (radius 0.4, height 1.8). Models face -Z with the origin at the feet.
 
 use crate::shared::{RADIUS, Team};
-use crate::weapons::{Slot, Weapon};
+use crate::weapons::{ALL_WEAPONS, Weapon};
 use bevy::prelude::*;
 
 /// Moving parts of a player model: legs swing with speed, arms and rifle follow the aim pitch.
@@ -10,8 +10,8 @@ use bevy::prelude::*;
 pub struct Rig {
     pub legs: [Entity; 2],
     pub arms: Entity,
-    /// Rifle, pistol and knife models; the held one is shown.
-    pub guns: [Entity; 3],
+    /// One model per weapon, indexed by `Weapon as usize`; the held one is shown.
+    pub guns: Vec<Entity>,
     /// Walk cycle phase in radians, advanced by distance moved.
     pub phase: f32,
     pub last_pos: Option<Vec3>,
@@ -90,103 +90,192 @@ pub fn spawn_soldier(
     let left_arm = part(Vec3::new(0.1, 0.1, 0.5), pal.shirt, Vec3::new(-0.11, -0.05, -0.3));
     let hand = part(Vec3::new(0.09, 0.09, 0.09), pal.skin, Vec3::new(0.0, -0.04, -0.52));
     let arms = commands.spawn((Transform::from_xyz(0.0, 1.45, 0.0), Visibility::Inherited, children![right_arm, left_arm, hand])).id();
-    let rifle = spawn_rifle(commands, meshes, mats, Transform::from_xyz(0.06, 0.0, -0.3));
-    let pistol = spawn_pistol(commands, meshes, mats, Transform::from_xyz(0.0, 0.0, -0.5));
-    let knife = spawn_knife(commands, meshes, mats, Transform::from_xyz(0.21, -0.05, -0.42));
-    commands.entity(arms).add_children(&[rifle, pistol, knife]);
+    let guns: Vec<Entity> = ALL_WEAPONS
+        .iter()
+        .map(|&w| {
+            let at = match w {
+                Weapon::Knife => Vec3::new(0.21, -0.05, -0.42),
+                Weapon::Glock | Weapon::Usp | Weapon::Deagle => Vec3::new(0.0, 0.0, -0.5),
+                _ => Vec3::new(0.06, 0.0, -0.22),
+            };
+            spawn_weapon(commands, meshes, mats, w, Transform::from_translation(at))
+        })
+        .collect();
+    commands.entity(arms).add_children(&guns);
 
-    let rig = Rig { legs, arms, guns: [rifle, pistol, knife], phase: 0.0, last_pos: None };
+    let rig = Rig { legs, arms, guns, phase: 0.0, last_pos: None };
     let body = commands.spawn((root, rig, Visibility::Inherited, children![torso, vest, head, top])).id();
     commands.entity(body).add_children(&legs).add_child(arms);
     debug_assert!(0.47 / 2.0 < RADIUS);
     body
 }
 
-/// An AK-ish rifle with its grip at the origin, pointing -Z. The barrel tip is 0.55 m ahead of the origin.
-pub fn spawn_rifle(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    mats: &mut Assets<StandardMaterial>,
-    at: Transform,
-) -> Entity {
-    let metal = mats.add(Color::srgb(0.1, 0.1, 0.11));
-    let wood = mats.add(Color::srgb(0.42, 0.25, 0.12));
-    let mut part = |mesh: Mesh, mat: &Handle<StandardMaterial>, t: Transform| {
-        (Mesh3d(meshes.add(mesh)), MeshMaterial3d(mat.clone()), t)
-    };
-    let along_z = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
-    commands
-        .spawn((
-            at,
-            Visibility::Inherited,
-            children![
-                part(Cuboid::new(0.06, 0.1, 0.4).into(), &metal, Transform::default()),
-                part(Cylinder::new(0.016, 0.34).into(), &metal, Transform::from_xyz(0.0, 0.02, -0.38).with_rotation(along_z)),
-                part(Cuboid::new(0.07, 0.075, 0.2).into(), &wood, Transform::from_xyz(0.0, 0.0, -0.27)),
-                part(Cuboid::new(0.045, 0.17, 0.08).into(), &metal, Transform::from_xyz(0.0, -0.12, -0.08).with_rotation(Quat::from_rotation_x(-0.25))),
-                part(Cuboid::new(0.05, 0.09, 0.24).into(), &wood, Transform::from_xyz(0.0, -0.03, 0.31)),
-                part(Cuboid::new(0.04, 0.1, 0.05).into(), &wood, Transform::from_xyz(0.0, -0.09, 0.12)),
-            ],
-        ))
-        .id()
+#[derive(Clone, Copy)]
+enum Finish {
+    Black,
+    Polymer,
+    Wood,
+    Green,
+    Silver,
+    Steel,
 }
 
-/// A compact pistol with its grip at the origin, pointing -Z.
-pub fn spawn_pistol(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    mats: &mut Assets<StandardMaterial>,
-    at: Transform,
-) -> Entity {
-    let metal = mats.add(Color::srgb(0.12, 0.12, 0.13));
-    let grip = mats.add(Color::srgb(0.2, 0.2, 0.2));
-    let mut part = |size: Vec3, mat: &Handle<StandardMaterial>, t: Transform| {
-        (Mesh3d(meshes.add(Cuboid::from_size(size))), MeshMaterial3d(mat.clone()), t)
-    };
-    commands
-        .spawn((
-            at,
-            Visibility::Hidden,
-            children![
-                part(Vec3::new(0.035, 0.045, 0.2), &metal, Transform::from_xyz(0.0, 0.03, -0.06)),
-                part(Vec3::new(0.03, 0.1, 0.045), &grip, Transform::from_xyz(0.0, -0.03, 0.02).with_rotation(Quat::from_rotation_x(0.25))),
-            ],
-        ))
-        .id()
+/// A block (size, center, tilt about X) or a cylinder along Z (radius, length, center).
+enum Shape {
+    Block(Vec3, Vec3, f32),
+    Tube(f32, f32, Vec3),
 }
 
-/// A knife held blade forward.
-pub fn spawn_knife(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    mats: &mut Assets<StandardMaterial>,
-    at: Transform,
-) -> Entity {
-    let steel = mats.add(StandardMaterial { base_color: Color::srgb(0.75, 0.77, 0.8), metallic: 0.9, perceptual_roughness: 0.3, ..default() });
-    let handle = mats.add(Color::srgb(0.08, 0.08, 0.08));
-    let mut part = |size: Vec3, mat: &Handle<StandardMaterial>, t: Transform| {
-        (Mesh3d(meshes.add(Cuboid::from_size(size))), MeshMaterial3d(mat.clone()), t)
-    };
-    commands
-        .spawn((
-            at,
-            Visibility::Hidden,
-            children![
-                part(Vec3::new(0.012, 0.035, 0.2), &steel, Transform::from_xyz(0.0, 0.0, -0.13)),
-                part(Vec3::new(0.025, 0.035, 0.1), &handle, Transform::default()),
-            ],
-        ))
-        .id()
+use Finish::*;
+use Shape::*;
+
+fn b(size: [f32; 3], at: [f32; 3], tilt: f32, f: Finish) -> (Shape, Finish) {
+    (Block(Vec3::from(size), Vec3::from(at), tilt), f)
 }
 
-/// Which of the rifle/pistol/knife models to show for a weapon, and how to stretch the rifle model so the MP5 reads
-/// short and the AWP long.
-pub fn gun_model(weapon: Weapon) -> (usize, Vec3) {
-    match (weapon.spec().slot, weapon) {
-        (Slot::Knife, _) => (2, Vec3::ONE),
-        (Slot::Secondary, _) => (1, Vec3::ONE),
-        (_, Weapon::Mp5) => (0, Vec3::new(1.0, 1.0, 0.75)),
-        (_, Weapon::Awp) => (0, Vec3::new(1.1, 1.1, 1.4)),
-        _ => (0, Vec3::ONE),
+fn t(radius: f32, len: f32, at: [f32; 3], f: Finish) -> (Shape, Finish) {
+    (Tube(radius, len, Vec3::from(at)), f)
+}
+
+/// Parts per weapon, in meters, grip at the origin and the barrel along -Z.
+fn parts(weapon: Weapon) -> Vec<(Shape, Finish)> {
+    match weapon {
+        Weapon::Knife => vec![
+            b([0.012, 0.035, 0.17], [0.0, 0.0, -0.12], 0.0, Steel),
+            b([0.012, 0.022, 0.05], [0.0, 0.006, -0.225], 0.0, Steel),
+            b([0.05, 0.012, 0.015], [0.0, 0.0, -0.04], 0.0, Black),
+            b([0.025, 0.035, 0.1], [0.0, 0.0, 0.02], 0.0, Black),
+        ],
+        Weapon::Glock => vec![
+            b([0.03, 0.035, 0.19], [0.0, 0.03, -0.05], 0.0, Black),
+            b([0.028, 0.02, 0.17], [0.0, 0.005, -0.05], 0.0, Polymer),
+            b([0.03, 0.11, 0.05], [0.0, -0.05, 0.02], 0.3, Polymer),
+            b([0.008, 0.025, 0.045], [0.0, -0.015, -0.03], 0.0, Polymer),
+        ],
+        Weapon::Usp => vec![
+            b([0.032, 0.038, 0.2], [0.0, 0.03, -0.06], 0.0, Black),
+            b([0.03, 0.025, 0.18], [0.0, 0.003, -0.06], 0.0, Polymer),
+            b([0.032, 0.11, 0.05], [0.0, -0.05, 0.02], 0.25, Polymer),
+            b([0.008, 0.025, 0.045], [0.0, -0.015, -0.04], 0.0, Polymer),
+            t(0.017, 0.15, [0.0, 0.03, -0.235], Black),
+        ],
+        Weapon::Deagle => vec![
+            b([0.036, 0.05, 0.27], [0.0, 0.035, -0.09], 0.0, Silver),
+            b([0.014, 0.012, 0.26], [0.0, 0.066, -0.09], 0.0, Silver),
+            b([0.034, 0.03, 0.2], [0.0, 0.0, -0.05], 0.0, Black),
+            b([0.036, 0.125, 0.056], [0.0, -0.065, 0.03], 0.25, Black),
+            b([0.01, 0.03, 0.05], [0.0, -0.02, -0.04], 0.0, Black),
+        ],
+        Weapon::Mp5 => vec![
+            b([0.045, 0.065, 0.28], [0.0, 0.0, -0.04], 0.0, Black),
+            b([0.056, 0.06, 0.12], [0.0, -0.01, -0.22], 0.0, Polymer),
+            t(0.012, 0.07, [0.0, 0.01, -0.31], Black),
+            b([0.025, 0.15, 0.04], [0.0, -0.1, -0.11], -0.35, Black),
+            b([0.03, 0.09, 0.045], [0.0, -0.08, 0.06], 0.3, Polymer),
+            t(0.016, 0.03, [0.0, 0.05, 0.06], Black),
+            b([0.02, 0.035, 0.02], [0.0, 0.045, -0.25], 0.0, Black),
+            b([0.008, 0.008, 0.2], [0.022, 0.0, 0.2], 0.0, Steel),
+            b([0.008, 0.008, 0.2], [-0.022, 0.0, 0.2], 0.0, Steel),
+            b([0.06, 0.085, 0.015], [0.0, -0.01, 0.3], 0.0, Black),
+        ],
+        Weapon::Ak47 => vec![
+            b([0.05, 0.08, 0.32], [0.0, 0.0, -0.02], 0.0, Black),
+            b([0.045, 0.02, 0.3], [0.0, 0.05, -0.02], 0.0, Black),
+            t(0.012, 0.42, [0.0, 0.015, -0.36], Black),
+            t(0.01, 0.22, [0.0, 0.048, -0.28], Black),
+            b([0.06, 0.055, 0.2], [0.0, 0.0, -0.27], 0.0, Wood),
+            b([0.046, 0.026, 0.15], [0.0, 0.048, -0.27], 0.0, Wood),
+            b([0.012, 0.05, 0.015], [0.0, 0.045, -0.52], 0.0, Black),
+            t(0.017, 0.045, [0.0, 0.015, -0.585], Black),
+            b([0.035, 0.11, 0.07], [0.0, -0.09, -0.1], -0.2, Black),
+            b([0.035, 0.1, 0.065], [0.0, -0.175, -0.06], -0.6, Black),
+            b([0.035, 0.1, 0.045], [0.0, -0.075, 0.07], 0.3, Wood),
+            b([0.045, 0.075, 0.26], [0.0, -0.035, 0.26], 0.12, Wood),
+            b([0.046, 0.13, 0.03], [0.0, -0.06, 0.39], 0.0, Wood),
+        ],
+        Weapon::M4a1 => vec![
+            b([0.05, 0.07, 0.28], [0.0, 0.0, 0.0], 0.0, Black),
+            b([0.045, 0.05, 0.18], [0.0, -0.05, 0.02], 0.0, Black),
+            b([0.02, 0.03, 0.17], [0.0, 0.075, 0.0], 0.0, Black),
+            b([0.02, 0.03, 0.02], [0.0, 0.05, -0.07], 0.0, Black),
+            b([0.02, 0.03, 0.02], [0.0, 0.05, 0.07], 0.0, Black),
+            t(0.028, 0.2, [0.0, 0.0, -0.24], Polymer),
+            b([0.015, 0.07, 0.02], [0.0, 0.045, -0.35], 0.0, Black),
+            t(0.01, 0.08, [0.0, 0.0, -0.38], Black),
+            t(0.021, 0.22, [0.0, 0.0, -0.52], Black),
+            b([0.03, 0.13, 0.06], [0.0, -0.12, -0.05], -0.12, Black),
+            b([0.03, 0.09, 0.04], [0.0, -0.09, 0.09], 0.35, Polymer),
+            t(0.016, 0.14, [0.0, 0.0, 0.2], Black),
+            b([0.04, 0.085, 0.13], [0.0, -0.02, 0.31], 0.0, Polymer),
+        ],
+        Weapon::Awp => vec![
+            b([0.06, 0.09, 0.5], [0.0, -0.015, 0.06], 0.0, Green),
+            b([0.05, 0.035, 0.18], [0.0, 0.04, 0.14], 0.0, Green),
+            b([0.062, 0.15, 0.045], [0.0, -0.04, 0.33], 0.0, Green),
+            b([0.045, 0.06, 0.24], [0.0, 0.035, -0.08], 0.0, Black),
+            t(0.014, 0.6, [0.0, 0.035, -0.5], Black),
+            t(0.023, 0.07, [0.0, 0.035, -0.82], Black),
+            t(0.022, 0.32, [0.0, 0.115, -0.08], Black),
+            t(0.034, 0.08, [0.0, 0.115, -0.27], Black),
+            t(0.029, 0.06, [0.0, 0.115, 0.1], Black),
+            b([0.016, 0.045, 0.022], [0.0, 0.075, -0.16], 0.0, Black),
+            b([0.016, 0.045, 0.022], [0.0, 0.075, 0.0], 0.0, Black),
+            b([0.07, 0.013, 0.013], [0.045, 0.035, 0.03], 0.0, Steel),
+            b([0.025, 0.025, 0.025], [0.08, 0.035, 0.03], 0.0, Steel),
+            b([0.04, 0.07, 0.08], [0.0, -0.08, -0.05], 0.0, Black),
+            b([0.012, 0.03, 0.05], [0.0, -0.075, 0.03], 0.0, Black),
+        ],
     }
+}
+
+/// Where the barrel tip is, in meters ahead of the weapon origin.
+pub fn barrel_length(weapon: Weapon) -> f32 {
+    match weapon {
+        Weapon::Knife => 0.25,
+        Weapon::Glock => 0.15,
+        Weapon::Usp => 0.31,
+        Weapon::Deagle => 0.23,
+        Weapon::Mp5 => 0.35,
+        Weapon::Ak47 => 0.61,
+        Weapon::M4a1 => 0.63,
+        Weapon::Awp => 0.86,
+    }
+}
+
+/// First-person position of each weapon's origin, relative to the camera.
+pub fn viewmodel_offset(weapon: Weapon) -> Vec3 {
+    match weapon {
+        Weapon::Knife => Vec3::new(0.22, -0.22, -0.34),
+        Weapon::Glock | Weapon::Usp | Weapon::Deagle => Vec3::new(0.19, -0.19, -0.4),
+        Weapon::Awp => Vec3::new(0.21, -0.21, -0.12),
+        _ => Vec3::new(0.23, -0.21, -0.26),
+    }
+}
+
+pub fn spawn_weapon(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    mats: &mut Assets<StandardMaterial>,
+    weapon: Weapon,
+    at: Transform,
+) -> Entity {
+    let along_z = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+    let root = commands.spawn((at, Visibility::Hidden)).id();
+    for (shape, finish) in parts(weapon) {
+        let material = mats.add(match finish {
+            Black => StandardMaterial { base_color: Color::srgb(0.07, 0.07, 0.08), perceptual_roughness: 0.5, ..default() },
+            Polymer => StandardMaterial { base_color: Color::srgb(0.14, 0.14, 0.14), perceptual_roughness: 0.8, ..default() },
+            Wood => StandardMaterial { base_color: Color::srgb(0.45, 0.24, 0.1), perceptual_roughness: 0.6, ..default() },
+            Green => StandardMaterial { base_color: Color::srgb(0.2, 0.27, 0.17), perceptual_roughness: 0.7, ..default() },
+            Silver => StandardMaterial { base_color: Color::srgb(0.72, 0.72, 0.74), metallic: 0.8, perceptual_roughness: 0.35, ..default() },
+            Steel => StandardMaterial { base_color: Color::srgb(0.78, 0.8, 0.83), metallic: 0.9, perceptual_roughness: 0.25, ..default() },
+        });
+        let (mesh, transform) = match shape {
+            Block(size, pos, tilt) => (Mesh::from(Cuboid::from_size(size)), Transform::from_translation(pos).with_rotation(Quat::from_rotation_x(tilt))),
+            Tube(r, len, pos) => (Mesh::from(Cylinder::new(r, len)), Transform::from_translation(pos).with_rotation(along_z)),
+        };
+        let part = commands.spawn((Mesh3d(meshes.add(mesh)), MeshMaterial3d(material), transform)).id();
+        commands.entity(root).add_child(part);
+    }
+    root
 }

@@ -30,6 +30,7 @@ struct Client {
     stats: LinkStats,
     /// Server-controlled player filling a team slot.
     bot: Option<Bot>,
+    name: String,
 }
 
 /// Per-player connection quality, printed every few seconds so a bad link is easy to spot.
@@ -90,7 +91,7 @@ pub fn run(port: u16) {
             let Ok((n, addr)) = sock.recv_from(&mut buf) else { continue };
             let build = postcard::take_from_bytes::<&str>(&buf[..n]).map_or("unknown", |(b, _)| b);
             let packet = (build == BUILD).then(|| decode::<InputPacket>(&buf[..n])).flatten();
-            let Some(InputPacket { time, inputs, .. }) = packet else {
+            let Some(InputPacket { time, inputs, name, .. }) = packet else {
                 if rejected.insert(addr) {
                     println!("rejected {addr}: client is build {build}, server is build {BUILD}");
                 }
@@ -99,7 +100,8 @@ pub fn run(port: u16) {
             };
             if !clients.contains_key(&addr) {
                 let team = smaller_team(&clients);
-                println!("player {next_id} joined from {addr} (build {BUILD}) as {}", team.name());
+                let name = clean_name(&name);
+                println!("{name} (player {next_id}) joined from {addr} (build {BUILD}) as {}", team.name());
                 // Freeze time: spawn now. Otherwise sit out (spectating) until the next round.
                 let freeze = game.round.phase == Phase::Freeze;
                 let index = clients.values().filter(|c| c.team == team).count();
@@ -120,6 +122,7 @@ pub fn run(port: u16) {
                     echo: (0.0, Instant::now()),
                     stats: LinkStats::default(),
                     bot: None,
+                    name,
                 });
                 next_id += 1;
             }
@@ -168,7 +171,7 @@ pub fn run(port: u16) {
             clients.iter().filter(|(_, c)| c.last_heard.elapsed() > Duration::from_secs(5)).map(|(a, _)| *a).collect();
         for addr in gone {
             let c = clients.remove(&addr).unwrap();
-            println!("player {} ({addr}) timed out", c.id);
+            println!("{} ({addr}) timed out", c.name);
             if game.round.bomb == Bomb::Carried(c.id) {
                 game.round.bomb = Bomb::Dropped(c.state.pos);
             }
@@ -192,6 +195,7 @@ pub fn run(port: u16) {
                     deaths: c.deaths,
                     team: c.team,
                     bot: c.bot.is_some(),
+                    name: c.name.clone(),
                 })
                 .collect();
             let round = net_round(&game, tick);
@@ -285,6 +289,18 @@ fn record(history: &mut History, clients: &HashMap<SocketAddr, Client>, tick: u3
     }
 }
 
+/// Printable, at most 16 characters, never empty.
+fn clean_name(raw: &str) -> String {
+    let name: String = raw.chars().filter(|c| !c.is_control()).take(16).collect();
+    if name.trim().is_empty() { "player".into() } else { name.trim().into() }
+}
+
+fn bot_name(id: u32) -> String {
+    const NAMES: [&str; 16] =
+        ["Albert", "Bill", "Cliffe", "Gunner", "Hans", "Ivan", "Joe", "Kurt", "Lester", "Moe", "Ringo", "Sergei", "Vladimir", "Yanni", "Zach", "Wolf"];
+    format!("BOT {}", NAMES[id as usize % NAMES.len()])
+}
+
 /// Balances humans only; bots then fill whichever side is short.
 fn smaller_team(clients: &HashMap<SocketAddr, Client>) -> Team {
     let humans = clients.values().filter(|c| c.bot.is_none());
@@ -334,8 +350,9 @@ fn balance_bots(m: &mut Match, clients: &mut HashMap<SocketAddr, Client>, next_i
                 echo: (0.0, Instant::now()),
                 stats: LinkStats::default(),
                 bot: Some(Bot::new(id)),
+                name: bot_name(id),
             });
-            println!("bot {id} joined {}", team.name());
+            println!("{} joined {}", bot_name(id), team.name());
         }
     }
 }
@@ -662,6 +679,7 @@ mod tests {
             echo: (0.0, Instant::now()),
             stats: LinkStats::default(),
             bot: None,
+            name: format!("test{id}"),
         }
     }
 

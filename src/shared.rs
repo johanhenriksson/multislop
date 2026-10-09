@@ -1,6 +1,6 @@
 use bevy::math::{EulerRot, Quat, Vec3};
 use crate::map::MAP;
-use crate::weapons::{AWP_SCOPED_SPREAD, DRAW_SECS, Slot, Weapon};
+use crate::weapons::{AWP_SCOPED_SPREAD, DRAW_SECS, SCOPED_SPEED, Slot, Weapon};
 use serde::{Deserialize, Serialize};
 
 /// Bumped by every `tools/release.sh publish`. Server and client must match exactly.
@@ -153,6 +153,7 @@ pub struct NetPlayer {
     pub deaths: u32,
     pub team: Team,
     pub bot: bool,
+    pub name: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -203,6 +204,8 @@ pub struct InputPacket {
     /// Must stay the first field: the server reads it alone before decoding the rest, so a mismatch is caught even
     /// when the rest of the format has changed.
     pub build: String,
+    /// Player name: the logged-in user on the client's machine.
+    pub name: String,
     /// Client clock when sent, echoed back in snapshots to measure the network round trip.
     pub time: f64,
     /// The most recent unacked inputs, oldest first. Redundant on purpose to survive packet loss.
@@ -368,7 +371,10 @@ pub fn step_player(s: &mut PlayerState, inp: &Input) -> Option<(Weapon, Vec3)> {
             let drop = speed.max(STOP_SPEED) * FRICTION * DT;
             s.vel *= ((speed - drop).max(0.0) / speed).max(0.0);
         }
-        accelerate(&mut s.vel, wish, MAX_SPEED, ACCEL);
+        // Lighter weapons in hand run faster; the knife fastest.
+        let weapon = s.weapon();
+        let scoped = if weapon == Weapon::Awp && inp.zoom { SCOPED_SPEED } else { 1.0 };
+        accelerate(&mut s.vel, wish, MAX_SPEED * weapon.spec().speed * scoped, ACCEL);
     } else {
         accelerate(&mut s.vel, wish, AIR_CAP, AIR_ACCEL * MAX_SPEED / AIR_CAP);
     }
@@ -558,6 +564,21 @@ mod tests {
         assert_eq!(held, 1, "semi-automatic: holding fires once");
         tick(&mut s, Input::default());
         assert!(tick(&mut s, fire).is_some(), "fresh click fires again");
+    }
+
+    #[test]
+    fn knife_runs_faster_than_rifles() {
+        let run = |primary: Option<Weapon>, slot: u8| {
+            let mut s = PlayerState { pos: MAP.spawns(Team::T)[0], on_ground: true, ..Default::default() };
+            s.loadout(primary, Weapon::Glock);
+            step_player(&mut s, &Input { slot, ..Default::default() });
+            for _ in 0..TICK_HZ as usize {
+                step_player(&mut s, &Input { right: 1.0, ..Default::default() });
+            }
+            s.vel.with_y(0.0).length()
+        };
+        let (knife, pistol, ak) = (run(Some(Weapon::Ak47), 3), run(Some(Weapon::Ak47), 2), run(Some(Weapon::Ak47), 1));
+        assert!(knife > pistol && pistol > ak, "knife {knife} > pistol {pistol} > AK {ak}");
     }
 
     #[test]

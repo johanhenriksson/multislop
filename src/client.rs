@@ -1,6 +1,6 @@
 use crate::map::{CELL, MAP};
-use crate::model::{Rig, gun_model, spawn_knife, spawn_pistol, spawn_rifle, spawn_soldier};
-use crate::weapons::{Weapon, buy_menu};
+use crate::model::{Rig, barrel_length, spawn_soldier, spawn_weapon, viewmodel_offset};
+use crate::weapons::{ALL_WEAPONS, Weapon, buy_menu};
 use crate::shared::*;
 use crate::sfx;
 use bevy::audio::Volume;
@@ -9,7 +9,7 @@ use bevy::prelude::*;
 use bevy::render::pipelined_rendering::PipelinedRenderingPlugin;
 use bevy::winit::WinitSettings;
 use bevy::window::{CursorGrabMode, CursorOptions, PresentMode, PrimaryWindow};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
@@ -116,7 +116,7 @@ struct Game {
     carrier_pos: Option<Vec3>,
     armor: u8,
     money: u32,
-    bots: HashSet<u32>,
+    names: HashMap<u32, String>,
     /// Scoped in with the AWP.
     zoom: bool,
     /// Buy menu open.
@@ -157,9 +157,9 @@ struct Sounds {
     explosion: Handle<AudioSource>,
 }
 
-/// First-person weapon model: index into rifle/pistol/knife, and its resting position.
+/// First-person model of one weapon.
 #[derive(Component)]
-struct Viewmodel(usize, Vec3);
+struct Viewmodel(Weapon);
 
 #[derive(Component)]
 struct AmmoText;
@@ -262,9 +262,8 @@ fn setup(
     mut audio: ResMut<Assets<AudioSource>>,
 ) {
     let mut sound = |wav: Vec<u8>| audio.add(AudioSource { bytes: wav.into() });
-    let all = [Weapon::Knife, Weapon::Glock, Weapon::Usp, Weapon::Deagle, Weapon::Mp5, Weapon::Ak47, Weapon::M4a1, Weapon::Awp];
     commands.insert_resource(Sounds {
-        guns: all.into_iter().map(|w| (w, sound(sfx::gunshot(w)))).collect(),
+        guns: ALL_WEAPONS.into_iter().map(|w| (w, sound(sfx::gunshot(w)))).collect(),
         reload: sound(sfx::reload()),
         buy: sound(sfx::buy()),
         headshot: sound(sfx::headshot()),
@@ -275,17 +274,17 @@ fn setup(
         beep: sound(sfx::beep()),
         explosion: sound(sfx::explosion()),
     });
-    // First-person weapons; the rifle's barrel tip lines up with `muzzle`.
-    let bases = [Vec3::new(0.25, -0.22, -0.2), Vec3::new(0.2, -0.2, -0.42), Vec3::new(0.22, -0.22, -0.34)];
-    let rifle = spawn_rifle(&mut commands, &mut meshes, &mut mats, Transform::from_translation(bases[0]));
-    let pistol = spawn_pistol(&mut commands, &mut meshes, &mut mats, Transform::from_translation(bases[1]));
-    let knife = spawn_knife(&mut commands, &mut meshes, &mut mats, Transform::from_translation(bases[2]));
-    for (i, e) in [rifle, pistol, knife].into_iter().enumerate() {
-        commands.entity(e).insert(Viewmodel(i, bases[i]));
-    }
+    // First-person weapons; each barrel tip lines up with `muzzle`.
+    let viewmodels: Vec<Entity> = ALL_WEAPONS
+        .into_iter()
+        .map(|w| {
+            let e = spawn_weapon(&mut commands, &mut meshes, &mut mats, w, Transform::from_translation(viewmodel_offset(w)));
+            commands.entity(e).insert(Viewmodel(w)).id()
+        })
+        .collect();
     commands
         .spawn((Camera3d::default(), Projection::Perspective(PerspectiveProjection { fov: FOV, ..default() })))
-        .add_children(&[rifle, pistol, knife]);
+        .add_children(&viewmodels);
     commands.spawn((
         DirectionalLight { illuminance: 8000.0, shadow_maps_enabled: true, ..default() },
         Transform::default().looking_to(Vec3::new(-0.4, -1.0, -0.3), Vec3::Y),
@@ -479,7 +478,7 @@ fn net_tick(
         if let Some((weapon, d)) = step_player(&mut pred, &inp) {
             let o = eye(&pred);
             g.sounds.push((Sound::Gun(weapon), 0.6));
-            add_tracer(&mut g, weapon, muzzle(o, d), o + d * trace_world(o, d));
+            add_tracer(&mut g, weapon, muzzle(o, d, weapon), o + d * trace_world(o, d));
             if weapon == Weapon::Awp {
                 g.zoom = false;
             }
@@ -496,7 +495,7 @@ fn net_tick(
     if g.seq % INPUT_EVERY == 0 {
         let start = g.pending.len().saturating_sub(REDUNDANCY);
         let inputs = g.pending.iter().skip(start).copied().collect();
-        let packet = InputPacket { build: BUILD.into(), time: clock(), inputs };
+        let packet = InputPacket { build: BUILD.into(), name: player_name(), time: clock(), inputs };
         net.send(encode(&packet));
     }
 }
@@ -514,8 +513,8 @@ fn on_snapshot(g: &mut Game, snap: Snapshot) {
     g.me = Some(snap.you);
     for p in &snap.players {
         g.teams.insert(p.id, p.team);
-        if p.bot {
-            g.bots.insert(p.id);
+        if g.names.get(&p.id) != Some(&p.name) {
+            g.names.insert(p.id, p.name.clone());
         }
     }
     for h in &snap.hits {
@@ -603,7 +602,7 @@ fn on_snapshot(g: &mut Game, snap: Snapshot) {
 
     for s in snap.shots.iter().filter(|s| s.shooter != snap.you) {
         let d = (s.to - s.from).normalize_or_zero();
-        add_tracer(g, s.weapon, muzzle(s.from, d), s.to);
+        add_tracer(g, s.weapon, muzzle(s.from, d, s.weapon), s.to);
         let volume = 0.6 / (1.0 + s.from.distance(g.pred.pos) / 12.0);
         g.sounds.push((Sound::Gun(s.weapon), volume));
     }
@@ -704,11 +703,9 @@ fn render_remotes(
         if let Ok((mut arms, _)) = parts.get_mut(rig.arms) {
             arms.rotation = Quat::from_rotation_x(pitch);
         }
-        let (held, scale) = gun_model(weapon);
-        for (i, gun) in rig.guns.into_iter().enumerate() {
-            if let Ok((mut t, mut v)) = parts.get_mut(gun) {
-                *v = if i == held { Visibility::Inherited } else { Visibility::Hidden };
-                t.scale = scale;
+        for (i, &gun) in rig.guns.iter().enumerate() {
+            if let Ok((_, mut v)) = parts.get_mut(gun) {
+                *v = if i == weapon as usize { Visibility::Inherited } else { Visibility::Hidden };
             }
         }
     }
@@ -761,11 +758,12 @@ fn draw_tracers(mut gizmos: Gizmos, mut g: ResMut<Game>, time: Res<Time>) {
     g.tracers.retain(|t| t.2 > 0.0);
 }
 
-/// Gun barrel tip for a shot from eye `o` along `d`, matching the first-person gun model, so your own beam is visible.
-fn muzzle(o: Vec3, d: Vec3) -> Vec3 {
+/// Barrel tip for a shot from eye `o` along `d`, matching the first-person model, so tracers leave the gun.
+fn muzzle(o: Vec3, d: Vec3, weapon: Weapon) -> Vec3 {
     let right = d.cross(Vec3::Y).normalize_or_zero();
     let up = right.cross(d);
-    o + right * 0.25 - up * 0.22 + d * 0.75
+    let at = viewmodel_offset(weapon);
+    o + right * at.x + up * at.y + d * (barrel_length(weapon) - at.z)
 }
 
 /// Dead and the fade to black is done: watch a teammate instead.
@@ -883,25 +881,26 @@ fn add_tracer(g: &mut Game, weapon: Weapon, from: Vec3, to: Vec3) {
 }
 
 fn name(g: &Game, id: u32) -> String {
-    match id {
-        _ if Some(id) == g.me => "You".into(),
-        _ if g.bots.contains(&id) => format!("Bot {id}"),
-        _ => format!("Player {id}"),
-    }
+    g.names.get(&id).cloned().unwrap_or_else(|| format!("player {id}"))
+}
+
+/// The logged-in macOS user (also set for apps launched from Finder).
+fn player_name() -> String {
+    static NAME: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| std::env::var("USER").or_else(|_| std::env::var("LOGNAME")).unwrap_or_else(|_| "player".into()));
+    NAME.clone()
 }
 
 /// Shows the held weapon, dips it while reloading, kicks it back on recoil; hidden when dead or scoped.
 fn viewmodel(mut q: Query<(&Viewmodel, &mut Transform, &mut Visibility)>, g: Res<Game>) {
-    let w = g.pred.weapon();
-    let (held, scale) = gun_model(w);
-    let reload = g.pred.reloading as f32 / (w.spec().reload * TICK_HZ as f32).max(1.0);
+    let held = g.pred.weapon();
+    let reload = g.pred.reloading as f32 / (held.spec().reload * TICK_HZ as f32).max(1.0);
     let dip = (reload * std::f32::consts::PI).sin();
     let show = g.hp > 0 && g.me.is_some() && !g.zoom;
     for (vm, mut t, mut vis) in &mut q {
         *vis = if show && vm.0 == held { Visibility::Inherited } else { Visibility::Hidden };
-        t.translation = vm.1 + Vec3::new(0.0, -0.15 * dip, 0.03 * g.pred.recoil.min(3.0));
+        t.translation = viewmodel_offset(vm.0) + Vec3::new(0.0, -0.15 * dip, 0.03 * g.pred.recoil.min(3.0));
         t.rotation = Quat::from_rotation_x(-0.6 * dip);
-        t.scale = scale;
     }
 }
 

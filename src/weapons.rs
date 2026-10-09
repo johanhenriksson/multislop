@@ -49,6 +49,8 @@ pub struct Spec {
     pub armor_pen: f32,
     pub kill_reward: u32,
     pub range: f32,
+    /// Movement speed multiplier while this weapon is in hand.
+    pub speed: f32,
 }
 
 const fn gun(name: &'static str, price: u32, team: Option<Team>, slot: Slot) -> Spec {
@@ -70,6 +72,7 @@ const fn gun(name: &'static str, price: u32, team: Option<Team>, slot: Slot) -> 
         armor_pen: 0.5,
         kill_reward: 300,
         range: 200.0,
+        speed: 1.0,
     }
 }
 
@@ -84,6 +87,7 @@ const KNIFE: Spec = Spec {
     armor_pen: 0.85,
     kill_reward: 1500,
     range: 1.8,
+    speed: 1.08,
     ..gun("Knife", 0, None, Slot::Knife)
 };
 const GLOCK: Spec = Spec {
@@ -150,6 +154,7 @@ const AK47: Spec = Spec {
     recoil: 0.012,
     range_mod: 0.98,
     armor_pen: 0.775,
+    speed: 0.88,
     ..gun("AK-47", 2500, Some(Team::T), Slot::Primary)
 };
 const M4A1: Spec = Spec {
@@ -164,6 +169,7 @@ const M4A1: Spec = Spec {
     recoil: 0.01,
     range_mod: 0.97,
     armor_pen: 0.7,
+    speed: 0.92,
     ..gun("M4A1", 3100, Some(Team::Ct), Slot::Primary)
 };
 const AWP: Spec = Spec {
@@ -179,10 +185,16 @@ const AWP: Spec = Spec {
     range_mod: 0.99,
     armor_pen: 0.97,
     kill_reward: 100,
+    speed: 0.84,
     ..gun("AWP", 4750, None, Slot::Primary)
 };
 
+pub const ALL_WEAPONS: [Weapon; 8] =
+    [Weapon::Knife, Weapon::Glock, Weapon::Usp, Weapon::Deagle, Weapon::Mp5, Weapon::Ak47, Weapon::M4a1, Weapon::Awp];
+
 pub const AWP_SCOPED_SPREAD: f32 = 0.0005;
+/// Moving while scoped in is slower still.
+pub const SCOPED_SPEED: f32 = 0.6;
 /// Seconds after switching weapons before you can fire.
 pub const DRAW_SECS: f32 = 0.4;
 

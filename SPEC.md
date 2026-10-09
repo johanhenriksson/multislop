@@ -29,7 +29,10 @@ Deadline: playable before 00:00. One weapon, one simple map.
   seeded by the input seq so predicted and server bullets match. All weapon state lives in `PlayerState`.
 - Money: $800 start, $16000 cap; kill $300 (AWP $100, MP5 $600, knife $1500); win $3250, loss $1400 + $500 per
   consecutive loss (up to 3); plant/defuse $300. Survivors keep guns; the dead restart with the team pistol.
-- Synthesized per-weapon gunshots (noise crack + thump), reload, buy, headshot ding, hit tick, hurt thud.
+- Each weapon has its own model (`src/model.rs`) and its own synthesized sound (silenced thwip for M4A1/USP, booming
+  echoing Deagle/AWP with bolt work, harsh AK crack, light MP5/Glock), plus reload, buy, headshot, hit and hurt sounds.
+- Movement speed depends on the weapon in hand: knife 108%, pistols/MP5 100%, M4A1 92%, AK 88%, AWP 84% (60% scoped).
+- Player names: the logged-in user (`$USER`); bots are named "BOT Hans" etc.
 - HUD: HP/armor/money, weapon + ammo, buy menu, kill feed, red flash when hit. Short tracers (AWP longer).
 
 ## Rounds (bomb defusal)

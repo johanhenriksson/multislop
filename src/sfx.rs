@@ -29,28 +29,108 @@ pub fn death() -> Vec<u8> {
     synth(0.9, |t| 300.0 * (-t * 2.5).exp() + 40.0, |t| 1.0 - t / 0.9, |p| 2.0 * (p - (p + 0.5).floor()))
 }
 
-/// A gunshot: low-passed noise for the crack plus a falling sine for the thump, shaped per weapon.
+/// Each weapon has its own character: silenced weapons thwip, the Deagle and AWP boom and echo, the AWP works its
+/// bolt afterwards, the AK cracks harsh with a bolt clack, the MP5 and Glock are light and snappy.
 pub fn gunshot(weapon: Weapon) -> Vec<u8> {
-    // (length, thump Hz, noise brightness 0..1, loudness)
-    let (secs, thump, bright, loud) = match weapon {
+    let mut rng = 0xC0FF_EE11u32 ^ weapon as u32;
+    let mut s = match weapon {
         Weapon::Knife => return knife(),
-        Weapon::Glock => (0.2, 190.0, 0.55, 0.7),
-        Weapon::Usp => (0.22, 160.0, 0.45, 0.7),
-        Weapon::Deagle => (0.5, 85.0, 0.4, 1.0),
-        Weapon::Mp5 => (0.16, 210.0, 0.6, 0.6),
-        Weapon::Ak47 => (0.38, 105.0, 0.35, 0.95),
-        Weapon::M4a1 => (0.32, 130.0, 0.45, 0.85),
-        Weapon::Awp => (1.0, 65.0, 0.3, 1.0),
+        // Light, high, short pop with a little slide ping.
+        Weapon::Glock => shot(&mut rng, 0.18, 0.6, 240.0, 0.7)
+            .mix(tone(0.04, 2600.0, 60.0), 0.0, 0.15)
+            .mix(click(&mut rng, 0.03), 0.07, 0.3),
+        // Silenced: muffled low thwip and the slide cycling.
+        Weapon::Usp => shot(&mut rng, 0.12, 0.08, 150.0, 0.35).mix(click(&mut rng, 0.03), 0.04, 0.5),
+        // Hand cannon: deep boom, long tail, echo.
+        Weapon::Deagle => shot(&mut rng, 0.6, 0.35, 75.0, 1.0).echo(0.13, 0.35, 2),
+        // Light rapid pap with a metallic rattle.
+        Weapon::Mp5 => shot(&mut rng, 0.13, 0.7, 260.0, 0.55).mix(click(&mut rng, 0.02), 0.035, 0.25),
+        // Harsh, punchy crack, overdriven, with a bolt clack.
+        Weapon::Ak47 => shot(&mut rng, 0.4, 0.4, 95.0, 1.3).clip(0.55).mix(click(&mut rng, 0.04), 0.06, 0.35),
+        // Silenced rifle: the classic tshk.
+        Weapon::M4a1 => shot(&mut rng, 0.16, 0.18, 180.0, 0.5).mix(click(&mut rng, 0.035), 0.03, 0.55),
+        // Huge crack and boom rolling off, then the bolt worked back and forth.
+        Weapon::Awp => shot(&mut rng, 1.1, 0.45, 60.0, 1.2)
+            .echo(0.22, 0.4, 3)
+            .mix(click(&mut rng, 0.05), 0.75, 0.5)
+            .mix(click(&mut rng, 0.05), 0.95, 0.5),
     };
-    let (mut rng, mut low, mut phase) = (0xC0FF_EE11u32 ^ thump as u32, 0.0f32, 0.0f32);
-    render(secs, move |t| {
+    let peak = match weapon {
+        Weapon::Usp | Weapon::M4a1 => 0.4,
+        Weapon::Glock | Weapon::Mp5 => 0.7,
+        Weapon::Ak47 => 0.9,
+        _ => 1.0,
+    };
+    s.normalize(peak);
+    wav(&s.0)
+}
+
+/// Samples at RATE, with a few layering helpers.
+struct Samples(Vec<f32>);
+
+impl Samples {
+    /// Adds `other` starting `at` seconds in, scaled by `gain`, growing as needed.
+    fn mix(mut self, other: Samples, at: f32, gain: f32) -> Samples {
+        let start = (at * RATE as f32) as usize;
+        if self.0.len() < start + other.0.len() {
+            self.0.resize(start + other.0.len(), 0.0);
+        }
+        for (i, v) in other.0.into_iter().enumerate() {
+            self.0[start + i] += v * gain;
+        }
+        self
+    }
+
+    /// Repeats the sound `count` times, each `delay` seconds later and `gain` times quieter, like a canyon echo.
+    fn echo(self, delay: f32, gain: f32, count: u32) -> Samples {
+        let dry = self.0.clone();
+        (1..=count).fold(self, |s, n| s.mix(Samples(dry.clone()), delay * n as f32, gain.powi(n as i32)))
+    }
+
+    /// Soft-clips for grit.
+    fn clip(mut self, drive: f32) -> Samples {
+        for v in &mut self.0 {
+            *v = (*v / drive).tanh() * drive;
+        }
+        self
+    }
+
+    fn normalize(&mut self, peak: f32) {
+        let max = self.0.iter().fold(0.0f32, |m, v| m.max(v.abs())).max(1e-6);
+        self.0.iter_mut().for_each(|v| *v *= peak / max * 2.0);
+    }
+}
+
+fn samples(secs: f32, mut f: impl FnMut(f32) -> f32) -> Samples {
+    Samples((0..(secs * RATE as f32) as u32).map(|i| f(i as f32 / RATE as f32)).collect())
+}
+
+/// The report: low-passed noise crack (brightness 0..1) plus a falling sine thump.
+fn shot(rng: &mut u32, secs: f32, bright: f32, thump: f32, loud: f32) -> Samples {
+    let (mut low, mut phase, mut seed) = (0.0f32, 0.0f32, *rng);
+    *rng = rng.wrapping_mul(747796405).wrapping_add(1);
+    samples(secs, move |t| {
         let crack = (-t * 38.0 / secs).exp();
         let tail = (-t * 6.0 / secs).exp() * 0.35;
-        low += (noise(&mut rng) - low) * bright;
+        low += (noise(&mut seed) - low) * bright;
         phase = (phase + thump * (1.0 + 2.0 * (-t * 30.0).exp()) / RATE as f32).fract();
         let boom = (phase * TAU).sin() * (-t * 9.0 / secs).exp();
         (low * 2.2 * (crack + tail) + boom * 0.9) * loud
     })
+}
+
+/// A short mechanical click: high-passed noise burst.
+fn click(rng: &mut u32, secs: f32) -> Samples {
+    let (mut low, mut seed) = (0.0f32, *rng ^ 0x9E37);
+    samples(secs, move |t| {
+        let n = noise(&mut seed);
+        low += (n - low) * 0.2;
+        (n - low) * (-t * 160.0).exp() * 1.5
+    })
+}
+
+fn tone(secs: f32, hz: f32, decay: f32) -> Samples {
+    samples(secs, |t| (t * hz * TAU).sin() * (-t * decay).exp())
 }
 
 /// Swish: band of noise sweeping down.
@@ -112,8 +192,12 @@ fn synth(secs: f32, freq: impl Fn(f32) -> f32, amp: impl Fn(f32) -> f32, mut wav
 }
 
 /// Renders a mono 16-bit WAV from a sample function of time.
-fn render(secs: f32, mut sample: impl FnMut(f32) -> f32) -> Vec<u8> {
-    let n = (secs * RATE as f32) as u32;
+fn render(secs: f32, sample: impl FnMut(f32) -> f32) -> Vec<u8> {
+    wav(&samples(secs, sample).0)
+}
+
+fn wav(samples: &[f32]) -> Vec<u8> {
+    let n = samples.len() as u32;
     let mut out = Vec::with_capacity(44 + n as usize * 2);
     for chunk in [&b"RIFF"[..], &(36 + n * 2).to_le_bytes(), b"WAVEfmt ", &16u32.to_le_bytes(), &1u16.to_le_bytes(),
         &1u16.to_le_bytes(), &RATE.to_le_bytes(), &(RATE * 2).to_le_bytes(), &2u16.to_le_bytes(), &16u16.to_le_bytes(),
@@ -121,8 +205,8 @@ fn render(secs: f32, mut sample: impl FnMut(f32) -> f32) -> Vec<u8> {
     {
         out.extend_from_slice(chunk);
     }
-    for i in 0..n {
-        let s = (sample(i as f32 / RATE as f32) * 0.5).clamp(-1.0, 1.0);
+    for &v in samples {
+        let s = (v * 0.5).clamp(-1.0, 1.0);
         out.extend_from_slice(&((s * i16::MAX as f32) as i16).to_le_bytes());
     }
     out
