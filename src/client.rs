@@ -1,4 +1,5 @@
 use crate::map::{CELL, MAP};
+use crate::model::{Rig, spawn_rifle, spawn_soldier};
 use crate::shared::*;
 use crate::sfx;
 use bevy::audio::Volume;
@@ -106,8 +107,8 @@ struct Game {
     next_beep: f64,
     /// Where and when (clock) the bomb went off, for the flash.
     explosion: Option<(Vec3, f64)>,
-    /// Interpolated eye position and view of the teammate we watch while dead.
-    spectate: Option<(Vec3, f32, f32)>,
+    /// The teammate we watch while dead: id, interpolated eye position and view.
+    spectate: Option<(u32, Vec3, f32, f32)>,
     /// Interpolated position of a remote bomb carrier.
     carrier_pos: Option<Vec3>,
 }
@@ -220,13 +221,11 @@ fn setup(
         beep: sound(sfx::beep()),
         explosion: sound(sfx::explosion()),
     });
+    // First-person rifle; its barrel tip lines up with `muzzle`.
+    let rifle = spawn_rifle(&mut commands, &mut meshes, &mut mats, Transform::from_xyz(0.25, -0.22, -0.2));
     commands
         .spawn((Camera3d::default(), Projection::Perspective(PerspectiveProjection { fov: 1.6, ..default() })))
-        .with_child((
-            Mesh3d(meshes.add(Cuboid::new(0.08, 0.1, 0.6))),
-            MeshMaterial3d(mats.add(Color::srgb(0.15, 0.15, 0.15))),
-            Transform::from_xyz(0.25, -0.22, -0.45),
-        ));
+        .add_child(rifle);
     commands.spawn((
         DirectionalLight { illuminance: 8000.0, shadow_maps_enabled: true, ..default() },
         Transform::default().looking_to(Vec3::new(-0.4, -1.0, -0.3), Vec3::Y),
@@ -471,7 +470,7 @@ fn render_self(
     fixed: Res<Time<Fixed>>,
 ) {
     g.smooth *= (-time.delta_secs() * 15.0).exp();
-    if let Some((eye, yaw, pitch)) = g.spectate.filter(|_| spectating(&g)) {
+    if let Some((_, eye, yaw, pitch)) = g.spectate.filter(|_| spectating(&g)) {
         cam.translation = eye;
         cam.rotation = look_rot(yaw, pitch);
         return;
@@ -483,7 +482,9 @@ fn render_self(
 
 fn render_remotes(
     mut commands: Commands,
-    mut q: Query<(Entity, &Remote, &mut Transform, &mut Visibility)>,
+    mut q: Query<(Entity, &Remote, &mut Rig, &mut Transform, &mut Visibility)>,
+    mut parts: Query<&mut Transform, Without<Remote>>,
+    time: Res<Time>,
     mut g: ResMut<Game>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
@@ -520,38 +521,39 @@ fn render_remotes(
         let alive_in = |s: &Snapshot| s.players.iter().find(|q| q.id == p.id).is_some_and(|q| q.hp > 0);
         let alive = alive_in(newest) && alive_in(a) && p.hp > 0;
         if alive && spectate.is_none() && Some(p.team) == my_team {
-            spectate = Some((pos + Vec3::Y * EYE, yaw, pitch));
+            spectate = Some((p.id, pos + Vec3::Y * EYE, yaw, pitch));
         }
         if Some(p.id) == carrier {
             carrier_pos = Some(pos);
         }
-        seen.insert(p.id, (pos, yaw, alive, p.team));
+        seen.insert(p.id, (pos, yaw, pitch, alive, p.team));
     }
     (g.spectate, g.carrier_pos) = (spectate, carrier_pos);
+    // We're looking out of their eyes, so their own model would only block the view.
+    let watched = spectate.filter(|_| spectating(&g)).map(|s| s.0);
 
-    for (e, r, mut t, mut vis) in &mut q {
-        match seen.remove(&r.0) {
-            Some((pos, yaw, alive, _)) => {
-                t.translation = pos + Vec3::Y * HEIGHT / 2.0;
-                t.rotation = Quat::from_rotation_y(yaw);
-                *vis = if alive { Visibility::Inherited } else { Visibility::Hidden };
+    for (e, r, mut rig, mut t, mut vis) in &mut q {
+        let Some((pos, yaw, pitch, alive, _)) = seen.remove(&r.0) else {
+            commands.entity(e).despawn();
+            continue;
+        };
+        t.translation = pos;
+        t.rotation = Quat::from_rotation_y(yaw);
+        *vis = if alive && watched != Some(r.0) { Visibility::Inherited } else { Visibility::Hidden };
+        let swing = rig.animate(pos, time.delta_secs());
+        for (leg, dir) in rig.legs.into_iter().zip([1.0, -1.0]) {
+            if let Ok(mut leg) = parts.get_mut(leg) {
+                leg.rotation = Quat::from_rotation_x(swing * dir);
             }
-            None => commands.entity(e).despawn(),
+        }
+        if let Ok(mut arms) = parts.get_mut(rig.arms) {
+            arms.rotation = Quat::from_rotation_x(pitch);
         }
     }
-    for (id, (pos, yaw, _, team)) in seen {
-        commands
-            .spawn((
-                Remote(id),
-                Mesh3d(meshes.add(Capsule3d::new(RADIUS, HEIGHT - 2.0 * RADIUS))),
-                MeshMaterial3d(mats.add(team_color(Some(team)))),
-                Transform::from_translation(pos + Vec3::Y * HEIGHT / 2.0).with_rotation(Quat::from_rotation_y(yaw)),
-            ))
-            .with_child((
-                Mesh3d(meshes.add(Cuboid::new(0.3, 0.12, 0.2))),
-                MeshMaterial3d(mats.add(Color::BLACK)),
-                Transform::from_xyz(0.0, EYE - HEIGHT / 2.0, -RADIUS),
-            ));
+    for (id, (pos, yaw, ..)) in seen {
+        let team = g.teams.get(&id).copied().unwrap_or(Team::T);
+        let root = (Remote(id), Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw)));
+        spawn_soldier(&mut commands, &mut meshes, &mut mats, team, root);
     }
 }
 
