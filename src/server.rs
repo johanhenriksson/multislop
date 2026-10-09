@@ -626,7 +626,13 @@ mod tests {
         }
         let kills: u32 = clients.values().map(|c| c.kills).sum();
         let [t, ct] = m.round.score;
-        println!("{} rounds in {:.0} min, T {t} - {ct} CT, {kills} kills, {plants} plants", t + ct, tick as f32 / TICK_HZ as f32 / 60.0);
+        let accuracy = 100.0 * kills as f32 / shots.len().max(1) as f32;
+        println!(
+            "{} rounds in {:.0} min, T {t} - {ct} CT, {kills} kills, {plants} plants, {} shots, {accuracy:.0}% accuracy",
+            t + ct,
+            tick as f32 / TICK_HZ as f32 / 60.0,
+            shots.len()
+        );
         assert!(t + ct >= 10, "rounds should finish");
         assert!(kills >= 10, "bots should fight");
         assert!(plants >= 1, "Ts should plant at least once");

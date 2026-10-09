@@ -6,11 +6,14 @@ use crate::shared::*;
 use bevy::math::Vec3;
 
 /// Seconds between first seeing an enemy and being allowed to shoot. The main difficulty knob.
-const REACTION_SECS: f32 = 0.45;
+const REACTION_SECS: f32 = 0.6;
 /// How fast bots can turn while aiming, in radians per second.
-const AIM_TURN_SPEED: f32 = 5.0;
-/// How far off target a bot's aim point starts, in meters. Rerolled for each new target.
-const AIM_SPREAD: f32 = 0.35;
+const AIM_TURN_SPEED: f32 = 3.5;
+/// How far off a bot's aim can be, in radians (0.05 is about 1 m at 20 m; the hit capsule's radius is 0.4 m).
+/// Rerolled for each new target and after every shot, and shrinks by AIM_SETTLE per tick while tracking, so far
+/// targets and quick follow-up shots miss more.
+const AIM_ERROR: f32 = 0.05;
+const AIM_SETTLE: f32 = 0.995;
 const SIGHT_RANGE: f32 = 60.0;
 
 /// What a bot knows about another player.
@@ -28,7 +31,8 @@ pub struct Bot {
     round: u32,
     /// Current enemy and the tick we first saw them.
     target: Option<(u32, u32)>,
-    aim_offset: Vec3,
+    /// Current aim error as (yaw, pitch) in radians.
+    aim_error: (f32, f32),
     /// Distance field towards the current goal cell, recomputed when the goal changes.
     field: Vec<u16>,
     field_goal: (usize, usize),
@@ -47,7 +51,7 @@ impl Bot {
             site: 'A',
             round: 0,
             target: None,
-            aim_offset: Vec3::ZERO,
+            aim_error: (0.0, 0.0),
             field: vec![],
             field_goal: (usize::MAX, 0),
             watch: vec![],
@@ -56,6 +60,10 @@ impl Bot {
             stuck_ticks: 0,
             rng: seed.wrapping_mul(0x9E37_79B9) | 1,
         }
+    }
+
+    fn roll_aim_error(&mut self) -> (f32, f32) {
+        ((self.random() * 2.0 - 1.0) * AIM_ERROR, (self.random() * 2.0 - 1.0) * AIM_ERROR * 0.5)
     }
 
     fn random(&mut self) -> f32 {
@@ -96,21 +104,24 @@ impl Bot {
             (Some(e), Some((t, _))) if e.id == t => {}
             (Some(e), _) => {
                 self.target = Some((e.id, tick));
-                let r = Vec3::new(self.random() - 0.5, self.random() - 0.5, self.random() - 0.5);
-                self.aim_offset = r * 2.0 * AIM_SPREAD;
+                self.aim_error = self.roll_aim_error();
             }
             (None, _) => self.target = None,
         }
 
         if let (Some(e), Some((_, since))) = (enemy, self.target) {
             // Stand and fight: turn towards the target at limited speed, fire once lined up and reacted.
-            self.aim_offset *= 0.97;
-            let (yaw, pitch) = look_at(eye, e.pos + Vec3::Y * 1.2 + self.aim_offset);
+            self.aim_error = (self.aim_error.0 * AIM_SETTLE, self.aim_error.1 * AIM_SETTLE);
+            let (yaw, pitch) = look_at(eye, e.pos + Vec3::Y * 1.2);
+            let (yaw, pitch) = (yaw + self.aim_error.0, pitch + self.aim_error.1);
             let max = AIM_TURN_SPEED * DT;
             inp.yaw = me.yaw + wrap(yaw - me.yaw).clamp(-max, max);
             inp.pitch = me.pitch + (pitch - me.pitch).clamp(-max, max);
             let lined_up = wrap(yaw - inp.yaw).abs() < 0.02 && (pitch - inp.pitch).abs() < 0.03;
-            inp.fire = lined_up && tick - since >= (REACTION_SECS * TICK_HZ as f32) as u32;
+            inp.fire = lined_up && me.fire_cd == 0 && tick - since >= (REACTION_SECS * TICK_HZ as f32) as u32;
+            if inp.fire {
+                self.aim_error = self.roll_aim_error();
+            }
             return inp;
         }
 

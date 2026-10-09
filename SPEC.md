@@ -24,7 +24,8 @@ Deadline: playable before 00:00. One weapon, one simple map.
 ## Rounds (bomb defusal)
 - Teams T and CT, humans auto-balanced on join, friendly fire off. Server-side bots fill both teams to 3v3 (or to the
   bigger human team); they path over the map grid, plant/defuse, call out spotted enemies so teammates rotate, and
-  aim with a reaction delay and limited turn speed (`src/bot.rs` constants are the difficulty knobs).
+  aim with a reaction delay, limited turn speed and angular aim error (~30% accuracy bot vs bot; `src/bot.rs`
+  constants are the difficulty knobs).
 - Map: dust, traced from a top-down overview image into an ASCII grid in `src/map.rs` (2 m cells, flat): B site
   top-left, A bottom-left, CT spawn between them, T spawn bottom-right, tunnels through the middle. Sites tinted red.
 - Round: 5 s freeze (look only, movement frozen via `PlayerState::frozen` so prediction agrees), 1:55 live, 5 s end.
