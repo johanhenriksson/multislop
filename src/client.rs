@@ -18,6 +18,8 @@ const REDUNDANCY: usize = 8;
 /// Field of view, and scoped in with the AWP.
 const FOV: f32 = 1.6;
 const ZOOM_FOV: f32 = 0.42;
+const HUD_AMBER: Color = Color::srgba(1.0, 0.68, 0.12, 0.9);
+const CROSSHAIR_GREEN: Color = Color::srgba(0.25, 1.0, 0.25, 0.85);
 
 #[derive(Resource)]
 struct Net {
@@ -205,8 +207,24 @@ struct Remote(u32);
 #[derive(Component)]
 struct Hud;
 
+/// One of the four crosshair lines: its direction from the center.
 #[derive(Component)]
-struct Crosshair;
+struct Crosshair(Vec2);
+
+#[derive(Component)]
+struct HealthText;
+
+#[derive(Component)]
+struct TimerText;
+
+#[derive(Component)]
+struct ArmorText;
+
+#[derive(Component)]
+struct MoneyText;
+
+#[derive(Component)]
+struct NetGraphText;
 
 pub fn run(server: SocketAddr, lag_ms: u64, jitter_ms: u64, interp_ms: u64) {
     let sock = UdpSocket::bind("0.0.0.0:0").expect("bind");
@@ -307,7 +325,7 @@ fn setup(
         // Render off-screen so screenshots work even when the window is hidden behind others.
         use bevy::render::render_resource::TextureFormat;
         let target = images.add(Image::new_target_texture(1600, 900, TextureFormat::Rgba8UnormSrgb, None));
-        commands.entity(camera).insert(bevy::camera::RenderTarget::from(target.clone()));
+        commands.entity(camera).insert((bevy::camera::RenderTarget::from(target.clone()), IsDefaultUiCamera));
         commands.insert_resource(ShotTarget(target));
     }
     commands.spawn((
@@ -354,12 +372,53 @@ fn setup(
             align_items: AlignItems::Center,
             ..default()
         },
-        children![(Crosshair, Text::new("+"))],
+        // A zero-size anchor at the exact center; the lines are placed around it.
+        children![(
+            Node { width: px(0), height: px(0), ..default() },
+            children![
+                crosshair_line(Vec2::X),
+                crosshair_line(Vec2::NEG_X),
+                crosshair_line(Vec2::Y),
+                crosshair_line(Vec2::NEG_Y),
+            ],
+        )],
+    ));
+    // CS 1.6 HUD: amber health and armor bottom-left, money and ammo bottom-right; status messages centered.
+    let amber = TextColor(HUD_AMBER);
+    let big = TextFont { font_size: FontSize::Px(34.0), ..default() };
+    let icon = |w: f32, h: f32| (Node { width: px(w), height: px(h), ..default() }, BackgroundColor(HUD_AMBER));
+    commands.spawn((
+        Node { position_type: PositionType::Absolute, left: px(20), bottom: px(14), align_items: AlignItems::Center, column_gap: px(10), ..default() },
+        children![
+            // Health cross.
+            (Node { width: px(24), height: px(24), justify_content: JustifyContent::Center, align_items: AlignItems::Center, ..default() },
+                children![icon(24.0, 7.0), (Node { position_type: PositionType::Absolute, width: px(7), height: px(24), ..default() }, BackgroundColor(HUD_AMBER))]),
+            (HealthText, Text::new(""), big.clone(), amber, Node { width: px(80), ..default() }),
+            // Armor: a shield-ish outline.
+            (Node { width: px(18), height: px(22), border: UiRect::all(px(4)), border_radius: BorderRadius::bottom(px(9)), ..default() }, BorderColor::all(HUD_AMBER)),
+            (ArmorText, Text::new(""), big.clone(), amber),
+        ],
+    ));
+    commands.spawn((
+        Node { position_type: PositionType::Absolute, right: px(20), bottom: px(56), ..default() },
+        children![(MoneyText, Text::new(""), big.clone(), amber)],
+    ));
+    commands.spawn((
+        Node { position_type: PositionType::Absolute, bottom: px(14), width: percent(100), justify_content: JustifyContent::Center, ..default() },
+        children![(TimerText, Text::new(""), big.clone(), amber)],
     ));
     commands.spawn((
         Hud,
         Text::new(""),
-        Node { position_type: PositionType::Absolute, left: px(12), bottom: px(12), ..default() },
+        TextLayout { justify: Justify::Center, ..default() },
+        Node { position_type: PositionType::Absolute, bottom: px(90), width: percent(100), justify_content: JustifyContent::Center, ..default() },
+    ));
+    commands.spawn((
+        NetGraphText,
+        Text::new(""),
+        TextFont { font_size: FontSize::Px(13.0), ..default() },
+        Node { position_type: PositionType::Absolute, left: px(12), top: px(12), ..default() },
+        Visibility::Hidden,
     ));
     // Scope: a round lens whose huge black outline blacks out the rest of the screen, with thin crosshair lines
     // through it, like CS 1.6's AWP scope.
@@ -394,8 +453,9 @@ fn setup(
     commands.spawn((
         AmmoText,
         Text::new(""),
-        TextFont { font_size: FontSize::Px(28.0), ..default() },
-        Node { position_type: PositionType::Absolute, right: px(16), bottom: px(12), ..default() },
+        TextFont { font_size: FontSize::Px(34.0), ..default() },
+        TextColor(HUD_AMBER),
+        Node { position_type: PositionType::Absolute, right: px(20), bottom: px(14), ..default() },
     ));
     commands.spawn((
         BuyMenu,
@@ -759,7 +819,19 @@ fn wrap_angle(a: f32) -> f32 {
     (a + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
 }
 
-fn hud(mut text: Single<&mut Text, With<Hud>>, mut g: ResMut<Game>, time: Res<Time>) {
+#[allow(clippy::type_complexity)]
+fn hud(
+    mut texts: ParamSet<(
+        Single<&mut Text, With<Hud>>,
+        Single<&mut Text, With<HealthText>>,
+        Single<&mut Text, With<ArmorText>>,
+        Single<&mut Text, With<MoneyText>>,
+        Single<(&mut Text, &mut Visibility), With<NetGraphText>>,
+    )>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut g: ResMut<Game>,
+    time: Res<Time>,
+) {
     let ping = g.ping_ms;
     let interp = g.interp_ticks / TICK_HZ * 1000.0;
     let n = &mut g.net_graph;
@@ -783,10 +855,21 @@ fn hud(mut text: Single<&mut Text, With<Hud>>, mut g: ResMut<Game>, time: Res<Ti
         ),
         (true, None) => "SERVER IS A DIFFERENT VERSION - update both".into(),
         (_, None) => "connecting...".into(),
-        _ if g.hp > 0 => format!("HP {}   Armor {}   ${}", g.hp, g.armor, g.money),
-        _ => format!("DEAD   ${}", g.money),
+        _ if g.hp > 0 => String::new(),
+        _ => "You are dead - spectating".into(),
     };
-    text.0 = format!("{status}   K {}  D {}\n{}", g.kills, g.deaths, g.net_graph.line);
+    texts.p0().0 = status;
+    let alive = g.hp > 0 && g.me.is_some();
+    texts.p1().0 = if alive { g.hp.to_string() } else { String::new() };
+    texts.p2().0 = if alive { g.armor.to_string() } else { String::new() };
+    texts.p3().0 = format!("$ {}", g.money);
+    // Network stats, like CS's net_graph: toggle with N.
+    let mut net = texts.p4();
+    let (text, vis) = &mut *net;
+    if keys.just_pressed(KeyCode::KeyN) {
+        **vis = if **vis == Visibility::Hidden { Visibility::Inherited } else { Visibility::Hidden };
+    }
+    text.0 = format!("{}\nK {}  D {}", g.net_graph.line, g.kills, g.deaths);
 }
 
 fn draw_tracers(mut gizmos: Gizmos, mut g: ResMut<Game>, time: Res<Time>) {
@@ -844,7 +927,11 @@ fn bomb_beep(mut g: ResMut<Game>) {
     g.sounds.push((Sound::Beep, volume));
 }
 
-fn scoreboard(mut text: Single<&mut Text, With<Scoreboard>>, g: Res<Game>) {
+fn scoreboard(
+    mut text: Single<&mut Text, (With<Scoreboard>, Without<TimerText>)>,
+    mut timer: Single<&mut Text, With<TimerText>>,
+    g: Res<Game>,
+) {
     let Some(r) = g.round else { return };
     let secs = r.time_left.ceil() as u32;
     let my_team = g.me.and_then(|me| g.teams.get(&me)).copied();
@@ -868,7 +955,8 @@ fn scoreboard(mut text: Single<&mut Text, With<Scoreboard>>, g: Res<Game>) {
         Some(t) => t.name(),
         None => "",
     };
-    text.0 = format!("T {}   {}:{:02}   {} CT\n{side}\n{message}", r.score[0], secs / 60, secs % 60, r.score[1]);
+    timer.0 = format!("{}:{:02}", secs / 60, secs % 60);
+    text.0 = format!("T {}  -  {} CT   ({side})\n{message}", r.score[0], r.score[1]);
 }
 
 fn play_sounds(mut commands: Commands, mut g: ResMut<Game>, sounds: Res<Sounds>) {
@@ -902,12 +990,27 @@ fn death_fade(mut fade: Single<&mut BackgroundColor, With<DeathFade>>, g: Res<Ga
     fade.0 = Color::BLACK.with_alpha(alpha);
 }
 
+fn crosshair_line(dir: Vec2) -> impl Bundle {
+    let (w, h) = if dir.x != 0.0 { (px(9), px(2)) } else { (px(2), px(9)) };
+    (Crosshair(dir), Node { position_type: PositionType::Absolute, width: w, height: h, ..default() }, BackgroundColor(CROSSHAIR_GREEN))
+}
+
+/// CS-style dynamic crosshair: the four lines spread with movement, jumping and recoil, like the real spread.
 /// Grayed out while reloading or drawing, so a held trigger firing late doesn't read as lag. Hidden when scoped.
-fn crosshair(mut q: Single<(&mut TextColor, &mut Visibility), With<Crosshair>>, g: Res<Game>) {
-    let (color, vis) = &mut *q;
+fn crosshair(mut q: Query<(&Crosshair, &mut Node, &mut BackgroundColor, &mut Visibility)>, g: Res<Game>) {
     let busy = g.pred.reloading > 0 || g.pred.fire_cd as f32 > g.pred.weapon().spec().cycle * TICK_HZ as f32;
-    color.0 = if busy { Color::srgba(0.5, 0.5, 0.5, 0.6) } else { Color::WHITE };
-    **vis = if g.zoom { Visibility::Hidden } else { Visibility::Inherited };
+    let speed = (g.pred.vel.with_y(0.0).length() / 6.35).min(1.0);
+    let air = if g.pred.on_ground { 0.0 } else { 1.0 };
+    let gap = 4.0 + 18.0 * speed + 14.0 * air + 3.0 * g.pred.recoil.min(6.0);
+    for (line, mut node, mut color, mut vis) in &mut q {
+        // Lines are 9 px long and 2 px thick; offset each from the center by the gap.
+        let at = line.0 * (gap + 4.5);
+        let (w, h) = if line.0.x != 0.0 { (9.0, 2.0) } else { (2.0, 9.0) };
+        node.left = px(at.x - w / 2.0);
+        node.top = px(-at.y - h / 2.0);
+        color.0 = if busy { Color::srgba(0.5, 0.5, 0.5, 0.6) } else { CROSSHAIR_GREEN };
+        *vis = if g.zoom { Visibility::Hidden } else { Visibility::Inherited };
+    }
 }
 
 fn add_tracer(g: &mut Game, weapon: Weapon, from: Vec3, to: Vec3) {
@@ -944,12 +1047,10 @@ fn viewmodel(mut q: Query<(&Viewmodel, &mut Transform, &mut Visibility)>, g: Res
 }
 
 fn ammo_hud(mut text: Single<&mut Text, With<AmmoText>>, g: Res<Game>) {
-    let w = g.pred.weapon();
     text.0 = match g.pred.ammo() {
         _ if g.hp <= 0 => String::new(),
-        None => w.spec().name.into(),
-        Some(_) if g.pred.reloading > 0 => format!("{}  reloading...", w.spec().name),
-        Some((mag, reserve)) => format!("{}  {mag} / {reserve}", w.spec().name),
+        None => String::new(),
+        Some((mag, reserve)) => format!("{mag}  |  {reserve}"),
     };
 }
 

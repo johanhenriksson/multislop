@@ -16,7 +16,9 @@ Deadline: playable before 00:00. One weapon, one simple map.
 ## Gameplay
 - Players are capsules ("rounded cylinders"): radius 0.4, height 1.8, eye at 1.6.
 - Movement: Quake/GoldSrc style (ground friction, accel, air accel, gravity, jump). WASD + mouse, space jumps.
-- HUD: crosshair (gray while the gun cools down), HP, kills/deaths, net_graph line (ping is network round trip only, via
+- HUD (CS 1.6 style): amber health cross, armor, money, ammo, round timer bottom-center; green dynamic crosshair
+  that spreads with movement, air and recoil (gray while reloading); score and round messages top; N toggles the
+  net_graph line (ping is network round trip only, via
   a client timestamp the server echoes with its hold time) (ping, worst snapshot gap, correction, interp starvation).
 
 ## Weapons and economy (`src/weapons.rs`, CS 1.6 stats)
