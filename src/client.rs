@@ -1412,8 +1412,12 @@ fn terrain_mesh() -> Mesh {
             let normal = (quad[2] - quad[0]).cross(quad[1] - quad[3]).normalize_or(Vec3::Y);
             let normal = if normal.y < 0.0 { -normal } else { normal };
             let base = pos.len() as u32;
-            for p in quad {
-                let shade = 0.55 + 0.45 * (p.y / 2.0).clamp(0.0, 1.0);
+            for (i, p) in quad.into_iter().enumerate() {
+                // Baked contact shadow: floor corners next to walls and crates are darker, like a lightmap.
+                let (cx, cz) = [(x, z), (x + 1, z), (x + 1, z + 1), (x, z + 1)][i];
+                let around = [(cx.wrapping_sub(1), cz.wrapping_sub(1)), (cx, cz.wrapping_sub(1)), (cx.wrapping_sub(1), cz), (cx, cz)];
+                let solid = around.iter().filter(|&&(ax, az)| !MAP.walkable(ax, az)).count() as f32;
+                let shade = (0.55 + 0.45 * (p.y / 2.0).clamp(0.0, 1.0)) * (1.0 - 0.14 * solid);
                 pos.push(p.to_array());
                 normals.push(normal.to_array());
                 // The texture carries the sand color; vertex color only darkens the low tunnels.
