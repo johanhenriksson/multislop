@@ -781,7 +781,9 @@ mod tests {
         }
         let (mut m, mut history, mut shots, mut hits) = (new_match(), VecDeque::new(), vec![], vec![]);
         let (mut tick, mut plants, mut planted) = (1, 0, false);
-        while m.round.number <= 10 && tick < ticks(30.0 * 60.0) {
+        // FPS16_ROUNDS plays a longer match, for tuning bots without the noise of 10 rounds.
+        let rounds = std::env::var("FPS16_ROUNDS").ok().and_then(|r| r.parse().ok()).unwrap_or(10);
+        while m.round.number <= rounds && tick < ticks(rounds as f32 * 3.0 * 60.0) {
             run_inputs(&m, &mut clients, &history, tick, &mut shots, &mut hits);
             tick += 1;
             update_match(&mut m, &mut clients, tick);
@@ -799,7 +801,7 @@ mod tests {
             tick as f32 / TICK_HZ as f32 / 60.0,
             shots.len()
         );
-        assert!(t + ct >= 10, "rounds should finish");
+        assert!(t + ct >= rounds, "rounds should finish");
         assert!(kills >= 10, "bots should fight");
         assert!(plants >= 1, "Ts should plant at least once");
     }

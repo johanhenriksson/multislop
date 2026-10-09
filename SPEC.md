@@ -38,7 +38,8 @@ Deadline: playable before 00:00. One weapon, one simple map.
 ## Rounds (bomb defusal)
 - Teams T and CT, humans auto-balanced on join, friendly fire off. Server-side bots fill both teams to 3v3 (or to the
   bigger human team); they path over the map grid via a random detour point each round (Ts share a random site, some lurk;
-  CTs hold random spots), plant/defuse, call out spotted enemies so teammates rotate, and
+  CTs hold spots next to cover that watch the T entrance and move between them, facing the entrance), strafe in
+  fights and only shoot once slowed down (counter-strafing), plant/defuse, call out spotted enemies so teammates rotate, and
   only notice enemies in a 120° field of view (callouts too), aim with a reaction delay, limited turn speed and angular aim error (~30% accuracy bot vs bot; `src/bot.rs`
   constants are the difficulty knobs).
 - Map: dust, traced from a top-down overview image into an ASCII grid in `src/map.rs` (2 m cells, flat): B site

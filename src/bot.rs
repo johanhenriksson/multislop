@@ -13,7 +13,7 @@ const AIM_TURN_SPEED: f32 = 3.5;
 /// How far off a bot's aim can be, in radians (0.05 is about 1 m at 20 m; the hit capsule's radius is 0.4 m).
 /// Rerolled for each new target and after every shot, and shrinks by AIM_SETTLE per tick while tracking, so far
 /// targets and quick follow-up shots miss more.
-const AIM_ERROR: f32 = 0.05;
+const AIM_ERROR: f32 = 0.06;
 const AIM_SETTLE: f32 = 0.995;
 const SIGHT_RANGE: f32 = 60.0;
 /// Half of the field of view in which bots notice enemies, in radians (60° each side).
@@ -34,6 +34,12 @@ pub struct Bot {
     spot: Vec3,
     /// A detour on the way, so bots don't all walk the same shortest path every round.
     via: Option<Vec3>,
+    /// CT: spots next to cover that watch where Ts enter the site, and when to move to another one.
+    cover: Vec<Vec3>,
+    reposition_at: u32,
+    /// Strafe direction in a fight (-1 or 1) and when to switch it.
+    strafe: f32,
+    strafe_until: u32,
     round: u32,
     /// Current enemy and the tick we first saw them.
     target: Option<(u32, u32)>,
@@ -57,6 +63,10 @@ impl Bot {
             site: 'A',
             spot: Vec3::ZERO,
             via: None,
+            cover: vec![],
+            reposition_at: 0,
+            strafe: 1.0,
+            strafe_until: 0,
             round: 0,
             target: None,
             aim_error: (0.0, 0.0),
@@ -73,6 +83,41 @@ impl Bot {
     fn roll_aim_error(&mut self, scale: f32) -> (f32, f32) {
         let e = AIM_ERROR * scale;
         ((self.random() * 2.0 - 1.0) * e, (self.random() * 2.0 - 1.0) * e * 0.5)
+    }
+
+    /// Spots near a site, next to a wall or crate, that can see where the Ts come in. Shuffled; best first.
+    fn cover_spots(&mut self, site: char) -> Vec<Vec3> {
+        let center = MAP.site_center(site);
+        // Where the T path enters the site area: the first point on it within 14 m of the site.
+        let field = MAP.distance_field(MAP.cell(center));
+        let w = MAP.width();
+        let mut cell = MAP.cell(MAP.spawns(Team::T)[0]);
+        while MAP.center(cell.0, cell.1).distance(center.with_y(0.0)) > 14.0 {
+            let here = field[cell.1 * w + cell.0];
+            match MAP.neighbors(cell.0, cell.1).find(|&(x, z)| field[z * w + x] < here) {
+                Some(next) => cell = next,
+                None => break,
+            }
+        }
+        let choke = MAP.ground(cell.0, cell.1);
+        let near_cover = |x: usize, z: usize| {
+            [(1isize, 0isize), (-1, 0), (0, 1), (0, -1)].iter().any(|&(dx, dz)| {
+                let (nx, nz) = (x.wrapping_add_signed(dx), z.wrapping_add_signed(dz));
+                !MAP.walkable(nx, nz)
+            })
+        };
+        let mut spots: Vec<Vec3> = (0..MAP.depth())
+            .flat_map(|z| (0..w).map(move |x| (x, z)))
+            .filter(|&(x, z)| MAP.walkable(x, z) && near_cover(x, z))
+            .map(|(x, z)| MAP.ground(x, z))
+            .filter(|p| p.distance(center.with_y(p.y)) < 12.0 && p.distance(choke) > 6.0)
+            .filter(|p| can_see(*p + Vec3::Y * EYE, choke))
+            .collect();
+        for i in (1..spots.len()).rev() {
+            let j = (self.random() * (i + 1) as f32) as usize;
+            spots.swap(i, j.min(i));
+        }
+        spots
     }
 
     /// A random floor cell on a bomb site, near its middle.
@@ -132,7 +177,6 @@ impl Bot {
         let spec = me.weapon().spec();
         if round.number != self.round {
             self.round = round.number;
-            // Ts all go for the same site; CTs split up to cover both.
             // Ts go for the site the server picked, except the odd lurker; CTs split up to cover both.
             let other = |s: char| if s == 'A' { 'B' } else { 'A' };
             self.site = match team {
@@ -142,6 +186,13 @@ impl Bot {
                 Team::Ct => 'B',
             };
             self.spot = self.random_site_spot(self.site);
+            if team == Team::Ct {
+                self.cover = self.cover_spots(self.site);
+                if let Some(&first) = self.cover.first() {
+                    self.spot = first;
+                }
+                self.reposition_at = tick + secs(6.0 + 6.0 * self.random());
+            }
             // Ts detour less so they still arrive roughly together.
             let detour = if team == Team::T { 128 } else { 135 };
             self.via = self.pick_via(me.pos, self.spot, detour);
@@ -177,10 +228,23 @@ impl Bot {
             let ready = me.fire_cd == 0 && me.reloading == 0;
             // Automatic weapons in bursts as recoil builds; semi-automatic ones need the trigger released.
             let trigger = if spec.auto { me.recoil < 3.0 } else { !me.trigger };
-            inp.fire = lined_up && reacted && ready && trigger;
+            // Counter-strafe: only shoot once slowed down, since moving throws shots off.
+            let steady = me.vel.with_y(0.0).length() < 0.4 * 6.35 || !me.on_ground;
+            inp.fire = lined_up && reacted && ready && trigger && steady;
             inp.zoom = me.weapon() == Weapon::Awp;
             if inp.fire {
                 self.aim_error = self.roll_aim_error(if spec.auto { 0.5 } else { 1.0 });
+            }
+            // Strafe side to side while lining up or waiting to fire; back off while reloading.
+            if tick >= self.strafe_until {
+                self.strafe = if self.random() < 0.5 { -1.0 } else { 1.0 };
+                self.strafe_until = tick + secs(0.35 + 0.5 * self.random());
+            }
+            let about_to_fire = lined_up && reacted && ready && trigger;
+            if me.reloading > 0 {
+                (inp.forward, inp.right) = (-1.0, self.strafe);
+            } else if !about_to_fire && me.weapon() != Weapon::Awp {
+                inp.right = self.strafe;
             }
             return inp;
         }
@@ -196,16 +260,25 @@ impl Bot {
             inp.use_key = true;
             return inp;
         }
+        // CTs holding a site move between cover spots now and then so they're not always in the same place.
+        if team == Team::Ct && tick >= self.reposition_at && !matches!(round.bomb, Bomb::Planted(_)) && self.cover.len() > 1 {
+            let pick = (self.random() * self.cover.len() as f32) as usize;
+            self.spot = self.cover[pick];
+            self.reposition_at = tick + secs(6.0 + 6.0 * self.random());
+        }
+        // Look down the path the enemy would take to get here.
+        let enemy_spawn = MAP.spawns(if team == Team::T { Team::Ct } else { Team::T })[0];
+        let watch = path_dir(&mut self.watch, &mut self.watch_goal, me.pos, enemy_spawn);
         if at_goal {
-            // Hold the spot looking down the path the enemy would take to get here.
-            let enemy_spawn = MAP.spawns(if team == Team::T { Team::Ct } else { Team::T })[0];
-            let look = path_dir(&mut self.watch, &mut self.watch_goal, me.pos, enemy_spawn);
-            let (yaw, _) = look_at(Vec3::ZERO, look);
+            let (yaw, _) = look_at(Vec3::ZERO, watch);
             inp.yaw = me.yaw + wrap(yaw - me.yaw).clamp(-4.0 * DT, 4.0 * DT);
             return inp;
         }
         let dir = path_dir(&mut self.field, &mut self.field_goal, me.pos, goal);
-        let (yaw, _) = look_at(Vec3::ZERO, dir);
+        // A CT moving between spots on its site keeps watching the T entrance and sidesteps instead.
+        let near_site = me.pos.with_y(0.0).distance(MAP.site_center(self.site).with_y(0.0)) < 15.0;
+        let facing = if team == Team::Ct && near_site { watch } else { dir };
+        let (yaw, _) = look_at(Vec3::ZERO, facing);
         let max = 8.0 * DT;
         inp.yaw = me.yaw + wrap(yaw - me.yaw).clamp(-max, max);
         inp.pitch = me.pitch * 0.9;
@@ -271,6 +344,10 @@ pub fn in_view(viewer: &PlayerState, feet: Vec3) -> bool {
 pub fn can_see(eye: Vec3, feet: Vec3) -> bool {
     let to = feet + Vec3::Y * 1.2 - eye;
     to.length() < SIGHT_RANGE && trace_world(eye, to.normalize()) > to.length()
+}
+
+fn secs(s: f32) -> u32 {
+    (s * TICK_HZ as f32) as u32
 }
 
 fn look_at(from: Vec3, to: Vec3) -> (f32, f32) {
