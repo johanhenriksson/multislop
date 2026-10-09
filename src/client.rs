@@ -127,7 +127,9 @@ struct Game {
     want_slot: u8,
     want_buy: u8,
     want_reload: bool,
-    kill_feed: VecDeque<(String, Instant)>,
+    kill_feed: VecDeque<KillLine>,
+    /// Bumped whenever the kill feed changes, so its rows are rebuilt only then.
+    feed_version: u32,
     hurt_at: Option<Instant>,
     fx: Vec<FxKind>,
     /// Everyone as of the newest snapshot, for the scoreboard.
@@ -233,6 +235,21 @@ struct BuyMenu;
 
 #[derive(Component)]
 struct KillFeed;
+
+/// One kill feed entry: killer and victim with their teams, the weapon, headshot.
+struct KillLine {
+    killer: (String, Option<Team>),
+    weapon: Weapon,
+    victim: (String, Option<Team>),
+    headshot: bool,
+    at: Instant,
+}
+
+#[derive(Component)]
+struct BuyRow(usize);
+
+#[derive(Component)]
+struct BuyTitle;
 
 #[derive(Component)]
 struct HurtFlash;
@@ -554,18 +571,36 @@ fn setup(
         TextColor(HUD_AMBER),
         Node { position_type: PositionType::Absolute, right: px(20), bottom: px(14), ..default() },
     ));
+    // CS 1.6 buy menu: dark panel, amber title, numbered entries, unaffordable ones grayed out.
+    let row = |i: usize| (BuyRow(i), Text::new(""), TextFont { font_size: FontSize::Px(18.0), ..default() });
     commands.spawn((
         BuyMenu,
-        Text::new(""),
-        Node { position_type: PositionType::Absolute, left: px(24), top: percent(30), ..default() },
-        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
+        Node {
+            position_type: PositionType::Absolute,
+            left: px(24),
+            top: percent(28),
+            flex_direction: FlexDirection::Column,
+            row_gap: px(6),
+            padding: UiRect::all(px(14)),
+            border: UiRect::left(px(3)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.75)),
+        BorderColor::all(HUD_AMBER),
         Visibility::Hidden,
+        children![
+            (BuyTitle, Text::new(""), TextColor(HUD_AMBER), TextFont { font_size: FontSize::Px(20.0), ..default() }),
+            row(0),
+            row(1),
+            row(2),
+            row(3),
+            row(4),
+            (Text::new("B / Esc  close"), TextColor(Color::srgb(0.55, 0.55, 0.55)), TextFont { font_size: FontSize::Px(13.0), ..default() }),
+        ],
     ));
     commands.spawn((
         KillFeed,
-        Text::new(""),
-        TextLayout { justify: Justify::Right, ..default() },
-        Node { position_type: PositionType::Absolute, right: px(16), top: px(12), ..default() },
+        Node { position_type: PositionType::Absolute, right: px(16), top: px(12), flex_direction: FlexDirection::Column, align_items: AlignItems::End, row_gap: px(3), ..default() },
     ));
 }
 
@@ -752,12 +787,13 @@ fn on_snapshot(g: &mut Game, snap: Snapshot) {
             g.fx.push(FxKind::Blood(at));
         }
         if h.killed {
-            let hs = if h.headshot { " (headshot)" } else { "" };
-            let line = format!("{} [{}] {}{hs}", name(g, h.attacker), h.weapon.spec().name, name(g, h.victim));
-            g.kill_feed.push_back((line, Instant::now()));
+            let side = |id: u32| (name(g, id), g.teams.get(&id).copied());
+            let line = KillLine { killer: side(h.attacker), weapon: h.weapon, victim: side(h.victim), headshot: h.headshot, at: Instant::now() };
+            g.kill_feed.push_back(line);
             if g.kill_feed.len() > 5 {
                 g.kill_feed.pop_front();
             }
+            g.feed_version += 1;
         }
     }
     let prev = g.round.replace(snap.round);
@@ -1283,21 +1319,62 @@ fn ammo_hud(mut text: Single<&mut Text, With<AmmoText>>, g: Res<Game>) {
     };
 }
 
-fn buy_menu_hud(mut q: Single<(&mut Text, &mut Visibility), With<BuyMenu>>, g: Res<Game>) {
-    let (text, vis) = &mut *q;
-    **vis = if g.menu { Visibility::Inherited } else { Visibility::Hidden };
+#[allow(clippy::type_complexity)]
+fn buy_menu_hud(
+    mut panel: Single<&mut Visibility, With<BuyMenu>>,
+    mut title: Single<&mut Text, (With<BuyTitle>, Without<BuyRow>)>,
+    mut rows: Query<(&BuyRow, &mut Text, &mut TextColor), Without<BuyTitle>>,
+    g: Res<Game>,
+) {
+    let show = g.menu || std::env::var_os("FPS16_BUYMENU").is_some();
+    **panel = if show { Visibility::Inherited } else { Visibility::Hidden };
     let (Some(r), Some(team)) = (g.round, g.me.and_then(|me| g.teams.get(&me))) else { return };
-    let mut lines = format!(" BUY  ${}   ({:.0} s left)\n", g.money, r.buy_secs);
-    for (i, item) in buy_menu(*team).iter().enumerate() {
-        let mark = if item.price() <= g.money { " " } else { "x" };
-        lines += &format!(" {mark} {}  {:<16} ${}\n", i + 1, item.name(), item.price());
+    title.0 = format!("BUY   ${}   {:.0}s", g.money, r.buy_secs.ceil());
+    let menu = buy_menu(*team);
+    for (row, mut text, mut color) in &mut rows {
+        let item = menu[row.0];
+        text.0 = format!("{}  {:<17}${}", row.0 + 1, item.name(), item.price());
+        color.0 = if item.price() <= g.money { Color::WHITE } else { Color::srgb(0.5, 0.5, 0.5) };
     }
-    text.0 = lines + " B / Esc to close ";
 }
 
-fn kill_feed(mut text: Single<&mut Text, With<KillFeed>>, mut g: ResMut<Game>) {
-    g.kill_feed.retain(|(_, at)| at.elapsed().as_secs_f32() < 6.0);
-    text.0 = g.kill_feed.iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>().join("\n");
+fn team_text_color(team: Option<Team>) -> Color {
+    match team {
+        Some(Team::T) => Color::srgb(1.0, 0.45, 0.3),
+        Some(Team::Ct) => Color::srgb(0.55, 0.7, 1.0),
+        None => Color::WHITE,
+    }
+}
+
+/// CS 1.6 kill feed: one dark strip per kill, names in team colors, the weapon between, headshots marked.
+fn kill_feed(mut commands: Commands, feed: Single<Entity, With<KillFeed>>, mut g: ResMut<Game>, mut shown: Local<u32>) {
+    let before = g.kill_feed.len();
+    g.kill_feed.retain(|l| l.at.elapsed().as_secs_f32() < 6.0);
+    if g.kill_feed.len() != before {
+        g.feed_version += 1;
+    }
+    if *shown == g.feed_version {
+        return;
+    }
+    *shown = g.feed_version;
+    commands.entity(*feed).despawn_children();
+    let font = TextFont { font_size: FontSize::Px(16.0), ..default() };
+    for line in &g.kill_feed {
+        let weapon = format!("  [{}]{}  ", line.weapon.spec().name, if line.headshot { " HS" } else { "" });
+        let parts = [
+            (line.killer.0.clone(), team_text_color(line.killer.1)),
+            (weapon, HUD_AMBER),
+            (line.victim.0.clone(), team_text_color(line.victim.1)),
+        ];
+        let row = commands
+            .spawn((Node { padding: UiRect::axes(px(8), px(3)), ..default() }, BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.55))))
+            .id();
+        for (text, color) in parts {
+            let t = commands.spawn((Text::new(text), TextColor(color), font.clone())).id();
+            commands.entity(row).add_child(t);
+        }
+        commands.entity(*feed).add_child(row);
+    }
 }
 
 fn hurt_flash(mut flash: Single<&mut BackgroundColor, With<HurtFlash>>, g: Res<Game>) {
