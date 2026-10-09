@@ -123,7 +123,7 @@ impl Map {
         (self.width() as f32 * CELL, self.rows.len() as f32 * CELL)
     }
 
-    fn center(&self, x: usize, z: usize) -> Vec3 {
+    pub fn center(&self, x: usize, z: usize) -> Vec3 {
         let (w, d) = self.size();
         Vec3::new(x as f32 * CELL + CELL / 2.0 - w / 2.0, 0.0, z as f32 * CELL + CELL / 2.0 - d / 2.0)
     }
@@ -135,6 +135,52 @@ impl Map {
             return b'#';
         }
         self.rows.get(z as usize).and_then(|r| r.get(x as usize)).copied().unwrap_or(b'#')
+    }
+
+    /// Grid cell containing this position.
+    pub fn cell(&self, pos: Vec3) -> (usize, usize) {
+        let (w, d) = self.size();
+        let x = ((pos.x + w / 2.0) / CELL).clamp(0.0, self.width() as f32 - 1.0);
+        let z = ((pos.z + d / 2.0) / CELL).clamp(0.0, self.rows.len() as f32 - 1.0);
+        (x as usize, z as usize)
+    }
+
+    pub fn walkable(&self, x: usize, z: usize) -> bool {
+        self.rows.get(z).and_then(|r| r.get(x)).is_some_and(|&c| solid_height(c).is_none())
+    }
+
+    /// Steps from every walkable cell to `goal`, 8-connected without cutting corners. `u16::MAX` is unreachable.
+    pub fn distance_field(&self, goal: (usize, usize)) -> Vec<u16> {
+        let w = self.width();
+        let mut dist = vec![u16::MAX; w * self.rows.len()];
+        let mut queue = std::collections::VecDeque::from([goal]);
+        dist[goal.1 * w + goal.0] = 0;
+        while let Some((x, z)) = queue.pop_front() {
+            for (nx, nz) in self.neighbors(x, z) {
+                if dist[nz * w + nx] == u16::MAX {
+                    dist[nz * w + nx] = dist[z * w + x] + 1;
+                    queue.push_back((nx, nz));
+                }
+            }
+        }
+        dist
+    }
+
+    pub fn neighbors(&self, x: usize, z: usize) -> impl Iterator<Item = (usize, usize)> + '_ {
+        const DIRS: [(isize, isize); 8] = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)];
+        DIRS.into_iter().filter_map(move |(dx, dz)| {
+            let (nx, nz) = (x.checked_add_signed(dx)?, z.checked_add_signed(dz)?);
+            // Diagonals only when both sides are open, so paths never clip a wall corner.
+            let open = self.walkable(nx, nz) && self.walkable(nx, z) && self.walkable(x, nz);
+            open.then_some((nx, nz))
+        })
+    }
+
+    /// The bomb site cell nearest the middle of the site (the middle itself may be a crate).
+    pub fn site_center(&self, site: char) -> Vec3 {
+        let cells: Vec<Vec3> = self.site_cells().filter(|p| self.site_at(*p) == Some(site)).collect();
+        let mid = cells.iter().sum::<Vec3>() / cells.len().max(1) as f32;
+        cells.into_iter().min_by(|a, b| a.distance(mid).total_cmp(&b.distance(mid))).unwrap_or(mid)
     }
 
     /// Which bomb site, if any, this floor position is on.

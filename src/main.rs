@@ -1,3 +1,4 @@
+mod bot;
 mod client;
 mod map;
 mod model;

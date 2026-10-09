@@ -1,3 +1,4 @@
+use crate::bot::{Bot, Seen, can_see};
 use crate::map::MAP;
 use crate::shared::*;
 use bevy::math::Vec3;
@@ -24,6 +25,8 @@ struct Client {
     last_queued: u32,
     echo: (f64, Instant),
     stats: LinkStats,
+    /// Server-controlled player filling a team slot.
+    bot: Option<Bot>,
 }
 
 /// Per-player connection quality, printed every few seconds so a bad link is easy to spot.
@@ -107,6 +110,7 @@ pub fn run(port: u16) {
                     last_queued: 0,
                     echo: (0.0, Instant::now()),
                     stats: LinkStats::default(),
+                    bot: None,
                 });
                 next_id += 1;
             }
@@ -130,34 +134,12 @@ pub fn run(port: u16) {
             }
         }
 
-        let addrs: Vec<SocketAddr> = clients.keys().copied().collect();
-        for addr in addrs {
-            let c = clients.get_mut(&addr).unwrap();
-            c.stats.max_queue = c.stats.max_queue.max(c.queue.len());
-            if c.queue.is_empty() {
-                c.stats.empty_ticks += 1;
-            }
-            let n = if c.queue.len() > QUEUE_CATCH_UP { 2 } else { 1 };
-            for _ in 0..n {
-                let c = clients.get_mut(&addr).unwrap();
-                let Some(inp) = c.queue.pop_front() else { break };
-                c.last_seq = inp.seq;
-                c.using = inp.use_key;
-                if c.hp <= 0 {
-                    continue;
-                }
-                if step_player(&mut c.state, &inp) {
-                    let shooter = c.id;
-                    let shot = (eye(&c.state), aim_dir(&c.state));
-                    let to = fire(&mut clients, &history, tick, shooter, shot, inp.view_tick);
-                    shots.push(Shot { shooter, from: shot.0, to });
-                }
-            }
-        }
+        balance_bots(&mut game, &mut clients, &mut next_id);
+        run_inputs(&game, &mut clients, &history, tick, &mut shots);
 
         if Instant::now() >= stats_at {
             stats_at += STATS_EVERY;
-            for (addr, c) in &mut clients {
+            for (addr, c) in clients.iter_mut().filter(|(_, c)| c.bot.is_none()) {
                 let st = std::mem::take(&mut c.stats);
                 // One packet every INPUT_EVERY client ticks, so the seq span tells how many were sent.
                 let sent = st.first_seq.map_or(0, |f| c.last_queued.saturating_sub(f) / INPUT_EVERY + 1);
@@ -186,10 +168,7 @@ pub fn run(port: u16) {
         tick += 1;
         update_match(&mut game, &mut clients, tick);
 
-        history.push_back((tick, clients.values().map(|c| (c.id, c.state.pos, c.hp > 0)).collect()));
-        while history.len() > MAX_REWIND_TICKS as usize + 8 {
-            history.pop_front();
-        }
+        record(&mut history, &clients, tick);
 
         if tick % SNAPSHOT_EVERY == 0 {
             let players: Vec<NetPlayer> = clients
@@ -197,7 +176,7 @@ pub fn run(port: u16) {
                 .map(|c| NetPlayer { id: c.id, state: c.state, hp: c.hp, kills: c.kills, deaths: c.deaths, team: c.team })
                 .collect();
             let round = net_round(&game, tick);
-            for (addr, c) in &clients {
+            for (addr, c) in clients.iter().filter(|(_, c)| c.bot.is_none()) {
                 let snap = Snapshot {
                     tick,
                     you: c.id,
@@ -222,9 +201,110 @@ pub fn run(port: u16) {
     }
 }
 
+/// One tick of player simulation: bots decide, then every player's next queued input is applied.
+fn run_inputs(game: &Match, clients: &mut HashMap<SocketAddr, Client>, history: &History, tick: u32, shots: &mut Vec<Shot>) {
+    let seen: Vec<Seen> =
+        clients.values().map(|c| Seen { id: c.id, team: c.team, pos: c.state.pos, alive: c.hp > 0 }).collect();
+    // An enemy any living teammate (bot or human) can see right now, so bots can rotate to help.
+    let callout = |team: Team| {
+        let spotters = clients.values().filter(|c| c.team == team && c.hp > 0);
+        let spotted = |eye: Vec3| seen.iter().find(|p| p.alive && p.team != team && can_see(eye, p.pos)).map(|p| p.pos);
+        spotters.map(|c| eye(&c.state)).find_map(spotted)
+    };
+    let callouts = [callout(Team::T), callout(Team::Ct)];
+    for c in clients.values_mut() {
+        if let Some(bot) = &mut c.bot {
+            let inp = bot.think(c.id, &c.state, c.team, &game.round, &seen, callouts[c.team as usize], tick);
+            (c.last_queued, c.last_heard) = (inp.seq, Instant::now());
+            c.queue.push_back(inp);
+        }
+    }
+
+    let addrs: Vec<SocketAddr> = clients.keys().copied().collect();
+    for addr in addrs {
+        let c = clients.get_mut(&addr).unwrap();
+        c.stats.max_queue = c.stats.max_queue.max(c.queue.len());
+        if c.queue.is_empty() {
+            c.stats.empty_ticks += 1;
+        }
+        let n = if c.queue.len() > QUEUE_CATCH_UP { 2 } else { 1 };
+        for _ in 0..n {
+            let c = clients.get_mut(&addr).unwrap();
+            let Some(inp) = c.queue.pop_front() else { break };
+            c.last_seq = inp.seq;
+            c.using = inp.use_key;
+            if c.hp <= 0 {
+                continue;
+            }
+            if step_player(&mut c.state, &inp) {
+                let shooter = c.id;
+                let shot = (eye(&c.state), aim_dir(&c.state));
+                let to = fire(clients, history, tick, shooter, shot, inp.view_tick);
+                shots.push(Shot { shooter, from: shot.0, to });
+            }
+        }
+    }
+}
+
+/// Remembers where everyone was this tick, for lag compensation.
+fn record(history: &mut History, clients: &HashMap<SocketAddr, Client>, tick: u32) {
+    history.push_back((tick, clients.values().map(|c| (c.id, c.state.pos, c.hp > 0)).collect()));
+    while history.len() > MAX_REWIND_TICKS as usize + 8 {
+        history.pop_front();
+    }
+}
+
+/// Balances humans only; bots then fill whichever side is short.
 fn smaller_team(clients: &HashMap<SocketAddr, Client>) -> Team {
-    let ts = clients.values().filter(|c| c.team == Team::T).count();
-    if ts * 2 <= clients.len() { Team::T } else { Team::Ct }
+    let humans = clients.values().filter(|c| c.bot.is_none());
+    let ts = humans.clone().filter(|c| c.team == Team::T).count();
+    if ts * 2 <= humans.count() { Team::T } else { Team::Ct }
+}
+
+/// Teams always have at least this many players; bots fill the gaps.
+const TEAM_SIZE: usize = 3;
+
+/// Adds or removes bots so both teams are TEAM_SIZE, or the bigger human team if larger. No humans, no bots.
+fn balance_bots(m: &mut Match, clients: &mut HashMap<SocketAddr, Client>, next_id: &mut u32) {
+    let humans = |team: Team| clients.values().filter(|c| c.bot.is_none() && c.team == team).count();
+    let (ts, cts) = (humans(Team::T), humans(Team::Ct));
+    let size = if ts + cts == 0 { 0 } else { ts.max(cts).max(TEAM_SIZE) };
+    for (team, human_count) in [(Team::T, ts), (Team::Ct, cts)] {
+        let want = size - human_count;
+        let mut bots: Vec<SocketAddr> =
+            clients.iter().filter(|(_, c)| c.bot.is_some() && c.team == team).map(|(a, _)| *a).collect();
+        while bots.len() > want {
+            let c = clients.remove(&bots.pop().unwrap()).unwrap();
+            if m.round.bomb == Bomb::Carried(c.id) {
+                m.round.bomb = Bomb::Dropped(c.state.pos);
+            }
+        }
+        for _ in bots.len()..want {
+            let id = *next_id;
+            *next_id += 1;
+            // Bots aren't on the network; a reserved fake address just keys them in the client map.
+            let addr = SocketAddr::from(([0, 0, 0, 0], (id % 60000) as u16 + 1));
+            let index = clients.values().filter(|c| c.team == team).count();
+            let freeze = m.round.phase == Phase::Freeze;
+            clients.insert(addr, Client {
+                id,
+                state: spawn_state(team, index),
+                last_seq: 0,
+                hp: if freeze { MAX_HP } else { 0 },
+                kills: 0,
+                deaths: 0,
+                team,
+                using: false,
+                last_heard: Instant::now(),
+                queue: VecDeque::new(),
+                last_queued: 0,
+                echo: (0.0, Instant::now()),
+                stats: LinkStats::default(),
+                bot: Some(Bot::new(id)),
+            });
+            println!("bot {id} joined {}", team.name());
+        }
+    }
 }
 
 fn spawn_state(team: Team, index: usize) -> PlayerState {
@@ -436,6 +516,7 @@ mod tests {
             last_queued: 0,
             echo: (0.0, Instant::now()),
             stats: LinkStats::default(),
+            bot: None,
         }
     }
 
@@ -520,6 +601,55 @@ mod tests {
         player(&mut clients, 1).hp = 0;
         run(&mut m, &mut clients, &mut tick, 1.0);
         assert_eq!(m.round.phase, Phase::Live, "CT still has to defuse");
+    }
+
+    /// 3v3 bots, no network: they should move, fight, plant and finish rounds on their own.
+    #[test]
+    fn bots_play_rounds() {
+        let mut clients = HashMap::new();
+        for id in 1..=6 {
+            let team = if id <= 3 { Team::T } else { Team::Ct };
+            let mut c = client(id, team);
+            c.bot = Some(Bot::new(id));
+            clients.insert(SocketAddr::from(([0, 0, 0, 0], id as u16)), c);
+        }
+        let (mut m, mut history, mut shots) = (new_match(), VecDeque::new(), vec![]);
+        let (mut tick, mut plants, mut planted) = (1, 0, false);
+        while m.round.number <= 10 && tick < ticks(30.0 * 60.0) {
+            run_inputs(&m, &mut clients, &history, tick, &mut shots);
+            tick += 1;
+            update_match(&mut m, &mut clients, tick);
+            record(&mut history, &clients, tick);
+            let now_planted = matches!(m.round.bomb, Bomb::Planted(_));
+            plants += (now_planted && !planted) as u32;
+            planted = now_planted;
+        }
+        let kills: u32 = clients.values().map(|c| c.kills).sum();
+        let [t, ct] = m.round.score;
+        println!("{} rounds in {:.0} min, T {t} - {ct} CT, {kills} kills, {plants} plants", t + ct, tick as f32 / TICK_HZ as f32 / 60.0);
+        assert!(t + ct >= 10, "rounds should finish");
+        assert!(kills >= 10, "bots should fight");
+        assert!(plants >= 1, "Ts should plant at least once");
+    }
+
+    #[test]
+    fn bots_fill_to_three_a_side() {
+        let mut clients = HashMap::new();
+        let (mut m, mut next_id) = (new_match(), 10);
+        balance_bots(&mut m, &mut clients, &mut next_id);
+        assert!(clients.is_empty(), "no humans, no bots");
+        let count = |c: &HashMap<SocketAddr, Client>, t: Team| c.values().filter(|c| c.team == t).count();
+        clients.insert("1.0.0.1:1".parse().unwrap(), client(1, Team::T));
+        balance_bots(&mut m, &mut clients, &mut next_id);
+        assert_eq!((count(&clients, Team::T), count(&clients, Team::Ct)), (3, 3));
+        for i in 2..=5 {
+            clients.insert(SocketAddr::from(([1, 0, 0, i as u8], 1)), client(i, Team::Ct));
+        }
+        balance_bots(&mut m, &mut clients, &mut next_id);
+        assert_eq!((count(&clients, Team::T), count(&clients, Team::Ct)), (4, 4), "4 human CTs: Ts topped up to 4");
+        clients.retain(|_, c| c.bot.is_some());
+        balance_bots(&mut m, &mut clients, &mut next_id);
+        assert!(clients.is_empty(), "bots leave with the last human");
     }
 
     #[test]
