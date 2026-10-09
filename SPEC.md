@@ -23,8 +23,8 @@ Deadline: playable before 00:00. One weapon, one simple map.
 
 ## Rounds (bomb defusal)
 - Teams T and CT, auto-balanced on join, friendly fire off. Players are colored by team.
-- Map: de_dust2 approximated as an ASCII grid in `src/map.rs` (2 m cells, flat): T spawn, CT spawn, long A, short A,
-  mid with doors, upper/lower tunnels, A and B sites with crates. Site floors are tinted red.
+- Map: dust, traced from a top-down overview image into an ASCII grid in `src/map.rs` (2 m cells, flat): B site
+  top-left, A bottom-left, CT spawn between them, T spawn bottom-right, tunnels through the middle. Sites tinted red.
 - Round: 5 s freeze (look only, movement frozen via `PlayerState::frozen` so prediction agrees), 1:55 live, 5 s end.
 - One random T carries the bomb; it drops where the carrier dies and any T picks it up by walking over it.
 - Plant: hold E on a site for 3 s. Defuse: CT holds E within 1.5 m of the bomb for 5 s. Bomb: 35 s, kills within 20 m.
