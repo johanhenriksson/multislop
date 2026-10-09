@@ -1,6 +1,6 @@
 use crate::map::{CELL, MAP};
 use crate::model::{Rig, barrel_length, spawn_soldier, spawn_weapon, viewmodel_offset};
-use crate::weapons::{ALL_WEAPONS, Weapon, buy_menu};
+use crate::weapons::{ALL_WEAPONS, DRAW_SECS, Weapon, buy_menu};
 use crate::shared::*;
 use crate::sfx;
 use bevy::audio::Volume;
@@ -134,6 +134,8 @@ struct Game {
     players: Vec<NetPlayer>,
     /// Distance run since the last footstep.
     stride: f32,
+    /// Viewmodel kick from the last shot, 1 right after firing and decaying to 0.
+    kick: f32,
     steps_played: u32,
 }
 
@@ -167,7 +169,9 @@ enum FxKind {
 struct Fx {
     age: f32,
     life: f32,
+    /// Size multiplier reached at the end of its life, growing linearly from 1.
     grow: f32,
+    size: f32,
     material: Option<Handle<StandardMaterial>>,
 }
 
@@ -641,6 +645,7 @@ fn net_tick(
         if let Some((weapon, d)) = step_player(&mut pred, &inp) {
             let o = eye(&pred);
             g.sounds.push((Sound::Gun(weapon), 0.6));
+            g.kick = 1.0;
             let (t, normal) = trace_world_normal(o, d);
             add_tracer(&mut g, weapon, muzzle(o, d, weapon), o + d * t);
             if weapon != Weapon::Knife {
@@ -902,8 +907,11 @@ fn render_remotes(
         let side = if r.0 % 2 == 0 { 1.0 } else { -1.0 };
         t.translation = pos + Vec3::Y * 0.13 * fall;
         t.rotation = Quat::from_rotation_y(yaw) * Quat::from_rotation_x(side * 1.5 * fall);
+        // Players pass through each other; hide anyone overlapping our camera rather than fill the screen with them.
+        // ponytail: no player-player collision. Add it to the shared movement if walking through people matters.
+        let overlapping = pos.with_y(0.0).distance(g.pred.pos.with_y(0.0)) < RADIUS * 2.0;
         let shown = match life {
-            Life::Alive => watched != Some(r.0),
+            Life::Alive => watched != Some(r.0) && !overlapping,
             Life::Dead => true,
             Life::Respawning => false,
         };
@@ -1164,16 +1172,54 @@ fn player_name() -> String {
     NAME.clone()
 }
 
-/// Shows the held weapon, dips it while reloading, kicks it back on recoil; hidden when dead or scoped.
-fn viewmodel(mut q: Query<(&Viewmodel, &mut Transform, &mut Visibility)>, g: Res<Game>) {
+/// First-person weapon animation state that lives only on this client.
+#[derive(Default)]
+struct WeaponAnim {
+    held: Option<Weapon>,
+    drawn_at: f64,
+    bob: f32,
+    sway: Vec2,
+    last_look: Vec2,
+}
+
+/// Shows the held weapon with CS-style motion: a figure-eight bob while running, sway behind mouse turns, a kick
+/// per shot, raising on draw, a dip while reloading and a slash for the knife. Hidden when dead or scoped.
+fn viewmodel(
+    mut q: Query<(&Viewmodel, &mut Transform, &mut Visibility)>,
+    mut g: ResMut<Game>,
+    mut anim: Local<WeaponAnim>,
+    time: Res<Time>,
+) {
+    let dt = time.delta_secs();
     let held = g.pred.weapon();
+    if anim.held != Some(held) {
+        (anim.held, anim.drawn_at) = (Some(held), clock());
+    }
+    let draw = (1.0 - ((clock() - anim.drawn_at) as f32 / DRAW_SECS).min(1.0)).powi(2);
     let reload = g.pred.reloading as f32 / (held.spec().reload * TICK_HZ as f32).max(1.0);
     let dip = (reload * std::f32::consts::PI).sin();
+
+    let speed = if g.pred.on_ground { (g.pred.vel.with_y(0.0).length() / 6.35).min(1.0) } else { 0.0 };
+    anim.bob += dt * 9.0 * speed;
+    let bob = Vec3::new(anim.bob.sin() * 0.012, -(anim.bob * 2.0).sin().abs() * 0.01, 0.0) * speed;
+
+    let look = Vec2::new(g.yaw, g.pitch);
+    let turn = (look - anim.last_look) / dt.max(1e-3);
+    anim.last_look = look;
+    let target = (Vec2::new(-turn.x, turn.y) * 0.004).clamp(Vec2::splat(-0.04), Vec2::splat(0.04));
+    anim.sway = anim.sway.lerp(target, (dt * 10.0).min(1.0));
+
+    let heavy = matches!(held, Weapon::Awp | Weapon::Deagle);
+    let kick = g.kick * if heavy { 1.6 } else { 1.0 };
+    g.kick *= (-dt * 16.0).exp();
+    let slash = if held == Weapon::Knife { g.kick } else { 0.0 };
+
     let show = g.hp > 0 && g.me.is_some() && !g.zoom;
     for (vm, mut t, mut vis) in &mut q {
         *vis = if show && vm.0 == held { Visibility::Inherited } else { Visibility::Hidden };
-        t.translation = viewmodel_offset(vm.0) + Vec3::new(0.0, -0.15 * dip, 0.03 * g.pred.recoil.min(3.0));
-        t.rotation = Quat::from_rotation_x(-0.6 * dip);
+        let offset = Vec3::new(anim.sway.x, anim.sway.y - 0.15 * dip - 0.3 * draw, 0.05 * kick) + bob;
+        t.translation = viewmodel_offset(vm.0) + offset;
+        t.rotation = Quat::from_rotation_x(-0.6 * dip - 0.9 * draw + 0.12 * kick) * Quat::from_rotation_y(1.2 * slash);
     }
 }
 
@@ -1488,13 +1534,13 @@ fn spawn_fx(
                     Mesh3d(puff.clone()),
                     MeshMaterial3d(material.clone()),
                     Transform::from_translation(at).with_scale(Vec3::splat(0.07)),
-                    Fx { age: 0.0, life: 0.05, grow: 1.5, material: Some(material) },
+                    Fx { age: 0.0, life: 0.05, grow: 1.5, size: 0.07, material: Some(material) },
                     bevy::light::NotShadowCaster,
                 ));
                 commands.spawn((
                     PointLight { intensity: 60_000.0, range: 8.0, color: Color::srgb(1.0, 0.8, 0.5), ..default() },
                     Transform::from_translation(at),
-                    Fx { age: 0.0, life: 0.05, grow: 0.0, material: None },
+                    Fx { age: 0.0, life: 0.05, grow: 0.0, size: 1.0, material: None },
                 ));
             }
             FxKind::Impact(at, normal) => {
@@ -1503,7 +1549,7 @@ fn spawn_fx(
                     Mesh3d(puff.clone()),
                     MeshMaterial3d(material.clone()),
                     Transform::from_translation(at + normal * 0.08).with_scale(Vec3::splat(0.06)),
-                    Fx { age: 0.0, life: 0.45, grow: 5.0, material: Some(material) },
+                    Fx { age: 0.0, life: 0.45, grow: 5.0, size: 0.06, material: Some(material) },
                     bevy::light::NotShadowCaster,
                 ));
                 let rot = Quat::from_rotation_arc(Vec3::Y, normal);
@@ -1521,7 +1567,7 @@ fn spawn_fx(
                     Mesh3d(puff.clone()),
                     MeshMaterial3d(material.clone()),
                     Transform::from_translation(at).with_scale(Vec3::splat(0.08)),
-                    Fx { age: 0.0, life: 0.3, grow: 3.5, material: Some(material) },
+                    Fx { age: 0.0, life: 0.3, grow: 3.5, size: 0.08, material: Some(material) },
                     bevy::light::NotShadowCaster,
                 ));
             }
@@ -1543,7 +1589,7 @@ fn update_fx(
             commands.entity(e).despawn();
             continue;
         }
-        t.scale *= 1.0 + fx.grow * dt / fx.life;
+        t.scale = Vec3::splat(fx.size * (1.0 + fx.grow * k));
         if let Some(mut m) = fx.material.as_ref().and_then(|h| mats.get_mut(h)) {
             m.base_color.set_alpha((1.0 - k) * 0.85);
         }
