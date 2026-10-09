@@ -28,6 +28,8 @@ const GRAVITY: f32 = 20.3;
 const JUMP_SPEED: f32 = 6.8;
 /// Highest rise you walk up without jumping (stairs, ramps, curbs), and how far down you stay glued to the floor.
 const STEP: f32 = 0.5;
+/// Walking (Shift) speed as a fraction of running, as in CS. Footsteps are only heard above it.
+pub const WALK_SPEED: f32 = 0.52;
 
 pub const MAX_HP: i32 = 100;
 pub const MAX_REWIND_TICKS: f32 = (0.4 * TICK_HZ) as f32;
@@ -110,6 +112,8 @@ pub struct Input {
     /// Weapon switch request: 0 none, 1 primary, 2 secondary, 3 knife, 4 last used.
     pub slot: u8,
     pub reload: bool,
+    /// Shift: walk slowly and silently.
+    pub walk: bool,
     /// Scoped in (AWP).
     pub zoom: bool,
     /// Buy menu item (1-based), 0 for none. Handled by the server; inputs are applied exactly once.
@@ -376,6 +380,7 @@ pub fn step_player(s: &mut PlayerState, inp: &Input) -> Option<(Weapon, Vec3)> {
         // Lighter weapons in hand run faster; the knife fastest.
         let weapon = s.weapon();
         let scoped = if weapon == Weapon::Awp && inp.zoom { SCOPED_SPEED } else { 1.0 };
+        let scoped = scoped * if inp.walk { WALK_SPEED } else { 1.0 };
         accelerate(&mut s.vel, wish, MAX_SPEED * weapon.spec().speed * scoped, ACCEL);
     } else {
         accelerate(&mut s.vel, wish, AIR_CAP, AIR_ACCEL * MAX_SPEED / AIR_CAP);
@@ -474,16 +479,27 @@ fn trace_floor(o: Vec3, d: Vec3, max: f32) -> f32 {
 
 /// Distance to the first map surface (floor or box) along the ray, capped at RANGE.
 pub fn trace_world(o: Vec3, d: Vec3) -> f32 {
-    let mut best = RANGE;
+    trace_world_normal(o, d).0
+}
+
+/// Like `trace_world`, plus the surface normal where it hit (for bullet holes).
+pub fn trace_world_normal(o: Vec3, d: Vec3) -> (f32, Vec3) {
+    let (mut best, mut normal) = (RANGE, Vec3::Y);
     for &(c, h) in &MAP.boxes {
         let (min, max) = (c - h, c + h);
         let (t1, t2) = ((min - o) / d, (max - o) / d);
-        let (tn, tf) = (t1.min(t2).max_element(), t1.max(t2).min_element());
+        let near = t1.min(t2);
+        let (tn, tf) = (near.max_element(), t1.max(t2).min_element());
         if tn <= tf && tf > 0.0 && tn < best {
             best = tn.max(0.0);
+            // The entry face is on the axis that was entered last.
+            let axis = if near.x >= near.y && near.x >= near.z { 0 } else if near.y >= near.z { 1 } else { 2 };
+            normal = Vec3::ZERO;
+            normal[axis] = -d[axis].signum();
         }
     }
-    best.min(trace_floor(o, d, best))
+    let floor = trace_floor(o, d, best);
+    if floor < best { (floor, Vec3::Y) } else { (best, normal) }
 }
 
 /// Ray vs vertical capsule standing at `feet`. Returns the hit distance.

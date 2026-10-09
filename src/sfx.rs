@@ -133,6 +133,28 @@ fn tone(secs: f32, hz: f32, decay: f32) -> Samples {
     samples(secs, |t| (t * hz * TAU).sin() * (-t * decay).exp())
 }
 
+/// A footstep on sand and stone; four variants so a run doesn't sound like a metronome.
+pub fn footstep(variant: u32) -> Vec<u8> {
+    let (mut rng, mut low, mut phase) = (0xF00Du32 + variant * 7919, 0.0f32, 0.0f32);
+    let thud = 70.0 + variant as f32 * 9.0;
+    render(0.14, move |t| {
+        low += (noise(&mut rng) - low) * 0.25;
+        phase = (phase + thud / RATE as f32).fract();
+        let scuff = low * (-t * 45.0).exp() * 1.4;
+        scuff + (phase * TAU).sin() * (-t * 60.0).exp() * 0.6
+    })
+}
+
+/// A bullet striking stone: a short sharp tick.
+pub fn impact() -> Vec<u8> {
+    let (mut rng, mut low) = (0x1A2Bu32, 0.0f32);
+    render(0.08, move |t| {
+        let n = noise(&mut rng);
+        low += (n - low) * 0.3;
+        (n - low) * (-t * 90.0).exp() * 1.2
+    })
+}
+
 /// Swish: band of noise sweeping down.
 pub fn knife() -> Vec<u8> {
     let (mut rng, mut low) = (0xBEEFu32, 0.0f32);

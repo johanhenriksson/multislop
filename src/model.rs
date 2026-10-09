@@ -15,17 +15,19 @@ pub struct Rig {
     /// Walk cycle phase in radians, advanced by distance moved.
     pub phase: f32,
     pub last_pos: Option<Vec3>,
+    /// Distance run since the last footstep.
+    pub stride: f32,
 }
 
 impl Rig {
-    /// Advances the walk cycle and returns the leg swing angle.
-    pub fn animate(&mut self, pos: Vec3, dt: f32) -> f32 {
+    /// Advances the walk cycle and returns the leg swing angle and the distance moved this frame.
+    pub fn animate(&mut self, pos: Vec3, dt: f32) -> (f32, f32) {
         let moved = self.last_pos.map_or(0.0, |p| (pos - p).with_y(0.0).length());
         self.last_pos = Some(pos);
         self.phase += moved * 2.6;
         let speed = if dt > 0.0 { moved / dt } else { 0.0 };
         let amount = (speed / 6.35).min(1.0) * 0.6;
-        self.phase.sin() * amount
+        (self.phase.sin() * amount, moved)
     }
 }
 
@@ -103,7 +105,7 @@ pub fn spawn_soldier(
         .collect();
     commands.entity(arms).add_children(&guns);
 
-    let rig = Rig { legs, arms, guns, phase: 0.0, last_pos: None };
+    let rig = Rig { legs, arms, guns, phase: 0.0, last_pos: None, stride: 0.0 };
     let body = commands.spawn((root, rig, Visibility::Inherited, children![torso, vest, head, top])).id();
     commands.entity(body).add_children(&legs).add_child(arms);
     debug_assert!(0.47 / 2.0 < RADIUS);

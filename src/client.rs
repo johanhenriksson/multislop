@@ -129,6 +129,10 @@ struct Game {
     want_reload: bool,
     kill_feed: VecDeque<(String, Instant)>,
     hurt_at: Option<Instant>,
+    fx: Vec<FxKind>,
+    /// Distance run since the last footstep.
+    stride: f32,
+    steps_played: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -143,7 +147,31 @@ enum Sound {
     Death,
     Beep,
     Explosion,
+    Step(u32),
+    Impact,
 }
+
+/// A short-lived visual effect to spawn this frame.
+#[derive(Clone, Copy)]
+enum FxKind {
+    Muzzle(Vec3),
+    /// Bullet striking the map: dust puff and a hole, at a position with the surface normal.
+    Impact(Vec3, Vec3),
+    Blood(Vec3),
+}
+
+/// A spawned effect: grows and fades over its life, then despawns.
+#[derive(Component)]
+struct Fx {
+    age: f32,
+    life: f32,
+    grow: f32,
+    material: Option<Handle<StandardMaterial>>,
+}
+
+/// Bullet holes, oldest first, so only the most recent stay.
+#[derive(Resource, Default)]
+struct Decals(VecDeque<Entity>);
 
 #[derive(Resource)]
 struct Sounds {
@@ -157,6 +185,8 @@ struct Sounds {
     death: Handle<AudioSource>,
     beep: Handle<AudioSource>,
     explosion: Handle<AudioSource>,
+    steps: Vec<Handle<AudioSource>>,
+    impact: Handle<AudioSource>,
 }
 
 /// First-person model of one weapon.
@@ -270,7 +300,7 @@ pub fn run(server: SocketAddr, lag_ms: u64, jitter_ms: u64, interp_ms: u64) {
                 grab_cursor,
                 look,
                 controls,
-                (render_remotes, render_self, viewmodel, render_bomb, draw_tracers, bomb_beep, play_sounds),
+                (render_remotes, render_self, viewmodel, render_bomb, draw_tracers, bomb_beep, play_sounds, spawn_fx, update_fx),
                 (hud, scoreboard, ammo_hud, buy_menu_hud, kill_feed, death_fade, hurt_flash, crosshair, scope),
             )
                 .chain(),
@@ -297,7 +327,10 @@ fn setup(
         death: sound(sfx::death()),
         beep: sound(sfx::beep()),
         explosion: sound(sfx::explosion()),
+        steps: (0..4).map(|v| sound(sfx::footstep(v))).collect(),
+        impact: sound(sfx::impact()),
     });
+    commands.insert_resource(Decals::default());
     // First-person weapons; each barrel tip lines up with `muzzle`.
     let viewmodels: Vec<Entity> = ALL_WEAPONS
         .into_iter()
@@ -561,8 +594,10 @@ fn net_tick(
         yaw: g.yaw,
         pitch: g.pitch,
         jump: keys.any_pressed([KeyCode::Space, KeyCode::Backspace]),
+        walk: keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]),
         use_key: keys.pressed(KeyCode::KeyE),
-        fire: active && !g.menu && mouse.pressed(MouseButton::Left),
+        // FPS16_FIRE clicks repeatedly, for screenshots of effects.
+        fire: (active && !g.menu && mouse.pressed(MouseButton::Left)) || (std::env::var_os("FPS16_FIRE").is_some() && g.seq % 16 < 8),
         slot: std::mem::take(&mut g.want_slot),
         reload: std::mem::take(&mut g.want_reload),
         zoom: g.zoom,
@@ -577,13 +612,32 @@ fn net_tick(
         if let Some((weapon, d)) = step_player(&mut pred, &inp) {
             let o = eye(&pred);
             g.sounds.push((Sound::Gun(weapon), 0.6));
-            add_tracer(&mut g, weapon, muzzle(o, d, weapon), o + d * trace_world(o, d));
+            let (t, normal) = trace_world_normal(o, d);
+            add_tracer(&mut g, weapon, muzzle(o, d, weapon), o + d * t);
+            if weapon != Weapon::Knife {
+                g.fx.push(FxKind::Muzzle(muzzle(o, d, weapon)));
+            }
+            if t < weapon.spec().range.min(RANGE - 1.0) {
+                g.fx.push(FxKind::Impact(o + d * t, normal));
+                g.sounds.push((Sound::Impact, 0.25));
+            }
             if weapon == Weapon::Awp {
                 g.zoom = false;
             }
         }
         if pred.reloading > 0 && !was_reloading {
             g.sounds.push((Sound::Reload, 0.5));
+        }
+        // Footsteps when running; walking (Shift) is silent.
+        let speed = pred.vel.with_y(0.0).length();
+        if pred.on_ground && speed > 6.35 * WALK_SPEED + 0.3 {
+            g.stride += speed * DT;
+            if g.stride > 1.8 {
+                g.stride = 0.0;
+                g.steps_played += 1;
+                let v = g.steps_played;
+                g.sounds.push((Sound::Step(v), 0.3));
+            }
         }
         g.pred = pred;
     }
@@ -626,6 +680,9 @@ fn on_snapshot(g: &mut Game, snap: Snapshot) {
         if Some(h.victim) == g.me {
             g.sounds.push((Sound::Hurt, 0.8));
             g.hurt_at = Some(Instant::now());
+        } else if let Some(v) = snap.players.iter().find(|p| p.id == h.victim) {
+            let at = v.state.pos + Vec3::Y * if h.headshot { 1.65 } else { 1.1 };
+            g.fx.push(FxKind::Blood(at));
         }
         if h.killed {
             let hs = if h.headshot { " (headshot)" } else { "" };
@@ -702,6 +759,14 @@ fn on_snapshot(g: &mut Game, snap: Snapshot) {
     for s in snap.shots.iter().filter(|s| s.shooter != snap.you) {
         let d = (s.to - s.from).normalize_or_zero();
         add_tracer(g, s.weapon, muzzle(s.from, d, s.weapon), s.to);
+        if s.weapon != Weapon::Knife {
+            g.fx.push(FxKind::Muzzle(muzzle(s.from, d, s.weapon)));
+            // A wall or floor where the shot ended (not a player).
+            let (t, normal) = trace_world_normal(s.from, d);
+            if (t - s.from.distance(s.to)).abs() < 0.05 {
+                g.fx.push(FxKind::Impact(s.to, normal));
+            }
+        }
         let volume = 0.6 / (1.0 + s.from.distance(g.pred.pos) / 12.0);
         g.sounds.push((Sound::Gun(s.weapon), volume));
     }
@@ -793,7 +858,20 @@ fn render_remotes(
         t.translation = pos;
         t.rotation = Quat::from_rotation_y(yaw);
         *vis = if alive && watched != Some(r.0) { Visibility::Inherited } else { Visibility::Hidden };
-        let swing = rig.animate(pos, time.delta_secs());
+        let (swing, moved) = rig.animate(pos, time.delta_secs());
+        // Their footsteps, louder up close: how you hear someone coming.
+        let speed = moved / time.delta_secs().max(1e-3);
+        if alive && speed > 6.35 * WALK_SPEED + 0.3 && speed < 12.0 {
+            rig.stride += moved;
+            if rig.stride > 1.8 {
+                rig.stride = 0.0;
+                let dist = pos.distance(g.pred.pos);
+                if dist < 35.0 {
+                    let v = r.0 + (rig.phase * 10.0) as u32;
+                    g.sounds.push((Sound::Step(v), 0.45 / (1.0 + dist / 5.0)));
+                }
+            }
+        }
         for (leg, dir) in rig.legs.into_iter().zip([1.0, -1.0]) {
             if let Ok((mut leg, _)) = parts.get_mut(leg) {
                 leg.rotation = Quat::from_rotation_x(swing * dir);
@@ -972,6 +1050,8 @@ fn play_sounds(mut commands: Commands, mut g: ResMut<Game>, sounds: Res<Sounds>)
             Sound::Death => &sounds.death,
             Sound::Beep => &sounds.beep,
             Sound::Explosion => &sounds.explosion,
+            Sound::Step(v) => &sounds.steps[v as usize % 4],
+            Sound::Impact => &sounds.impact,
         };
         commands.spawn((
             AudioPlayer::new(handle.clone()),
@@ -1291,8 +1371,9 @@ fn mountain_ring(radius: f32, low: f32, high: f32, color: [f32; 3], seed: f32) -
     mesh
 }
 
-/// For checking visuals without a person at the screen: `FPS16_SHOT=out.png` saves one screenshot after a few
-/// seconds and quits; `FPS16_POSE="x,y,z,yaw,pitch"` places the camera (degrees).
+/// For checking visuals without a person at the screen: `FPS16_SHOT=out.png` saves one screenshot after
+/// `FPS16_SHOT_AT` seconds (default 4) and quits; `FPS16_POSE="x,y,z,yaw,pitch"` places the camera (degrees);
+/// `FPS16_FIRE` keeps clicking fire.
 #[derive(Resource)]
 struct ShotTarget(Handle<Image>);
 
@@ -1313,12 +1394,104 @@ fn debug_shot(
     }
     let now = time.elapsed_secs();
     match *taken {
-        None if now > 4.0 => {
+        None if now > std::env::var("FPS16_SHOT_AT").ok().and_then(|s| s.parse().ok()).unwrap_or(4.0) => {
             let path = std::env::var("FPS16_SHOT").unwrap_or_default();
             commands.spawn(Screenshot::image(target.0.clone())).observe(save_to_disk(path));
             *taken = Some(now);
         }
         Some(at) if now > at + 1.5 => std::process::exit(0),
         _ => {}
+    }
+}
+
+/// Spawns this frame's muzzle flashes, impact puffs, bullet holes and blood.
+fn spawn_fx(
+    mut commands: Commands,
+    mut g: ResMut<Game>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut mats: ResMut<Assets<StandardMaterial>>,
+    mut decals: ResMut<Decals>,
+    mut puff_mesh: Local<Option<Handle<Mesh>>>,
+    mut hole: Local<Option<(Handle<Mesh>, Handle<StandardMaterial>)>>,
+) {
+    let puff = puff_mesh.get_or_insert_with(|| meshes.add(Sphere::new(1.0).mesh().ico(1).unwrap())).clone();
+    let (hole_mesh, hole_mat) = hole
+        .get_or_insert_with(|| {
+            let m = meshes.add(Plane3d::default().mesh().size(0.09, 0.09));
+            let mat = mats.add(StandardMaterial { base_color: Color::srgb(0.08, 0.06, 0.05), unlit: true, ..default() });
+            (m, mat)
+        })
+        .clone();
+    let mut fading = |color: Color| mats.add(StandardMaterial { base_color: color, unlit: true, alpha_mode: AlphaMode::Blend, ..default() });
+    for fx in std::mem::take(&mut g.fx) {
+        match fx {
+            FxKind::Muzzle(at) => {
+                let material = fading(Color::srgba(1.0, 0.85, 0.4, 0.9));
+                commands.spawn((
+                    Mesh3d(puff.clone()),
+                    MeshMaterial3d(material.clone()),
+                    Transform::from_translation(at).with_scale(Vec3::splat(0.07)),
+                    Fx { age: 0.0, life: 0.05, grow: 1.5, material: Some(material) },
+                    bevy::light::NotShadowCaster,
+                ));
+                commands.spawn((
+                    PointLight { intensity: 60_000.0, range: 8.0, color: Color::srgb(1.0, 0.8, 0.5), ..default() },
+                    Transform::from_translation(at),
+                    Fx { age: 0.0, life: 0.05, grow: 0.0, material: None },
+                ));
+            }
+            FxKind::Impact(at, normal) => {
+                let material = fading(Color::srgba(0.75, 0.62, 0.45, 0.8));
+                commands.spawn((
+                    Mesh3d(puff.clone()),
+                    MeshMaterial3d(material.clone()),
+                    Transform::from_translation(at + normal * 0.08).with_scale(Vec3::splat(0.06)),
+                    Fx { age: 0.0, life: 0.45, grow: 5.0, material: Some(material) },
+                    bevy::light::NotShadowCaster,
+                ));
+                let rot = Quat::from_rotation_arc(Vec3::Y, normal);
+                let e = commands
+                    .spawn((Mesh3d(hole_mesh.clone()), MeshMaterial3d(hole_mat.clone()), Transform::from_translation(at + normal * 0.012).with_rotation(rot)))
+                    .id();
+                decals.0.push_back(e);
+                if decals.0.len() > 80 {
+                    commands.entity(decals.0.pop_front().unwrap()).despawn();
+                }
+            }
+            FxKind::Blood(at) => {
+                let material = fading(Color::srgba(0.6, 0.02, 0.02, 0.85));
+                commands.spawn((
+                    Mesh3d(puff.clone()),
+                    MeshMaterial3d(material.clone()),
+                    Transform::from_translation(at).with_scale(Vec3::splat(0.08)),
+                    Fx { age: 0.0, life: 0.3, grow: 3.5, material: Some(material) },
+                    bevy::light::NotShadowCaster,
+                ));
+            }
+        }
+    }
+}
+
+fn update_fx(
+    mut commands: Commands,
+    mut q: Query<(Entity, &mut Fx, &mut Transform, Option<&mut PointLight>)>,
+    mut mats: ResMut<Assets<StandardMaterial>>,
+    time: Res<Time>,
+) {
+    for (e, mut fx, mut t, light) in &mut q {
+        let dt = time.delta_secs();
+        fx.age += dt;
+        let k = fx.age / fx.life;
+        if k >= 1.0 {
+            commands.entity(e).despawn();
+            continue;
+        }
+        t.scale *= 1.0 + fx.grow * dt / fx.life;
+        if let Some(mut m) = fx.material.as_ref().and_then(|h| mats.get_mut(h)) {
+            m.base_color.set_alpha((1.0 - k) * 0.85);
+        }
+        if let Some(mut l) = light {
+            l.intensity *= 1.0 - k;
+        }
     }
 }
