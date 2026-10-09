@@ -1275,6 +1275,11 @@ fn spawn_world(
     };
     let (stone, frieze, ground) = (textured(textures::sandstone(), false), textured(textures::frieze(), false), textured(textures::ground(), false));
     let (wood, ammo, door) = (textured(textures::wood_crate(), false), textured(textures::ammo_crate(), false), textured(textures::door(), true));
+    // A few shades of the same stone so neighboring buildings don't look cut from one block.
+    let stones: Vec<Handle<StandardMaterial>> = [Color::WHITE, Color::srgb(0.93, 0.88, 0.82), Color::srgb(1.0, 0.94, 0.86)]
+        .into_iter()
+        .map(|tint| mats.add(StandardMaterial { base_color: tint, ..mats.get(&stone).unwrap().clone() }))
+        .collect();
 
     commands.spawn((Mesh3d(meshes.add(terrain_mesh())), MeshMaterial3d(ground.clone())));
     // Desert out to the mountains, just below the lowest floor so it never shows inside the map.
@@ -1291,7 +1296,8 @@ fn spawn_world(
     for &(c, h) in &MAP.boxes {
         let wall = h.y > 2.0 && c.y - h.y < 0.0;
         if wall {
-            commands.spawn((Mesh3d(meshes.add(textured_box(c, h, Vec2::splat(4.0), true))), MeshMaterial3d(stone.clone())));
+            let shade = stones[((c.x * 0.37 + c.z * 0.61).abs() as usize) % stones.len()].clone();
+            commands.spawn((Mesh3d(meshes.add(textured_box(c, h, Vec2::splat(4.0), true))), MeshMaterial3d(shade.clone())));
             // The carved band just under the top, standing slightly proud of the wall.
             let top = c.y + h.y;
             let band = Vec3::new(c.x, top - 0.75, c.z);
@@ -1300,7 +1306,7 @@ fn spawn_world(
             // Cap stone ledge along the top.
             let cap = Vec3::new(c.x, top - 0.1, c.z);
             let half = Vec3::new(h.x + 0.12, 0.1, h.z + 0.12);
-            commands.spawn((Mesh3d(meshes.add(textured_box(cap, half, Vec2::splat(4.0), true))), MeshMaterial3d(stone.clone())));
+            commands.spawn((Mesh3d(meshes.add(textured_box(cap, half, Vec2::splat(4.0), true))), MeshMaterial3d(shade)));
         } else {
             // Crates: wooden ones and green ammo boxes, a crate per meter (stacked on the tall ones).
             let green = (c.x * 7.3 + c.z * 3.1).sin() > 0.2;

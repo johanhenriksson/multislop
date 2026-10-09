@@ -178,7 +178,9 @@ impl Map {
                     row[x..=x1].fill(true);
                 }
                 let (a, b) = (map.center(x, z), map.center(x1, z1));
-                let (bottom, top) = if c == b'#' { (WALL_BOTTOM, WALL_TOP) } else { (base, base + height) };
+                // Walls vary in height per block so the skyline reads as buildings, the same for collision and looks.
+                let extra = [0.0, 0.0, 1.5, 3.0][(x * 7 + z * 13 + x1 * 3) % 4];
+                let (bottom, top) = if c == b'#' { (WALL_BOTTOM, WALL_TOP + extra) } else { (base, base + height) };
                 let half = Vec3::new((b.x - a.x) / 2.0 + CELL / 2.0, (top - bottom) / 2.0, (b.z - a.z) / 2.0 + CELL / 2.0);
                 map.boxes.push(((a + b) / 2.0 + Vec3::Y * (bottom + top) / 2.0, half));
             }
