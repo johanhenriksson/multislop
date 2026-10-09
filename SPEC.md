@@ -16,10 +16,21 @@ Deadline: playable before 00:00. One weapon, one simple map.
 ## Gameplay
 - Players are capsules ("rounded cylinders"): radius 0.4, height 1.8, eye at 1.6.
 - Movement: Quake/GoldSrc style (ground friction, accel, air accel, gravity, jump). WASD + mouse, space jumps.
-- Weapon: one hitscan rifle. LMB, 700 ms between shots, instagib: any hit kills.
-- Shots: every shot is drawn as a beam in the shooter's color, fading over 0.4 s.
 - HUD: crosshair (gray while the gun cools down), HP, kills/deaths, net_graph line (ping is network round trip only, via
   a client timestamp the server echoes with its hold time) (ping, worst snapshot gap, correction, interp starvation).
+
+## Weapons and economy (`src/weapons.rs`, CS 1.6 stats)
+- Knife (always), Glock (T) / USP (CT) free, Deagle $650, MP5 $1500, AK-47 (T) $2500 / M4A1 (CT) $3100, AWP $4750
+  (right-click scope), Kevlar+Helmet $1000. Buy with B then 1-5 during freeze + 20 s, within 15 m of your spawn.
+- Slots: 1 primary, 2 pistol, 3 knife, Q last; R reload (auto when empty), draw delay on switch, semi-auto needs a
+  click per shot. Mag + reserve ammo, refilled at round start.
+- 100 HP. Damage by zone (head x4, legs x0.75), falls off with distance, armor absorbs per weapon penetration.
+- Recoil kicks the view (bullets follow it, so pull down); spread grows with movement, air and recoil. Spread is
+  seeded by the input seq so predicted and server bullets match. All weapon state lives in `PlayerState`.
+- Money: $800 start, $16000 cap; kill $300 (AWP $100, MP5 $600, knife $1500); win $3250, loss $1400 + $500 per
+  consecutive loss (up to 3); plant/defuse $300. Survivors keep guns; the dead restart with the team pistol.
+- Synthesized per-weapon gunshots (noise crack + thump), reload, buy, headshot ding, hit tick, hurt thud.
+- HUD: HP/armor/money, weapon + ammo, buy menu, kill feed, red flash when hit. Short tracers (AWP longer).
 
 ## Rounds (bomb defusal)
 - Teams T and CT, humans auto-balanced on join, friendly fire off. Server-side bots fill both teams to 3v3 (or to the
@@ -51,4 +62,4 @@ Deadline: playable before 00:00. One weapon, one simple map.
   server rewinds other players to that tick (max 400 ms back) from its position history and raycasts there.
 
 ## Out of scope (for now)
-Economy, multiple weapons, halftime/match end, team switching, map height (ramps, stairs), anti-cheat, encryption, connection handshake/timeouts beyond the basics.
+Grenades, dropped/pickup weapons, halftime/match end, team switching, map height (ramps, stairs), anti-cheat, encryption, connection handshake/timeouts beyond the basics.

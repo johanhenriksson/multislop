@@ -1,5 +1,6 @@
 use bevy::math::{EulerRot, Quat, Vec3};
 use crate::map::MAP;
+use crate::weapons::{AWP_SCOPED_SPREAD, DRAW_SECS, Slot, Weapon};
 use serde::{Deserialize, Serialize};
 
 /// Bumped by every `tools/release.sh publish`. Server and client must match exactly.
@@ -26,10 +27,12 @@ const STOP_SPEED: f32 = 2.54;
 const GRAVITY: f32 = 20.3;
 const JUMP_SPEED: f32 = 6.8;
 
-pub const FIRE_COOLDOWN: u8 = (0.7 * TICK_HZ) as u8;
 pub const MAX_HP: i32 = 100;
 pub const MAX_REWIND_TICKS: f32 = (0.4 * TICK_HZ) as f32;
 pub const RANGE: f32 = 200.0;
+/// Hits above this height (from the feet) are headshots, below `LEGS_HEIGHT` leg shots.
+pub const HEAD_HEIGHT: f32 = 1.5;
+pub const LEGS_HEIGHT: f32 = 0.8;
 
 pub const FREEZE_SECS: f32 = 5.0;
 pub const ROUND_SECS: f32 = 115.0;
@@ -82,6 +85,8 @@ pub struct Round {
     pub phase: Phase,
     /// Seconds left in the current phase, or until the bomb goes off once planted.
     pub time_left: f32,
+    /// Seconds of buy time left.
+    pub buy_secs: f32,
     /// Rounds won by T and CT.
     pub score: [u32; 2],
     pub bomb: Bomb,
@@ -100,6 +105,13 @@ pub struct Input {
     pub fire: bool,
     /// E: plant or defuse.
     pub use_key: bool,
+    /// Weapon switch request: 0 none, 1 primary, 2 secondary, 3 knife, 4 last used.
+    pub slot: u8,
+    pub reload: bool,
+    /// Scoped in (AWP).
+    pub zoom: bool,
+    /// Buy menu item (1-based), 0 for none. Handled by the server; inputs are applied exactly once.
+    pub buy: u8,
     /// Server tick the client was rendering remote players at, used for lag compensation.
     pub view_tick: f32,
 }
@@ -112,7 +124,20 @@ pub struct PlayerState {
     pub yaw: f32,
     pub pitch: f32,
     pub on_ground: bool,
-    pub fire_cd: u8,
+    pub primary: Option<Weapon>,
+    pub secondary: Weapon,
+    pub slot: Slot,
+    pub last_slot: Slot,
+    /// (magazine, reserve) for primary and secondary.
+    pub ammo: [(u8, u16); 2],
+    /// Ticks until the current weapon can fire again (also covers drawing it).
+    pub fire_cd: u16,
+    /// Ticks left reloading, 0 when not.
+    pub reloading: u16,
+    /// Grows per shot and recovers over time; drives view kick and spread.
+    pub recoil: f32,
+    /// Fire was held last tick: semi-automatic weapons need a fresh press per shot.
+    pub trigger: bool,
     /// Freeze time: can look around but not move or shoot. Part of the state so prediction agrees with the server.
     pub frozen: bool,
 }
@@ -122,9 +147,12 @@ pub struct NetPlayer {
     pub id: u32,
     pub state: PlayerState,
     pub hp: i32,
+    pub armor: u8,
+    pub money: u32,
     pub kills: u32,
     pub deaths: u32,
     pub team: Team,
+    pub bot: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -145,6 +173,8 @@ pub struct Snapshot {
     /// Shots fired this tick, so clients can draw everyone's beams.
     // ponytail: sent once, so a dropped snapshot loses that beam. Resend for a few ticks if that shows on Wi-Fi.
     pub shots: Vec<Shot>,
+    /// Damage dealt since the last snapshot.
+    pub hits: Vec<Hit>,
     /// Latest `InputPacket::time` from this client, and how long the server held it before sending this snapshot.
     pub echo: f64,
     pub echo_held: f32,
@@ -153,8 +183,19 @@ pub struct Snapshot {
 #[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 pub struct Shot {
     pub shooter: u32,
+    pub weapon: Weapon,
     pub from: Vec3,
     pub to: Vec3,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+pub struct Hit {
+    pub attacker: u32,
+    pub victim: u32,
+    pub weapon: Weapon,
+    pub damage: u8,
+    pub headshot: bool,
+    pub killed: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -188,8 +229,128 @@ pub fn aim_dir(s: &PlayerState) -> Vec3 {
     look_rot(s.yaw, s.pitch) * Vec3::NEG_Z
 }
 
-/// Advances one tick of movement. Returns true if a shot was fired this tick.
-pub fn step_player(s: &mut PlayerState, inp: &Input) -> bool {
+impl PlayerState {
+    /// The weapon in hand.
+    pub fn weapon(&self) -> Weapon {
+        match self.slot {
+            Slot::Primary => self.primary.unwrap_or(self.secondary),
+            Slot::Secondary => self.secondary,
+            Slot::Knife => Weapon::Knife,
+        }
+    }
+
+    /// Magazine and reserve of the weapon in hand; None for the knife.
+    pub fn ammo_mut(&mut self) -> Option<&mut (u8, u16)> {
+        match self.slot {
+            Slot::Primary => Some(&mut self.ammo[0]),
+            Slot::Secondary => Some(&mut self.ammo[1]),
+            Slot::Knife => None,
+        }
+    }
+
+    pub fn ammo(&self) -> Option<(u8, u16)> {
+        self.clone().ammo_mut().copied()
+    }
+
+    /// A fresh loadout: just the team pistol, full ammo.
+    pub fn loadout(&mut self, primary: Option<Weapon>, secondary: Weapon) {
+        (self.primary, self.secondary) = (primary, secondary);
+        self.ammo = [primary.map_or((0, 0), |w| (w.spec().mag, w.spec().reserve)), (secondary.spec().mag, secondary.spec().reserve)];
+        self.slot = if primary.is_some() { Slot::Primary } else { Slot::Secondary };
+        (self.fire_cd, self.reloading, self.recoil) = (0, 0, 0.0);
+    }
+}
+
+fn ticks(secs: f32) -> u16 {
+    (secs * TICK_HZ as f32).round() as u16
+}
+
+/// View kick from recoil as (yaw, pitch) offsets. Bullets follow it, and the camera shows it, so the crosshair stays
+/// where the next bullet goes and you have to pull down to hold a spray on target.
+pub fn punch(s: &PlayerState) -> (f32, f32) {
+    let kick = s.weapon().spec().recoil;
+    let up = s.recoil.min(10.0) * kick;
+    let side = (s.recoil * 0.9).sin() * kick * 0.6 * (s.recoil / 3.0).min(1.0);
+    (side, up)
+}
+
+/// Deterministic per-shot random in the unit disk, so the client's predicted bullets match the server's.
+fn spread_offset(seq: u32) -> (f32, f32) {
+    let mut x = seq.wrapping_mul(0x9E37_79B9) ^ 0x85EB_CA6B;
+    let mut next = || {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        x as f32 / u32::MAX as f32
+    };
+    let (r, a) = (next().sqrt(), next() * std::f32::consts::TAU);
+    (r * a.cos(), r * a.sin())
+}
+
+/// Switching, reloading and firing. Returns the weapon and bullet direction when a shot goes off.
+fn weapon_tick(s: &mut PlayerState, inp: &Input) -> Option<(Weapon, Vec3)> {
+    let want = match inp.slot {
+        1 => Some(Slot::Primary),
+        2 => Some(Slot::Secondary),
+        3 => Some(Slot::Knife),
+        4 => Some(s.last_slot),
+        _ => None,
+    };
+    if let Some(slot) = want.filter(|&w| w != s.slot && (w != Slot::Primary || s.primary.is_some())) {
+        (s.last_slot, s.slot) = (s.slot, slot);
+        (s.fire_cd, s.reloading) = (ticks(DRAW_SECS), 0);
+    }
+    if s.slot == Slot::Primary && s.primary.is_none() {
+        s.slot = Slot::Secondary;
+    }
+    let weapon = s.weapon();
+    let spec = weapon.spec();
+    s.fire_cd = s.fire_cd.saturating_sub(1);
+    s.recoil = (s.recoil - DT * 5.0).max(0.0);
+
+    let reloading = s.reloading > 0;
+    if reloading {
+        s.reloading -= 1;
+    }
+    let (finished, frozen) = (reloading && s.reloading == 0, s.frozen);
+    let wants_reload = |(mag, reserve): (u8, u16)| reserve > 0 && mag < spec.mag && (inp.reload || (mag == 0 && inp.fire));
+    let mut start_reload = false;
+    if let Some(ammo) = s.ammo_mut() {
+        if finished {
+            let moved = (spec.mag - ammo.0).min(ammo.1.min(255) as u8);
+            *ammo = (ammo.0 + moved, ammo.1 - moved as u16);
+        } else if !reloading && !frozen && wants_reload(*ammo) {
+            start_reload = true;
+        }
+    }
+    if start_reload {
+        s.reloading = ticks(spec.reload);
+    }
+
+    let loaded = s.ammo().is_none_or(|(mag, _)| mag > 0);
+    let fires = inp.fire && !s.frozen && s.fire_cd == 0 && s.reloading == 0 && loaded && (spec.auto || !s.trigger);
+    s.trigger = inp.fire;
+    if !fires {
+        return None;
+    }
+    if let Some(ammo) = s.ammo_mut() {
+        ammo.0 -= 1;
+    }
+    s.fire_cd = ticks(spec.cycle).max(1);
+
+    let speed = s.vel.with_y(0.0).length() / MAX_SPEED;
+    let base = if weapon == Weapon::Awp && inp.zoom { AWP_SCOPED_SPREAD } else { spec.spread };
+    let air = if s.on_ground { 0.0 } else { 0.12 };
+    let cone = base + speed * spec.move_spread + air + s.recoil * spec.recoil * 0.15;
+    let (sx, sy) = spread_offset(inp.seq);
+    let (side, up) = punch(s);
+    let dir = look_rot(s.yaw + side, s.pitch + up) * Vec3::new(sx * cone, sy * cone, -1.0).normalize();
+    s.recoil += 1.0;
+    Some((weapon, dir))
+}
+
+/// Advances one tick of movement and weapon handling. Returns the weapon and bullet direction if a shot was fired.
+pub fn step_player(s: &mut PlayerState, inp: &Input) -> Option<(Weapon, Vec3)> {
     s.yaw = inp.yaw;
     s.pitch = inp.pitch.clamp(-1.55, 1.55);
 
@@ -215,12 +376,7 @@ pub fn step_player(s: &mut PlayerState, inp: &Input) -> bool {
 
     move_and_collide(s);
 
-    s.fire_cd = s.fire_cd.saturating_sub(1);
-    if inp.fire && s.fire_cd == 0 && !s.frozen {
-        s.fire_cd = FIRE_COOLDOWN;
-        return true;
-    }
-    false
+    weapon_tick(s, inp)
 }
 
 fn accelerate(vel: &mut Vec3, wish: Vec3, wish_speed: f32, accel: f32) {
@@ -361,6 +517,59 @@ mod tests {
     }
 
     #[test]
+    fn weapons_fire_reload_and_switch() {
+        let mut s = PlayerState { pos: MAP.spawns(Team::T)[0], on_ground: true, ..Default::default() };
+        s.loadout(Some(Weapon::Ak47), Weapon::Glock);
+        let mut seq = 0;
+        let mut tick = |s: &mut PlayerState, inp: Input| {
+            seq += 1;
+            step_player(s, &Input { seq, ..inp })
+        };
+        let fire = Input { fire: true, ..Default::default() };
+
+        let first = tick(&mut s, fire).expect("fires immediately").1;
+        assert!(first.angle_between(Vec3::NEG_Z) < 0.01, "first shot standing still is accurate");
+        let mut shots = vec![first];
+        for _ in 0..TICK_HZ as usize {
+            shots.extend(tick(&mut s, fire).map(|(_, d)| d));
+        }
+        assert!((9..=11).contains(&shots.len()), "AK fires ~10/s: {}", shots.len());
+        assert!(shots.last().unwrap().y > shots[0].y + 0.05, "spray climbs");
+
+        // Empty the mag; holding fire on empty starts the reload, which refills from reserve.
+        while s.ammo[0].0 > 0 {
+            tick(&mut s, fire);
+        }
+        tick(&mut s, fire);
+        assert!(s.reloading > 0);
+        for _ in 0..(2.5 * TICK_HZ) as usize {
+            tick(&mut s, Input::default());
+        }
+        assert_eq!(s.ammo[0], (30, 60));
+
+        // Switch to the pistol: draw delay, then one shot per click.
+        tick(&mut s, Input { slot: 2, ..Default::default() });
+        assert_eq!(s.weapon(), Weapon::Glock);
+        assert!(tick(&mut s, fire).is_none(), "still drawing");
+        for _ in 0..TICK_HZ as usize {
+            tick(&mut s, Input::default());
+        }
+        let held: usize = (0..TICK_HZ as usize).filter(|_| tick(&mut s, fire).is_some()).count();
+        assert_eq!(held, 1, "semi-automatic: holding fires once");
+        tick(&mut s, Input::default());
+        assert!(tick(&mut s, fire).is_some(), "fresh click fires again");
+    }
+
+    #[test]
+    fn spread_matches_on_client_and_server() {
+        let mut a = PlayerState { on_ground: true, vel: Vec3::X * 5.0, ..Default::default() };
+        a.loadout(Some(Weapon::Mp5), Weapon::Usp);
+        let mut b = a;
+        let inp = Input { seq: 77, fire: true, ..Default::default() };
+        assert_eq!(step_player(&mut a, &inp), step_player(&mut b, &inp));
+    }
+
+    #[test]
     fn walls_block_and_frozen_stays_put() {
         let start = MAP.spawns(Team::T)[0];
         let mut s = PlayerState { pos: start, ..Default::default() };
@@ -374,7 +583,7 @@ mod tests {
 
         let mut f = PlayerState { pos: start, frozen: true, ..Default::default() };
         let fire = Input { fire: true, jump: true, ..north };
-        assert!(!step_player(&mut f, &fire));
+        assert!(step_player(&mut f, &fire).is_none());
         assert_eq!(f.pos, start);
     }
 }

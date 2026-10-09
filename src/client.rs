@@ -1,5 +1,6 @@
 use crate::map::{CELL, MAP};
-use crate::model::{Rig, spawn_rifle, spawn_soldier};
+use crate::model::{Rig, gun_model, spawn_knife, spawn_pistol, spawn_rifle, spawn_soldier};
+use crate::weapons::{Weapon, buy_menu};
 use crate::shared::*;
 use crate::sfx;
 use bevy::audio::Volume;
@@ -8,13 +9,15 @@ use bevy::prelude::*;
 use bevy::render::pipelined_rendering::PipelinedRenderingPlugin;
 use bevy::winit::WinitSettings;
 use bevy::window::{CursorGrabMode, CursorOptions, PresentMode, PrimaryWindow};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
 const MOUSE_SENS: f32 = 0.002;
 const REDUNDANCY: usize = 8;
-const BEAM_SECS: f32 = 0.4;
+/// Field of view, and scoped in with the AWP.
+const FOV: f32 = 1.6;
+const ZOOM_FOV: f32 = 0.42;
 
 #[derive(Resource)]
 struct Net {
@@ -86,8 +89,8 @@ struct Game {
     snapshots: VecDeque<Snapshot>,
     yaw: f32,
     pitch: f32,
-    /// Shot beams: (from, to, seconds left, color).
-    tracers: Vec<(Vec3, Vec3, f32, Color)>,
+    /// Bullet tracers: (from, to, seconds left, lifetime, color).
+    tracers: Vec<(Vec3, Vec3, f32, f32, Color)>,
     /// How far behind the newest snapshot remote players are drawn. Adapts to jitter, never below `min_interp_ticks`.
     interp_ticks: f64,
     min_interp_ticks: f64,
@@ -111,12 +114,30 @@ struct Game {
     spectate: Option<(u32, Vec3, f32, f32)>,
     /// Interpolated position of a remote bomb carrier.
     carrier_pos: Option<Vec3>,
+    armor: u8,
+    money: u32,
+    bots: HashSet<u32>,
+    /// Scoped in with the AWP.
+    zoom: bool,
+    /// Buy menu open.
+    menu: bool,
+    /// Key presses caught each frame, sent with the next input.
+    want_slot: u8,
+    want_buy: u8,
+    want_reload: bool,
+    kill_feed: VecDeque<(String, Instant)>,
+    hurt_at: Option<Instant>,
 }
 
 #[derive(Clone, Copy)]
 enum Sound {
-    Shoot,
-    Hit,
+    Gun(Weapon),
+    Reload,
+    Buy,
+    Headshot,
+    HitBody,
+    Kill,
+    Hurt,
     Death,
     Beep,
     Explosion,
@@ -124,12 +145,33 @@ enum Sound {
 
 #[derive(Resource)]
 struct Sounds {
-    shoot: Handle<AudioSource>,
-    hit: Handle<AudioSource>,
+    guns: HashMap<Weapon, Handle<AudioSource>>,
+    reload: Handle<AudioSource>,
+    buy: Handle<AudioSource>,
+    headshot: Handle<AudioSource>,
+    hit_body: Handle<AudioSource>,
+    kill: Handle<AudioSource>,
+    hurt: Handle<AudioSource>,
     death: Handle<AudioSource>,
     beep: Handle<AudioSource>,
     explosion: Handle<AudioSource>,
 }
+
+/// First-person weapon model: index into rifle/pistol/knife, and its resting position.
+#[derive(Component)]
+struct Viewmodel(usize, Vec3);
+
+#[derive(Component)]
+struct AmmoText;
+
+#[derive(Component)]
+struct BuyMenu;
+
+#[derive(Component)]
+struct KillFeed;
+
+#[derive(Component)]
+struct HurtFlash;
 
 #[derive(Component)]
 struct Scoreboard;
@@ -201,7 +243,13 @@ pub fn run(server: SocketAddr, lag_ms: u64, jitter_ms: u64, interp_ms: u64) {
         .add_systems(FixedUpdate, net_tick)
         .add_systems(
             Update,
-            (grab_cursor, look, (render_remotes, render_self, render_bomb, hud, scoreboard, draw_tracers, bomb_beep, play_sounds, death_fade, crosshair))
+            (
+                grab_cursor,
+                look,
+                controls,
+                (render_remotes, render_self, viewmodel, render_bomb, draw_tracers, bomb_beep, play_sounds),
+                (hud, scoreboard, ammo_hud, buy_menu_hud, kill_feed, death_fade, hurt_flash, crosshair),
+            )
                 .chain(),
         )
         .run();
@@ -214,18 +262,30 @@ fn setup(
     mut audio: ResMut<Assets<AudioSource>>,
 ) {
     let mut sound = |wav: Vec<u8>| audio.add(AudioSource { bytes: wav.into() });
+    let all = [Weapon::Knife, Weapon::Glock, Weapon::Usp, Weapon::Deagle, Weapon::Mp5, Weapon::Ak47, Weapon::M4a1, Weapon::Awp];
     commands.insert_resource(Sounds {
-        shoot: sound(sfx::shoot()),
-        hit: sound(sfx::hit()),
+        guns: all.into_iter().map(|w| (w, sound(sfx::gunshot(w)))).collect(),
+        reload: sound(sfx::reload()),
+        buy: sound(sfx::buy()),
+        headshot: sound(sfx::headshot()),
+        hit_body: sound(sfx::hit_body()),
+        kill: sound(sfx::hit()),
+        hurt: sound(sfx::hurt()),
         death: sound(sfx::death()),
         beep: sound(sfx::beep()),
         explosion: sound(sfx::explosion()),
     });
-    // First-person rifle; its barrel tip lines up with `muzzle`.
-    let rifle = spawn_rifle(&mut commands, &mut meshes, &mut mats, Transform::from_xyz(0.25, -0.22, -0.2));
+    // First-person weapons; the rifle's barrel tip lines up with `muzzle`.
+    let bases = [Vec3::new(0.25, -0.22, -0.2), Vec3::new(0.2, -0.2, -0.42), Vec3::new(0.22, -0.22, -0.34)];
+    let rifle = spawn_rifle(&mut commands, &mut meshes, &mut mats, Transform::from_translation(bases[0]));
+    let pistol = spawn_pistol(&mut commands, &mut meshes, &mut mats, Transform::from_translation(bases[1]));
+    let knife = spawn_knife(&mut commands, &mut meshes, &mut mats, Transform::from_translation(bases[2]));
+    for (i, e) in [rifle, pistol, knife].into_iter().enumerate() {
+        commands.entity(e).insert(Viewmodel(i, bases[i]));
+    }
     commands
-        .spawn((Camera3d::default(), Projection::Perspective(PerspectiveProjection { fov: 1.6, ..default() })))
-        .add_child(rifle);
+        .spawn((Camera3d::default(), Projection::Perspective(PerspectiveProjection { fov: FOV, ..default() })))
+        .add_children(&[rifle, pistol, knife]);
     commands.spawn((
         DirectionalLight { illuminance: 8000.0, shadow_maps_enabled: true, ..default() },
         Transform::default().looking_to(Vec3::new(-0.4, -1.0, -0.3), Vec3::Y),
@@ -288,6 +348,61 @@ fn setup(
         Text::new(""),
         Node { position_type: PositionType::Absolute, left: px(12), bottom: px(12), ..default() },
     ));
+    commands.spawn((
+        HurtFlash,
+        Node { position_type: PositionType::Absolute, width: percent(100), height: percent(100), ..default() },
+        BackgroundColor(Color::NONE),
+    ));
+    commands.spawn((
+        AmmoText,
+        Text::new(""),
+        TextFont { font_size: FontSize::Px(28.0), ..default() },
+        Node { position_type: PositionType::Absolute, right: px(16), bottom: px(12), ..default() },
+    ));
+    commands.spawn((
+        BuyMenu,
+        Text::new(""),
+        Node { position_type: PositionType::Absolute, left: px(24), top: percent(30), ..default() },
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
+        Visibility::Hidden,
+    ));
+    commands.spawn((
+        KillFeed,
+        Text::new(""),
+        TextLayout { justify: Justify::Right, ..default() },
+        Node { position_type: PositionType::Absolute, right: px(16), top: px(12), ..default() },
+    ));
+}
+
+/// Keys that act once per press: buy menu, weapon slots, reload, zoom.
+fn controls(keys: Res<ButtonInput<KeyCode>>, mouse: Res<ButtonInput<MouseButton>>, mut g: ResMut<Game>) {
+    let can_buy = g.round.is_some_and(|r| r.buy_secs > 0.0) && g.hp > 0;
+    if keys.just_pressed(KeyCode::KeyB) && can_buy {
+        g.menu = !g.menu;
+    }
+    if !can_buy || keys.just_pressed(KeyCode::Escape) {
+        g.menu = false;
+    }
+    let digits = [KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4, KeyCode::Digit5];
+    if let Some(n) = digits.iter().position(|&k| keys.just_pressed(k)) {
+        if g.menu {
+            (g.want_buy, g.menu) = (n as u8 + 1, false);
+        } else if n < 3 {
+            g.want_slot = n as u8 + 1;
+        }
+    }
+    if keys.just_pressed(KeyCode::KeyQ) {
+        g.want_slot = 4;
+    }
+    if keys.just_pressed(KeyCode::KeyR) {
+        g.want_reload = true;
+    }
+    if mouse.just_pressed(MouseButton::Right) && g.pred.weapon() == Weapon::Awp {
+        g.zoom = !g.zoom;
+    }
+    if g.pred.weapon() != Weapon::Awp || g.pred.reloading > 0 {
+        g.zoom = false;
+    }
 }
 
 fn grab_cursor(
@@ -309,8 +424,9 @@ fn look(motion: Res<AccumulatedMouseMotion>, cursor: Single<&CursorOptions, With
     if cursor.grab_mode == CursorGrabMode::None {
         return;
     }
-    g.yaw -= motion.delta.x * MOUSE_SENS;
-    g.pitch = (g.pitch - motion.delta.y * MOUSE_SENS).clamp(-1.55, 1.55);
+    let sens = if g.zoom { MOUSE_SENS * ZOOM_FOV / FOV } else { MOUSE_SENS };
+    g.yaw -= motion.delta.x * sens;
+    g.pitch = (g.pitch - motion.delta.y * sens).clamp(-1.55, 1.55);
 }
 
 /// Every frame rather than every tick, so snapshots aren't left waiting in the socket.
@@ -348,18 +464,28 @@ fn net_tick(
         pitch: g.pitch,
         jump: keys.any_pressed([KeyCode::Space, KeyCode::Backspace]),
         use_key: keys.pressed(KeyCode::KeyE),
-        fire: active && mouse.pressed(MouseButton::Left),
+        fire: active && !g.menu && mouse.pressed(MouseButton::Left),
+        slot: std::mem::take(&mut g.want_slot),
+        reload: std::mem::take(&mut g.want_reload),
+        zoom: g.zoom,
+        buy: std::mem::take(&mut g.want_buy),
         view_tick: (server_tick(&g) - g.interp_ticks) as f32,
     };
 
     g.prev_pos = g.pred.pos;
     if g.me.is_some() && g.hp > 0 {
         let mut pred = g.pred;
-        if step_player(&mut pred, &inp) {
-            let (o, d) = (eye(&pred), aim_dir(&pred));
-            let color = team_color(g.teams.get(&g.me.unwrap()).copied());
-            g.sounds.push((Sound::Shoot, 0.6));
-            g.tracers.push((muzzle(o, d), o + d * trace_world(o, d), BEAM_SECS, color));
+        let was_reloading = pred.reloading > 0;
+        if let Some((weapon, d)) = step_player(&mut pred, &inp) {
+            let o = eye(&pred);
+            g.sounds.push((Sound::Gun(weapon), 0.6));
+            add_tracer(&mut g, weapon, muzzle(o, d), o + d * trace_world(o, d));
+            if weapon == Weapon::Awp {
+                g.zoom = false;
+            }
+        }
+        if pred.reloading > 0 && !was_reloading {
+            g.sounds.push((Sound::Reload, 0.5));
         }
         g.pred = pred;
     }
@@ -388,6 +514,29 @@ fn on_snapshot(g: &mut Game, snap: Snapshot) {
     g.me = Some(snap.you);
     for p in &snap.players {
         g.teams.insert(p.id, p.team);
+        if p.bot {
+            g.bots.insert(p.id);
+        }
+    }
+    for h in &snap.hits {
+        if Some(h.attacker) == g.me {
+            g.sounds.push((if h.headshot { Sound::Headshot } else { Sound::HitBody }, 0.7));
+            if h.killed {
+                g.sounds.push((Sound::Kill, 0.6));
+            }
+        }
+        if Some(h.victim) == g.me {
+            g.sounds.push((Sound::Hurt, 0.8));
+            g.hurt_at = Some(Instant::now());
+        }
+        if h.killed {
+            let hs = if h.headshot { " (headshot)" } else { "" };
+            let line = format!("{} [{}] {}{hs}", name(g, h.attacker), h.weapon.spec().name, name(g, h.victim));
+            g.kill_feed.push_back((line, Instant::now()));
+            if g.kill_feed.len() > 5 {
+                g.kill_feed.pop_front();
+            }
+        }
     }
     let prev = g.round.replace(snap.round);
     if prev.map(|r| r.number) != Some(snap.round.number) {
@@ -418,9 +567,10 @@ fn on_snapshot(g: &mut Game, snap: Snapshot) {
     }
 
     if let Some(me) = snap.players.iter().find(|p| p.id == snap.you) {
-        if me.kills > g.kills {
-            g.sounds.push((Sound::Hit, 0.8));
+        if me.money < g.money && g.round.is_some_and(|r| r.buy_secs > 0.0) {
+            g.sounds.push((Sound::Buy, 0.6));
         }
+        (g.armor, g.money) = (me.armor, me.money);
         if g.hp > 0 && me.hp <= 0 {
             g.sounds.push((Sound::Death, 0.8));
             g.died_at = Some(Instant::now());
@@ -453,9 +603,9 @@ fn on_snapshot(g: &mut Game, snap: Snapshot) {
 
     for s in snap.shots.iter().filter(|s| s.shooter != snap.you) {
         let d = (s.to - s.from).normalize_or_zero();
-        g.tracers.push((muzzle(s.from, d), s.to, BEAM_SECS, team_color(g.teams.get(&s.shooter).copied())));
-        let volume = 0.6 / (1.0 + s.from.distance(g.pred.pos) / 8.0);
-        g.sounds.push((Sound::Shoot, volume));
+        add_tracer(g, s.weapon, muzzle(s.from, d), s.to);
+        let volume = 0.6 / (1.0 + s.from.distance(g.pred.pos) / 12.0);
+        g.sounds.push((Sound::Gun(s.weapon), volume));
     }
     g.snapshots.push_back(snap);
     while g.snapshots.len() > 64 {
@@ -464,11 +614,15 @@ fn on_snapshot(g: &mut Game, snap: Snapshot) {
 }
 
 fn render_self(
-    mut cam: Single<&mut Transform, With<Camera3d>>,
+    cam: Single<(&mut Transform, &mut Projection), With<Camera3d>>,
     mut g: ResMut<Game>,
     time: Res<Time>,
     fixed: Res<Time<Fixed>>,
 ) {
+    let (mut cam, mut projection) = cam.into_inner();
+    if let Projection::Perspective(p) = &mut *projection {
+        p.fov = if g.zoom { ZOOM_FOV } else { FOV };
+    }
     g.smooth *= (-time.delta_secs() * 15.0).exp();
     if let Some((_, eye, yaw, pitch)) = g.spectate.filter(|_| spectating(&g)) {
         cam.translation = eye;
@@ -477,13 +631,14 @@ fn render_self(
     }
     let pos = g.prev_pos.lerp(g.pred.pos, fixed.overstep_fraction()) + g.smooth;
     cam.translation = pos + Vec3::Y * EYE;
-    cam.rotation = look_rot(g.yaw, g.pitch);
+    let (side, up) = punch(&g.pred);
+    cam.rotation = look_rot(g.yaw + side, g.pitch + up);
 }
 
 fn render_remotes(
     mut commands: Commands,
     mut q: Query<(Entity, &Remote, &mut Rig, &mut Transform, &mut Visibility)>,
-    mut parts: Query<&mut Transform, Without<Remote>>,
+    mut parts: Query<(&mut Transform, &mut Visibility), Without<Remote>>,
     time: Res<Time>,
     mut g: ResMut<Game>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -526,14 +681,14 @@ fn render_remotes(
         if Some(p.id) == carrier {
             carrier_pos = Some(pos);
         }
-        seen.insert(p.id, (pos, yaw, pitch, alive, p.team));
+        seen.insert(p.id, (pos, yaw, pitch, alive, p.state.weapon()));
     }
     (g.spectate, g.carrier_pos) = (spectate, carrier_pos);
     // We're looking out of their eyes, so their own model would only block the view.
     let watched = spectate.filter(|_| spectating(&g)).map(|s| s.0);
 
     for (e, r, mut rig, mut t, mut vis) in &mut q {
-        let Some((pos, yaw, pitch, alive, _)) = seen.remove(&r.0) else {
+        let Some((pos, yaw, pitch, alive, weapon)) = seen.remove(&r.0) else {
             commands.entity(e).despawn();
             continue;
         };
@@ -542,12 +697,19 @@ fn render_remotes(
         *vis = if alive && watched != Some(r.0) { Visibility::Inherited } else { Visibility::Hidden };
         let swing = rig.animate(pos, time.delta_secs());
         for (leg, dir) in rig.legs.into_iter().zip([1.0, -1.0]) {
-            if let Ok(mut leg) = parts.get_mut(leg) {
+            if let Ok((mut leg, _)) = parts.get_mut(leg) {
                 leg.rotation = Quat::from_rotation_x(swing * dir);
             }
         }
-        if let Ok(mut arms) = parts.get_mut(rig.arms) {
+        if let Ok((mut arms, _)) = parts.get_mut(rig.arms) {
             arms.rotation = Quat::from_rotation_x(pitch);
+        }
+        let (held, scale) = gun_model(weapon);
+        for (i, gun) in rig.guns.into_iter().enumerate() {
+            if let Ok((mut t, mut v)) = parts.get_mut(gun) {
+                *v = if i == held { Visibility::Inherited } else { Visibility::Hidden };
+                t.scale = scale;
+            }
         }
     }
     for (id, (pos, yaw, ..)) in seen {
@@ -585,15 +747,15 @@ fn hud(mut text: Single<&mut Text, With<Hud>>, mut g: ResMut<Game>, time: Res<Ti
         ),
         (true, None) => "SERVER IS A DIFFERENT VERSION - update both".into(),
         (_, None) => "connecting...".into(),
-        _ if g.hp > 0 => format!("HP {}", g.hp),
-        _ => "DEAD".into(),
+        _ if g.hp > 0 => format!("HP {}   Armor {}   ${}", g.hp, g.armor, g.money),
+        _ => format!("DEAD   ${}", g.money),
     };
     text.0 = format!("{status}   K {}  D {}\n{}", g.kills, g.deaths, g.net_graph.line);
 }
 
 fn draw_tracers(mut gizmos: Gizmos, mut g: ResMut<Game>, time: Res<Time>) {
-    for (a, b, ttl, color) in &mut g.tracers {
-        gizmos.line(*a, *b, color.with_alpha(*ttl / BEAM_SECS));
+    for (a, b, ttl, life, color) in &mut g.tracers {
+        gizmos.line(*a, *b, color.with_alpha(*ttl / *life));
         *ttl -= time.delta_secs();
     }
     g.tracers.retain(|t| t.2 > 0.0);
@@ -604,14 +766,6 @@ fn muzzle(o: Vec3, d: Vec3) -> Vec3 {
     let right = d.cross(Vec3::Y).normalize_or_zero();
     let up = right.cross(d);
     o + right * 0.25 - up * 0.22 + d * 0.75
-}
-
-fn team_color(team: Option<Team>) -> Color {
-    match team {
-        Some(Team::T) => Color::srgb(0.9, 0.6, 0.2),
-        Some(Team::Ct) => Color::srgb(0.25, 0.45, 0.95),
-        None => Color::WHITE,
-    }
 }
 
 /// Dead and the fade to black is done: watch a teammate instead.
@@ -683,8 +837,13 @@ fn scoreboard(mut text: Single<&mut Text, With<Scoreboard>>, g: Res<Game>) {
 fn play_sounds(mut commands: Commands, mut g: ResMut<Game>, sounds: Res<Sounds>) {
     for (sound, volume) in g.sounds.drain(..) {
         let handle = match sound {
-            Sound::Shoot => &sounds.shoot,
-            Sound::Hit => &sounds.hit,
+            Sound::Gun(w) => &sounds.guns[&w],
+            Sound::Reload => &sounds.reload,
+            Sound::Buy => &sounds.buy,
+            Sound::Headshot => &sounds.headshot,
+            Sound::HitBody => &sounds.hit_body,
+            Sound::Kill => &sounds.kill,
+            Sound::Hurt => &sounds.hurt,
             Sound::Death => &sounds.death,
             Sound::Beep => &sounds.beep,
             Sound::Explosion => &sounds.explosion,
@@ -706,9 +865,76 @@ fn death_fade(mut fade: Single<&mut BackgroundColor, With<DeathFade>>, g: Res<Ga
     fade.0 = Color::BLACK.with_alpha(alpha);
 }
 
-/// Grayed out while the weapon cools down, so a held trigger firing late doesn't read as lag.
-fn crosshair(mut color: Single<&mut TextColor, With<Crosshair>>, g: Res<Game>) {
-    color.0 = if g.pred.fire_cd > 0 { Color::srgba(0.5, 0.5, 0.5, 0.6) } else { Color::WHITE };
+/// Grayed out while reloading or drawing, so a held trigger firing late doesn't read as lag. Hidden when scoped.
+fn crosshair(mut q: Single<(&mut TextColor, &mut Visibility), With<Crosshair>>, g: Res<Game>) {
+    let (color, vis) = &mut *q;
+    let busy = g.pred.reloading > 0 || g.pred.fire_cd as f32 > g.pred.weapon().spec().cycle * TICK_HZ as f32;
+    color.0 = if busy { Color::srgba(0.5, 0.5, 0.5, 0.6) } else { Color::WHITE };
+    **vis = if g.zoom { Visibility::Hidden } else { Visibility::Inherited };
+}
+
+fn add_tracer(g: &mut Game, weapon: Weapon, from: Vec3, to: Vec3) {
+    let life = match weapon {
+        Weapon::Knife => return,
+        Weapon::Awp => 0.35,
+        _ => 0.06,
+    };
+    g.tracers.push((from, to, life, life, Color::srgba(1.0, 0.9, 0.5, 0.8)));
+}
+
+fn name(g: &Game, id: u32) -> String {
+    match id {
+        _ if Some(id) == g.me => "You".into(),
+        _ if g.bots.contains(&id) => format!("Bot {id}"),
+        _ => format!("Player {id}"),
+    }
+}
+
+/// Shows the held weapon, dips it while reloading, kicks it back on recoil; hidden when dead or scoped.
+fn viewmodel(mut q: Query<(&Viewmodel, &mut Transform, &mut Visibility)>, g: Res<Game>) {
+    let w = g.pred.weapon();
+    let (held, scale) = gun_model(w);
+    let reload = g.pred.reloading as f32 / (w.spec().reload * TICK_HZ as f32).max(1.0);
+    let dip = (reload * std::f32::consts::PI).sin();
+    let show = g.hp > 0 && g.me.is_some() && !g.zoom;
+    for (vm, mut t, mut vis) in &mut q {
+        *vis = if show && vm.0 == held { Visibility::Inherited } else { Visibility::Hidden };
+        t.translation = vm.1 + Vec3::new(0.0, -0.15 * dip, 0.03 * g.pred.recoil.min(3.0));
+        t.rotation = Quat::from_rotation_x(-0.6 * dip);
+        t.scale = scale;
+    }
+}
+
+fn ammo_hud(mut text: Single<&mut Text, With<AmmoText>>, g: Res<Game>) {
+    let w = g.pred.weapon();
+    text.0 = match g.pred.ammo() {
+        _ if g.hp <= 0 => String::new(),
+        None => w.spec().name.into(),
+        Some(_) if g.pred.reloading > 0 => format!("{}  reloading...", w.spec().name),
+        Some((mag, reserve)) => format!("{}  {mag} / {reserve}", w.spec().name),
+    };
+}
+
+fn buy_menu_hud(mut q: Single<(&mut Text, &mut Visibility), With<BuyMenu>>, g: Res<Game>) {
+    let (text, vis) = &mut *q;
+    **vis = if g.menu { Visibility::Inherited } else { Visibility::Hidden };
+    let (Some(r), Some(team)) = (g.round, g.me.and_then(|me| g.teams.get(&me))) else { return };
+    let mut lines = format!(" BUY  ${}   ({:.0} s left)\n", g.money, r.buy_secs);
+    for (i, item) in buy_menu(*team).iter().enumerate() {
+        let mark = if item.price() <= g.money { " " } else { "x" };
+        lines += &format!(" {mark} {}  {:<16} ${}\n", i + 1, item.name(), item.price());
+    }
+    text.0 = lines + " B / Esc to close ";
+}
+
+fn kill_feed(mut text: Single<&mut Text, With<KillFeed>>, mut g: ResMut<Game>) {
+    g.kill_feed.retain(|(_, at)| at.elapsed().as_secs_f32() < 6.0);
+    text.0 = g.kill_feed.iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>().join("\n");
+}
+
+fn hurt_flash(mut flash: Single<&mut BackgroundColor, With<HurtFlash>>, g: Res<Game>) {
+    let alpha = g.hurt_at.map_or(0.0, |t| (0.35 * (1.0 - t.elapsed().as_secs_f32() / 0.4)).max(0.0));
+    flash.0 = Color::srgba(0.8, 0.0, 0.0, alpha);
 }
 
 /// Monotonic seconds since the client started.

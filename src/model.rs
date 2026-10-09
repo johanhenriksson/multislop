@@ -2,6 +2,7 @@
 //! Everything fits inside the hit capsule (radius 0.4, height 1.8). Models face -Z with the origin at the feet.
 
 use crate::shared::{RADIUS, Team};
+use crate::weapons::{Slot, Weapon};
 use bevy::prelude::*;
 
 /// Moving parts of a player model: legs swing with speed, arms and rifle follow the aim pitch.
@@ -9,6 +10,8 @@ use bevy::prelude::*;
 pub struct Rig {
     pub legs: [Entity; 2],
     pub arms: Entity,
+    /// Rifle, pistol and knife models; the held one is shown.
+    pub guns: [Entity; 3],
     /// Walk cycle phase in radians, advanced by distance moved.
     pub phase: f32,
     pub last_pos: Option<Vec3>,
@@ -88,9 +91,11 @@ pub fn spawn_soldier(
     let hand = part(Vec3::new(0.09, 0.09, 0.09), pal.skin, Vec3::new(0.0, -0.04, -0.52));
     let arms = commands.spawn((Transform::from_xyz(0.0, 1.45, 0.0), Visibility::Inherited, children![right_arm, left_arm, hand])).id();
     let rifle = spawn_rifle(commands, meshes, mats, Transform::from_xyz(0.06, 0.0, -0.3));
-    commands.entity(arms).add_child(rifle);
+    let pistol = spawn_pistol(commands, meshes, mats, Transform::from_xyz(0.0, 0.0, -0.5));
+    let knife = spawn_knife(commands, meshes, mats, Transform::from_xyz(0.21, -0.05, -0.42));
+    commands.entity(arms).add_children(&[rifle, pistol, knife]);
 
-    let rig = Rig { legs, arms, phase: 0.0, last_pos: None };
+    let rig = Rig { legs, arms, guns: [rifle, pistol, knife], phase: 0.0, last_pos: None };
     let body = commands.spawn((root, rig, Visibility::Inherited, children![torso, vest, head, top])).id();
     commands.entity(body).add_children(&legs).add_child(arms);
     debug_assert!(0.47 / 2.0 < RADIUS);
@@ -124,4 +129,64 @@ pub fn spawn_rifle(
             ],
         ))
         .id()
+}
+
+/// A compact pistol with its grip at the origin, pointing -Z.
+pub fn spawn_pistol(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    mats: &mut Assets<StandardMaterial>,
+    at: Transform,
+) -> Entity {
+    let metal = mats.add(Color::srgb(0.12, 0.12, 0.13));
+    let grip = mats.add(Color::srgb(0.2, 0.2, 0.2));
+    let mut part = |size: Vec3, mat: &Handle<StandardMaterial>, t: Transform| {
+        (Mesh3d(meshes.add(Cuboid::from_size(size))), MeshMaterial3d(mat.clone()), t)
+    };
+    commands
+        .spawn((
+            at,
+            Visibility::Hidden,
+            children![
+                part(Vec3::new(0.035, 0.045, 0.2), &metal, Transform::from_xyz(0.0, 0.03, -0.06)),
+                part(Vec3::new(0.03, 0.1, 0.045), &grip, Transform::from_xyz(0.0, -0.03, 0.02).with_rotation(Quat::from_rotation_x(0.25))),
+            ],
+        ))
+        .id()
+}
+
+/// A knife held blade forward.
+pub fn spawn_knife(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    mats: &mut Assets<StandardMaterial>,
+    at: Transform,
+) -> Entity {
+    let steel = mats.add(StandardMaterial { base_color: Color::srgb(0.75, 0.77, 0.8), metallic: 0.9, perceptual_roughness: 0.3, ..default() });
+    let handle = mats.add(Color::srgb(0.08, 0.08, 0.08));
+    let mut part = |size: Vec3, mat: &Handle<StandardMaterial>, t: Transform| {
+        (Mesh3d(meshes.add(Cuboid::from_size(size))), MeshMaterial3d(mat.clone()), t)
+    };
+    commands
+        .spawn((
+            at,
+            Visibility::Hidden,
+            children![
+                part(Vec3::new(0.012, 0.035, 0.2), &steel, Transform::from_xyz(0.0, 0.0, -0.13)),
+                part(Vec3::new(0.025, 0.035, 0.1), &handle, Transform::default()),
+            ],
+        ))
+        .id()
+}
+
+/// Which of the rifle/pistol/knife models to show for a weapon, and how to stretch the rifle model so the MP5 reads
+/// short and the AWP long.
+pub fn gun_model(weapon: Weapon) -> (usize, Vec3) {
+    match (weapon.spec().slot, weapon) {
+        (Slot::Knife, _) => (2, Vec3::ONE),
+        (Slot::Secondary, _) => (1, Vec3::ONE),
+        (_, Weapon::Mp5) => (0, Vec3::new(1.0, 1.0, 0.75)),
+        (_, Weapon::Awp) => (0, Vec3::new(1.1, 1.1, 1.4)),
+        _ => (0, Vec3::ONE),
+    }
 }

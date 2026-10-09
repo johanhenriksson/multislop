@@ -3,6 +3,7 @@
 
 use crate::map::MAP;
 use crate::shared::*;
+use crate::weapons::{Slot, Weapon};
 use bevy::math::Vec3;
 
 /// Seconds between first seeing an enemy and being allowed to shoot. The main difficulty knob.
@@ -64,8 +65,9 @@ impl Bot {
         }
     }
 
-    fn roll_aim_error(&mut self) -> (f32, f32) {
-        ((self.random() * 2.0 - 1.0) * AIM_ERROR, (self.random() * 2.0 - 1.0) * AIM_ERROR * 0.5)
+    fn roll_aim_error(&mut self, scale: f32) -> (f32, f32) {
+        let e = AIM_ERROR * scale;
+        ((self.random() * 2.0 - 1.0) * e, (self.random() * 2.0 - 1.0) * e * 0.5)
     }
 
     fn random(&mut self) -> f32 {
@@ -89,6 +91,13 @@ impl Bot {
     ) -> Input {
         self.seq += 1;
         let mut inp = Input { seq: self.seq, yaw: me.yaw, pitch: me.pitch, view_tick: tick as f32, ..Default::default() };
+        // Best gun in hand.
+        inp.slot = match (me.primary, me.slot) {
+            (Some(_), Slot::Primary) | (None, Slot::Secondary) => 0,
+            (Some(_), _) => 1,
+            (None, _) => 2,
+        };
+        let spec = me.weapon().spec();
         if round.number != self.round {
             self.round = round.number;
             // Ts all go for the same site; CTs split up to cover both.
@@ -108,7 +117,7 @@ impl Bot {
             (Some(e), Some((t, _))) if e.id == t => {}
             (Some(e), _) => {
                 self.target = Some((e.id, tick));
-                self.aim_error = self.roll_aim_error();
+                self.aim_error = self.roll_aim_error(1.0);
             }
             (None, _) => self.target = None,
         }
@@ -122,13 +131,20 @@ impl Bot {
             inp.yaw = me.yaw + wrap(yaw - me.yaw).clamp(-max, max);
             inp.pitch = me.pitch + (pitch - me.pitch).clamp(-max, max);
             let lined_up = wrap(yaw - inp.yaw).abs() < 0.02 && (pitch - inp.pitch).abs() < 0.03;
-            inp.fire = lined_up && me.fire_cd == 0 && tick - since >= (REACTION_SECS * TICK_HZ as f32) as u32;
+            let reacted = tick - since >= (REACTION_SECS * TICK_HZ as f32) as u32;
+            let ready = me.fire_cd == 0 && me.reloading == 0;
+            // Automatic weapons in bursts as recoil builds; semi-automatic ones need the trigger released.
+            let trigger = if spec.auto { me.recoil < 3.0 } else { !me.trigger };
+            inp.fire = lined_up && reacted && ready && trigger;
+            inp.zoom = me.weapon() == Weapon::Awp;
             if inp.fire {
-                self.aim_error = self.roll_aim_error();
+                self.aim_error = self.roll_aim_error(if spec.auto { 0.5 } else { 1.0 });
             }
             return inp;
         }
 
+        // Top up between fights.
+        inp.reload = me.ammo().is_some_and(|(mag, reserve)| reserve > 0 && mag < spec.mag / 2);
         let (goal, use_bomb) = self.goal(id, me, team, round, callout);
         let at_goal = me.pos.with_y(0.0).distance(goal.with_y(0.0)) < 0.8;
         if use_bomb {
