@@ -26,6 +26,8 @@ const FRICTION: f32 = 4.0;
 const STOP_SPEED: f32 = 2.54;
 const GRAVITY: f32 = 20.3;
 const JUMP_SPEED: f32 = 6.8;
+/// Highest rise you walk up without jumping (stairs, ramps, curbs), and how far down you stay glued to the floor.
+const STEP: f32 = 0.5;
 
 pub const MAX_HP: i32 = 100;
 pub const MAX_REWIND_TICKS: f32 = (0.4 * TICK_HZ) as f32;
@@ -402,8 +404,9 @@ fn overlaps(p: Vec3, c: Vec3, h: Vec3) -> bool {
         && p.y + HEIGHT > c.y - h.y + SKIN
 }
 
-// ponytail: player collides as an AABB, axis-by-axis. No step-up or slopes; add a proper sweep when the map needs it.
+// ponytail: player collides with boxes as an AABB, axis-by-axis, and stands on the height field at its center point.
 fn move_and_collide(s: &mut PlayerState) {
+    let was_on_ground = s.on_ground;
     s.on_ground = false;
     for axis in [0, 2, 1] {
         let before = s.pos[axis];
@@ -430,17 +433,48 @@ fn move_and_collide(s: &mut PlayerState) {
             }
             s.vel[axis] = 0.0;
         }
+        // Floor rising more than a step in the way is a wall; anything less is walked up.
+        if axis != 1 && MAP.floor_at(s.pos) > s.pos.y + STEP {
+            s.pos[axis] = before;
+            s.vel[axis] = 0.0;
+        }
     }
-    if s.pos.y <= 0.0 {
-        s.pos.y = 0.0;
-        s.vel.y = 0.0;
+    let floor = MAP.floor_at(s.pos);
+    let gap = s.pos.y - floor;
+    // Land, step up, or stay glued to the floor walking down a slope (unless jumping).
+    if gap <= 0.0 || (was_on_ground && s.vel.y <= 0.0 && gap < STEP) {
+        s.pos.y = floor;
+        s.vel.y = s.vel.y.max(0.0);
         s.on_ground = true;
     }
 }
 
+/// Distance to where a ray first goes below the floor, by marching then bisecting. RANGE if it never does.
+fn trace_floor(o: Vec3, d: Vec3, max: f32) -> f32 {
+    const STEP: f32 = 0.25;
+    let below = |t: f32| {
+        let p = o + d * t;
+        p.y < MAP.floor_at(p)
+    };
+    let mut t = 0.0;
+    while t < max {
+        let next = (t + STEP).min(max);
+        if below(next) {
+            let (mut lo, mut hi) = (t, next);
+            for _ in 0..8 {
+                let mid = (lo + hi) / 2.0;
+                if below(mid) { hi = mid } else { lo = mid }
+            }
+            return lo;
+        }
+        t = next;
+    }
+    RANGE
+}
+
 /// Distance to the first map surface (floor or box) along the ray, capped at RANGE.
 pub fn trace_world(o: Vec3, d: Vec3) -> f32 {
-    let mut best = if d.y < 0.0 { (-o.y / d.y).min(RANGE) } else { RANGE };
+    let mut best = RANGE;
     for &(c, h) in &MAP.boxes {
         let (min, max) = (c - h, c + h);
         let (t1, t2) = ((min - o) / d, (max - o) / d);
@@ -449,7 +483,7 @@ pub fn trace_world(o: Vec3, d: Vec3) -> f32 {
             best = tn.max(0.0);
         }
     }
-    best
+    best.min(trace_floor(o, d, best))
 }
 
 /// Ray vs vertical capsule standing at `feet`. Returns the hit distance.
@@ -516,7 +550,7 @@ mod tests {
                     ..Default::default()
                 };
                 step_player(&mut s, &inp);
-                let inside = s.pos.x.abs() < w / 2.0 && s.pos.z.abs() < d / 2.0 && s.pos.y >= 0.0;
+                let inside = s.pos.x.abs() < w / 2.0 && s.pos.z.abs() < d / 2.0 && s.pos.y >= MAP.floor_at(s.pos) - 1e-3;
                 assert!(inside && s.pos.is_finite(), "spawn {i} tick {t}: {:?}", s.pos);
             }
         }
@@ -579,6 +613,38 @@ mod tests {
         };
         let (knife, pistol, ak) = (run(Some(Weapon::Ak47), 3), run(Some(Weapon::Ak47), 2), run(Some(Weapon::Ak47), 1));
         assert!(knife > pistol && pistol > ak, "knife {knife} > pistol {pistol} > AK {ak}");
+    }
+
+    #[test]
+    fn walks_down_into_the_tunnel() {
+        // Walk from T spawn (on its platform) to the lowest floor along the bots' path.
+        let cells = (0..MAP.depth()).flat_map(|z| (0..MAP.width()).map(move |x| (x, z)));
+        let low = cells.filter(|&(x, z)| MAP.walkable(x, z)).map(|(x, z)| MAP.ground(x, z)).find(|g| g.y < 0.1).expect("a tunnel");
+        let mut s = PlayerState { pos: MAP.spawns(Team::T)[0], on_ground: true, ..Default::default() };
+        s.loadout(None, Weapon::Glock);
+        let field = MAP.distance_field(MAP.cell(low));
+        let mut min_y = s.pos.y;
+        for _ in 0..(60.0 * TICK_HZ) as usize {
+            let (x, z) = MAP.cell(s.pos);
+            let w = MAP.width();
+            let next = MAP.neighbors(x, z).min_by_key(|&(nx, nz)| field[nz * w + nx]);
+            let Some((nx, nz)) = next.filter(|_| field[z * w + x] > 0) else { break };
+            let dir = (MAP.center(nx, nz) - s.pos).with_y(0.0).normalize_or_zero();
+            let yaw = f32::atan2(-dir.x, -dir.z);
+            step_player(&mut s, &Input { yaw, forward: 1.0, ..Default::default() });
+            assert!(s.pos.y >= MAP.floor_at(s.pos) - 1e-3, "never sinks into the floor");
+            min_y = min_y.min(s.pos.y);
+        }
+        assert!(min_y < 0.3, "got down into the tunnel: {min_y}");
+        assert!(MAP.spawns(Team::T)[0].y > 2.0, "T spawn sits on its platform");
+    }
+
+    #[test]
+    fn terrain_blocks_shots() {
+        let low = (0..MAP.depth()).flat_map(|z| (0..MAP.width()).map(move |x| (x, z))).find(|&(x, z)| MAP.walkable(x, z) && MAP.ground(x, z).y < 0.1);
+        let p = MAP.ground(low.unwrap().0, low.unwrap().1);
+        let t = trace_world(p + Vec3::Y * 0.5, Vec3::NEG_Y);
+        assert!((t - 0.5).abs() < 0.01, "floor below: {t}");
     }
 
     #[test]

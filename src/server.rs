@@ -55,6 +55,8 @@ struct Match {
     buy_until: u32,
     /// Consecutive round losses per team, for the loss bonus.
     loss_streak: [u32; 2],
+    /// The site the T bots go for this round.
+    t_site: char,
 }
 
 const fn ticks(secs: f32) -> u32 {
@@ -246,7 +248,7 @@ fn run_inputs(
     let callouts = [callout(Team::T), callout(Team::Ct)];
     for c in clients.values_mut() {
         if let Some(bot) = &mut c.bot {
-            let inp = bot.think(c.id, &c.state, c.team, &game.round, &seen, callouts[c.team as usize], tick);
+            let inp = bot.think(c.id, &c.state, c.team, &game.round, &seen, callouts[c.team as usize], game.t_site, tick);
             (c.last_queued, c.last_heard) = (inp.seq, Instant::now());
             c.queue.push_back(inp);
         }
@@ -376,7 +378,7 @@ fn new_match() -> Match {
         bomb: Bomb::None,
         progress: None,
     };
-    Match { round, phase_ends: 0, bomb_explodes: 0, progress: None, buy_until: 0, loss_streak: [0, 0] }
+    Match { round, phase_ends: 0, bomb_explodes: 0, progress: None, buy_until: 0, loss_streak: [0, 0], t_site: 'A' }
 }
 
 fn start_round(m: &mut Match, clients: &mut HashMap<SocketAddr, Client>, tick: u32) {
@@ -406,12 +408,13 @@ fn start_round(m: &mut Match, clients: &mut HashMap<SocketAddr, Client>, tick: u
         }
     }
     m.buy_until = m.phase_ends + ticks(BUY_SECS);
+    m.t_site = if (tick.wrapping_mul(2246822519) >> 13) & 1 == 0 { 'A' } else { 'B' };
     let ts: Vec<u32> = clients.values().filter(|c| c.team == Team::T).map(|c| c.id).collect();
     m.round.bomb = match ts.len() {
         0 => Bomb::None,
         n => Bomb::Carried(ts[(tick.wrapping_mul(2654435761) >> 16) as usize % n]),
     };
-    println!("round {} starts", m.round.number);
+    println!("round {} starts, T bots go {}", m.round.number, m.t_site);
 }
 
 fn end_round(m: &mut Match, clients: &mut HashMap<SocketAddr, Client>, tick: u32, winner: Team, why: &str) {

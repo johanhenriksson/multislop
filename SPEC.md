@@ -37,11 +37,16 @@ Deadline: playable before 00:00. One weapon, one simple map.
 
 ## Rounds (bomb defusal)
 - Teams T and CT, humans auto-balanced on join, friendly fire off. Server-side bots fill both teams to 3v3 (or to the
-  bigger human team); they path over the map grid, plant/defuse, call out spotted enemies so teammates rotate, and
+  bigger human team); they path over the map grid via a random detour point each round (Ts share a random site, some lurk;
+  CTs hold random spots), plant/defuse, call out spotted enemies so teammates rotate, and
   only notice enemies in a 120° field of view (callouts too), aim with a reaction delay, limited turn speed and angular aim error (~30% accuracy bot vs bot; `src/bot.rs`
   constants are the difficulty knobs).
 - Map: dust, traced from a top-down overview image into an ASCII grid in `src/map.rs` (2 m cells, flat): B site
   top-left, A bottom-left, CT spawn between them, T spawn bottom-right, tunnels through the middle. Sites tinted red.
+- Height: a second grid (`DUST2_HEIGHTS`, quarter meters, base 36) gives each cell a floor height: 2 m streets, tunnels
+  sunk to 0 with ramps (from the dark areas of the overview), B site and T spawn yard raised 1 m. The floor is
+  interpolated between cell corners; you walk up rises under 0.5 m, stay glued going down, and bullets/sight lines
+  march against the terrain.
 - Round: 5 s freeze (look only, movement frozen via `PlayerState::frozen` so prediction agrees), 1:55 live, 5 s end.
 - One random T carries the bomb; it drops where the carrier dies and any T picks it up by walking over it.
 - Plant: hold E on a site for 3 s. Defuse: CT holds E within 1.5 m of the bomb for 5 s. Bomb: 35 s, kills within 20 m.

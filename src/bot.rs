@@ -29,8 +29,11 @@ pub struct Seen {
 
 pub struct Bot {
     seq: u32,
-    /// The site this bot heads for this round.
+    /// The site this bot heads for this round, and the spot on it to plant at or hold.
     site: char,
+    spot: Vec3,
+    /// A detour on the way, so bots don't all walk the same shortest path every round.
+    via: Option<Vec3>,
     round: u32,
     /// Current enemy and the tick we first saw them.
     target: Option<(u32, u32)>,
@@ -52,6 +55,8 @@ impl Bot {
         Bot {
             seq: 0,
             site: 'A',
+            spot: Vec3::ZERO,
+            via: None,
             round: 0,
             target: None,
             aim_error: (0.0, 0.0),
@@ -68,6 +73,32 @@ impl Bot {
     fn roll_aim_error(&mut self, scale: f32) -> (f32, f32) {
         let e = AIM_ERROR * scale;
         ((self.random() * 2.0 - 1.0) * e, (self.random() * 2.0 - 1.0) * e * 0.5)
+    }
+
+    /// A random floor cell on a bomb site, near its middle.
+    fn random_site_spot(&mut self, site: char) -> Vec3 {
+        let center = MAP.site_center(site);
+        let spots: Vec<Vec3> = MAP.site_cells().filter(|p| MAP.site_at(*p) == Some(site) && p.distance(center) < 8.0).collect();
+        let pick = (self.random() * spots.len() as f32) as usize;
+        spots.get(pick).map_or(center, |p| p.with_y(MAP.floor_at(*p)))
+    }
+
+    /// A random point that makes a sensible detour between `from` and `to` (at most `percent`% of the shortest
+    /// path), so each bot takes its own route.
+    fn pick_via(&mut self, from: Vec3, to: Vec3, percent: u32) -> Option<Vec3> {
+        let (to_goal, to_start) = (MAP.distance_field(MAP.cell(to)), MAP.distance_field(MAP.cell(from)));
+        let w = MAP.width();
+        let (sx, sz) = MAP.cell(from);
+        let direct = to_goal[sz * w + sx] as u32;
+        let candidates: Vec<(usize, usize)> = (0..MAP.depth())
+            .flat_map(|z| (0..w).map(move |x| (x, z)))
+            .filter(|&(x, z)| {
+                let (a, b) = (to_start[z * w + x] as u32, to_goal[z * w + x] as u32);
+                MAP.walkable(x, z) && a > 4 && b > 4 && a + b <= direct * percent / 100 + 4
+            })
+            .collect();
+        let pick = (self.random() * candidates.len() as f32) as usize;
+        candidates.get(pick).map(|&(x, z)| MAP.ground(x, z))
     }
 
     fn random(&mut self) -> f32 {
@@ -87,6 +118,7 @@ impl Bot {
         round: &Round,
         players: &[Seen],
         callout: Option<Vec3>,
+        t_site: char,
         tick: u32,
     ) -> Input {
         self.seq += 1;
@@ -101,8 +133,18 @@ impl Bot {
         if round.number != self.round {
             self.round = round.number;
             // Ts all go for the same site; CTs split up to cover both.
-            let coin = if team == Team::T { round.number % 2 == 0 } else { self.random() < 0.5 };
-            self.site = if coin { 'A' } else { 'B' };
+            // Ts go for the site the server picked, except the odd lurker; CTs split up to cover both.
+            let other = |s: char| if s == 'A' { 'B' } else { 'A' };
+            self.site = match team {
+                Team::T if self.random() < 0.15 => other(t_site),
+                Team::T => t_site,
+                Team::Ct if self.random() < 0.5 => 'A',
+                Team::Ct => 'B',
+            };
+            self.spot = self.random_site_spot(self.site);
+            // Ts detour less so they still arrive roughly together.
+            let detour = if team == Team::T { 128 } else { 135 };
+            self.via = self.pick_via(me.pos, self.spot, detour);
             self.target = None;
         }
 
@@ -145,6 +187,9 @@ impl Bot {
 
         // Top up between fights.
         inp.reload = me.ammo().is_some_and(|(mag, reserve)| reserve > 0 && mag < spec.mag / 2);
+        if self.via.is_some_and(|v| v.with_y(0.0).distance(me.pos.with_y(0.0)) < 2.5) {
+            self.via = None;
+        }
         let (goal, use_bomb) = self.goal(id, me, team, round, callout);
         let at_goal = me.pos.with_y(0.0).distance(goal.with_y(0.0)) < 0.8;
         if use_bomb {
@@ -182,12 +227,13 @@ impl Bot {
 
     /// Where to go, and whether we're there and should hold E (plant or defuse).
     fn goal(&mut self, id: u32, me: &PlayerState, team: Team, round: &Round, callout: Option<Vec3>) -> (Vec3, bool) {
+        let route = self.via.unwrap_or(self.spot);
         // Rotate to wherever a teammate is in a fight, unless there's bomb business to do.
-        let site = callout.unwrap_or(MAP.site_center(self.site));
+        let site = callout.unwrap_or(route);
         match (team, round.bomb) {
             (Team::T, Bomb::Carried(c)) if c == id => {
                 let on_site = MAP.site_at(me.pos) == Some(self.site);
-                (site, on_site && me.on_ground)
+                (route, on_site && me.on_ground)
             }
             (Team::T, Bomb::Dropped(p)) => (p, false),
             (_, Bomb::Planted(p)) if team == Team::Ct => (p, me.pos.distance(p) < BOMB_REACH - 0.3),

@@ -294,10 +294,7 @@ fn setup(
         Transform::default().looking_to(Vec3::new(-0.4, -1.0, -0.3), Vec3::Y),
     ));
     commands.insert_resource(GlobalAmbientLight { brightness: 400.0, ..default() });
-    commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(MAP.size().0, MAP.size().1))),
-        MeshMaterial3d(mats.add(Color::srgb(0.76, 0.66, 0.48))),
-    ));
+    commands.spawn((Mesh3d(meshes.add(terrain_mesh())), MeshMaterial3d(mats.add(Color::WHITE))));
     let crate_mat = mats.add(Color::srgb(0.55, 0.4, 0.22));
     let wall_mat = mats.add(Color::srgb(0.82, 0.72, 0.55));
     for &(c, h) in &MAP.boxes {
@@ -315,7 +312,8 @@ fn setup(
         ..default()
     });
     for p in MAP.site_cells() {
-        commands.spawn((Mesh3d(site_mesh.clone()), MeshMaterial3d(site_mat.clone()), Transform::from_translation(p + Vec3::Y * 0.02)));
+        let at = p.with_y(MAP.floor_at(p) + 0.03);
+        commands.spawn((Mesh3d(site_mesh.clone()), MeshMaterial3d(site_mat.clone()), Transform::from_translation(at)));
     }
     commands.spawn((
         BombModel,
@@ -978,4 +976,35 @@ fn server_tick(g: &Game) -> f64 {
 
 fn scope(mut vis: Single<&mut Visibility, With<Scope>>, g: Res<Game>) {
     **vis = if g.zoom && g.hp > 0 { Visibility::Inherited } else { Visibility::Hidden };
+}
+
+/// The floor as one mesh following the height field, sand colored and darker the lower it goes.
+fn terrain_mesh() -> Mesh {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::mesh::{Indices, PrimitiveTopology};
+    let (w, d) = MAP.size();
+    let (mut pos, mut normals, mut colors, mut idx) = (vec![], vec![], vec![], vec![]);
+    for z in 0..MAP.depth() {
+        for x in 0..MAP.width() {
+            let corner = |cx: usize, cz: usize| {
+                Vec3::new(cx as f32 * CELL - w / 2.0, MAP.corner(cx, cz), cz as f32 * CELL - d / 2.0)
+            };
+            let quad = [corner(x, z), corner(x + 1, z), corner(x + 1, z + 1), corner(x, z + 1)];
+            let normal = (quad[2] - quad[0]).cross(quad[1] - quad[3]).normalize_or(Vec3::Y);
+            let normal = if normal.y < 0.0 { -normal } else { normal };
+            let base = pos.len() as u32;
+            for p in quad {
+                let shade = 0.55 + 0.45 * (p.y / 2.0).clamp(0.0, 1.0);
+                pos.push(p.to_array());
+                normals.push(normal.to_array());
+                colors.push([0.78 * shade, 0.67 * shade, 0.48 * shade, 1.0]);
+            }
+            idx.extend([base, base + 2, base + 1, base, base + 3, base + 2]);
+        }
+    }
+    Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, pos)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
+        .with_inserted_indices(Indices::U32(idx))
 }
