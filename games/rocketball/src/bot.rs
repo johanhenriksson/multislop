@@ -1,7 +1,8 @@
 //! Server-side bots. Each tick the game gives every bot a role by where the ball is: the nearest of a team attacks
 //! (lines up behind the ball toward the enemy goal, then runs through it or rockets it), the one furthest back keeps
-//! (between the ball and its own goal) and the rest support (trailing the ball on their own side). Enemies nearer
-//! than the ball shot draw rockets at their feet. They produce an `Input` per tick like a client would.
+//! (between the ball and its own goal) with the AWP, and the rest support (trailing the ball on their own side).
+//! Enemies nearer than the ball shot draw rockets at their feet, or AWP rounds at the body from much further. They
+//! produce an `Input` per tick like a client would.
 
 use crate::map::{GOAL_LINE, MAP};
 use crate::shared::*;
@@ -18,8 +19,9 @@ const AIM_SETTLE: f32 = 0.99;
 const FIRE_ANGLE: f32 = 0.03;
 /// Half the field of view in which bots notice enemies (60° each side).
 const VIEW_HALF_ANGLE: f32 = 1.05;
-/// Enemies further than this are left alone.
+/// Enemies further than this are left alone, with the launcher and with the AWP.
 const FIGHT_RANGE: f32 = 25.0;
+const SNIPE_RANGE: f32 = 70.0;
 /// Where the attacker lines up, behind the ball on the line from the enemy goal through it.
 const BEHIND: f32 = 3.5;
 /// Lined up when the ball is within this angle of the way to the enemy goal (cos 30°).
@@ -104,7 +106,11 @@ impl Bot {
     pub fn think(&mut self, me: &NetPlayer, role: Role, view: &View, tick: u32) -> Input {
         self.seq += 1;
         let s = &me.state;
-        let mut inp = Input { seq: self.seq, yaw: self.yaw, pitch: self.pitch, ..Default::default() };
+        // The keeper snipes, and takes out the launcher to clear a ball that comes near.
+        // ponytail: the keeper changes as players move, and each change costs a draw. Hold on to the role if that shows.
+        let keeping = role == Role::Keep && view.ball.distance(MAP.goal(me.team)) >= CLEAR_RANGE;
+        let gun = if keeping { Gun::Awp } else { Gun::Launcher };
+        let mut inp = Input { seq: self.seq, yaw: self.yaw, pitch: self.pitch, gun, zoom: gun == Gun::Awp, ..Default::default() };
         if !me.alive {
             self.target = None;
             return inp;
@@ -113,9 +119,12 @@ impl Bot {
         self.last_pos = s.pos;
 
         let (dest, ball_shot) = plan(me, role, view);
+        let sniping = s.gun == Gun::Awp;
+        let ball_shot = ball_shot.filter(|_| !sniping);
         let eye = eye(s);
         let enemy = self.enemy(me, view, ball_shot.map(|b| b.distance(eye)), tick);
         let aim = match (enemy, ball_shot) {
+            (Some(e), _) if sniping => Some((body(e.pos), true)),
             // At their feet, where a near miss still hurts, leading their run.
             (Some(e), _) => Some((e.pos + e.vel * (e.pos.distance(eye) / ROCKET_SPEED) + Vec3::Y * 0.1, true)),
             (None, Some(at)) => Some((at, false)),
@@ -139,7 +148,7 @@ impl Bot {
                 self.roll_aim_error();
             }
         }
-        inp.reload = s.ammo.0 == 0;
+        inp.reload = s.loaded().0 == 0;
 
         let wish = self.steer(s.pos, dest);
         let fwd = Vec3::new(-self.yaw.sin(), 0.0, -self.yaw.cos());
@@ -153,9 +162,10 @@ impl Bot {
     /// nearer than the ball shot, when there is one.
     fn enemy<'a>(&mut self, me: &NetPlayer, view: &View<'a>, shot: Option<f32>, tick: u32) -> Option<&'a Seen> {
         let eye = eye(&me.state);
+        let range = if me.state.gun == Gun::Awp { SNIPE_RANGE } else { FIGHT_RANGE };
         let near = |p: &&Seen| {
             let d = p.pos.distance(eye);
-            p.alive && p.team != me.team && d < FIGHT_RANGE && shot.is_none_or(|s| d < s) && can_see(eye, body(p.pos))
+            p.alive && p.team != me.team && d < range && shot.is_none_or(|s| d < s) && can_see(eye, body(p.pos))
         };
         let keep = self.target.and_then(|(t, _)| view.players.iter().filter(near).find(|p| p.id == t));
         if keep.is_some() {

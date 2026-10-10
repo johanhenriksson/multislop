@@ -1,5 +1,5 @@
 //! The Rocketball client: a floodlit night stadium, the ball glowing in the color of the last team to touch it, players
-//! and rockets in their team colors, a launcher in hand, goal celebrations and the HUD.
+//! and rockets in their team colors, a launcher or a scoped AWP in hand, goal celebrations and the HUD.
 
 mod hud;
 mod model;
@@ -10,7 +10,7 @@ use crate::game::RESPAWN_SECS;
 use crate::map::GOAL_LINE;
 use crate::shared::*;
 use glam::{Quat, Vec2, Vec3};
-use model::{BARREL, Rig, VIEWMODEL};
+use model::{Rig, barrel, viewmodel};
 use sdk::Interpolated;
 use sdk::client::*;
 use sdk::scene::Scene;
@@ -18,6 +18,8 @@ use std::collections::{HashMap, VecDeque};
 
 const MOUSE_SENS: f32 = 0.002;
 const FOV: f32 = 1.6;
+/// Scoped in with the AWP.
+const ZOOM_FOV: f32 = 0.42;
 pub const ORANGE: [f32; 3] = [1.0, 0.45, 0.1];
 pub const BLUE: [f32; 3] = [0.15, 0.45, 1.0];
 /// Things that belong to neither team: the untouched ball, midfield trim.
@@ -52,6 +54,7 @@ pub fn team_text(team: Team) -> Color {
 #[derive(Default)]
 struct Sounds {
     launch: u32,
+    awp: u32,
     explosion: u32,
     reload: u32,
     hit: u32,
@@ -105,6 +108,7 @@ struct Assets {
     confetti_colors: [[u32; 3]; 2],
     rocket: u32,
     rocket_tail: u32,
+    tracer: u32,
 }
 
 /// The ball's scene nodes and how it's drawn.
@@ -159,7 +163,12 @@ pub struct BallClient {
     died_at: f64,
     hurt_at: f64,
     tab: bool,
-    viewmodel: u32,
+    /// The gun wanted in hand (1, 2, Q), and scoped in (right mouse).
+    gun: Gun,
+    last_gun: Gun,
+    zoom: bool,
+    /// First-person launcher and AWP, by `Gun as usize`.
+    viewmodels: [u32; 2],
     /// Viewmodel kick, 1 right after firing and decaying to 0, the run bob's phase, and the sway behind turning
     /// with the view we last turned to.
     kick: f32,
@@ -191,6 +200,7 @@ impl ClientGame for BallClient {
         };
         self.sounds = Sounds {
             launch: sound(sfx::launch()),
+            awp: sound(sfx::awp()),
             explosion: sound(sfx::explosion()),
             reload: sound(sfx::reload()),
             hit: sound(sfx::hit()),
@@ -223,8 +233,9 @@ impl ClientGame for BallClient {
             confetti_colors,
             rocket: s.mesh(MeshData::Cylinder { radius: 0.06, height: 0.6 }),
             rocket_tail: s.mesh(MeshData::Sphere { radius: 0.11, ico: Some(1) }),
+            tracer: s.material(Material { color: Color::srgba(1.0, 0.9, 0.5, 0.5), unlit: true, blend: Blend::Blend, ..Default::default() }),
         };
-        self.viewmodel = model::spawn_launcher(&mut self.scene, CAMERA, Transform::at(VIEWMODEL), true);
+        self.viewmodels = [Gun::Launcher, Gun::Awp].map(|g| model::spawn_gun(&mut self.scene, CAMERA, g, Transform::at(viewmodel(g)), true));
         self.spawn_ball();
         self.build_hud();
         std::mem::take(&mut self.scene.out)
@@ -267,9 +278,11 @@ impl ClientGame for BallClient {
             right: axis(Key::D, Key::A),
             yaw: self.yaw,
             pitch: self.pitch,
-            jump: raw.held(Key::Space),
+            jump: raw.held(Key::Space) || raw.held(Key::Backspace),
             fire: raw.captured && raw.held(Key::MouseLeft),
             reload: raw.held(Key::R),
+            gun: self.gun,
+            zoom: self.zoom,
             ..Default::default()
         };
         encode(&inp)
@@ -286,9 +299,10 @@ impl ClientGame for BallClient {
             return;
         }
         if let Some(d) = step.fired {
-            let at = muzzle(eye(&self.pred), d);
+            let at = muzzle(eye(&self.pred), d, self.pred.gun);
             self.muzzle_flash(at);
-            self.sound(self.sounds.launch, 0.8);
+            let sound = if self.pred.gun == Gun::Awp { self.sounds.awp } else { self.sounds.launch };
+            self.sound(sound, 0.8);
             self.kick = 1.0;
         }
         if step.reloaded {
@@ -310,11 +324,12 @@ impl ClientGame for BallClient {
             self.started = true;
             self.play.push(Play { sound: self.sounds.ambience, volume: 0.3, looped: true });
         }
+        self.controls(&f.input);
         if f.input.captured {
-            self.yaw -= f.input.mouse.x * MOUSE_SENS;
-            self.pitch = (self.pitch - f.input.mouse.y * MOUSE_SENS).clamp(-1.55, 1.55);
+            let sens = if self.zoom { MOUSE_SENS * ZOOM_FOV / FOV } else { MOUSE_SENS };
+            self.yaw -= f.input.mouse.x * sens;
+            self.pitch = (self.pitch - f.input.mouse.y * sens).clamp(-1.55, 1.55);
         }
-        self.tab = f.input.held(Key::Tab);
         self.render_world(&f.others, f.dt);
         self.render_pickups();
         self.render_viewmodel(f.dt);
@@ -327,19 +342,42 @@ impl ClientGame for BallClient {
         self.shake *= (-f.dt * 7.0).exp();
         let jolt = self.shake * 0.03;
         let (dy, dp) = ((self.random() - 0.5) * jolt, (self.random() - 0.5) * jolt);
-        let camera = Camera { pos: f.me_pos + Vec3::Y * (EYE + rise), rot: look_rot(self.yaw + dy, self.pitch + dp), fov: FOV };
+        let fov = if self.zoom { ZOOM_FOV } else { FOV };
+        let camera = Camera { pos: f.me_pos + Vec3::Y * (EYE + rise), rot: look_rot(self.yaw + dy, self.pitch + dp), fov };
         FrameOut { commands: std::mem::take(&mut self.scene.out), sounds: std::mem::take(&mut self.play), camera, lines: vec![], spheres: vec![] }
     }
 }
 
-/// Barrel tip for a rocket fired from eye `o` along `d`, matching the first-person model.
-fn muzzle(o: Vec3, d: Vec3) -> Vec3 {
+/// Barrel tip for a shot fired from eye `o` along `d`, matching the first-person model.
+fn muzzle(o: Vec3, d: Vec3, gun: Gun) -> Vec3 {
     let right = d.cross(Vec3::Y).normalize_or_zero();
     let up = right.cross(d);
-    o + right * VIEWMODEL.x + up * VIEWMODEL.y + d * (BARREL - VIEWMODEL.z)
+    let at = viewmodel(gun);
+    o + right * at.x + up * at.y + d * (barrel(gun) - at.z)
 }
 
 impl BallClient {
+    /// Gun keys (1 launcher, 2 AWP, Q the other one), the scope (right mouse, AWP only, off while reloading or dead)
+    /// and the scoreboard.
+    fn controls(&mut self, raw: &RawInput) {
+        let want = match () {
+            _ if raw.pressed(Key::Digit1) => Some(Gun::Launcher),
+            _ if raw.pressed(Key::Digit2) => Some(Gun::Awp),
+            _ if raw.pressed(Key::Q) => Some(self.last_gun),
+            _ => None,
+        };
+        if let Some(gun) = want.filter(|&g| g != self.gun) {
+            (self.last_gun, self.gun, self.zoom) = (self.gun, gun, false);
+        }
+        if raw.pressed(Key::MouseRight) && self.gun == Gun::Awp {
+            self.zoom = !self.zoom;
+        }
+        if self.pred.gun != Gun::Awp || self.pred.hands.reloading > 0 || !self.alive {
+            self.zoom = false;
+        }
+        self.tab = raw.held(Key::Tab);
+    }
+
     fn sound(&mut self, sound: u32, volume: f32) {
         self.play.push(Play { sound, volume, looped: false });
     }
@@ -368,6 +406,14 @@ impl BallClient {
                 self.sound_at(self.sounds.launch, 0.8, from);
             }
             Event::Launch { .. } => {}
+            Event::Shot { shooter, from, to } => {
+                let from = if shooter == you { muzzle(eye(&self.pred), (to - from).normalize_or_zero(), Gun::Awp) } else { from };
+                self.tracer(from, to);
+                if shooter != you {
+                    self.muzzle_flash(from + (to - from).normalize_or_zero() * 0.9);
+                    self.sound_at(self.sounds.awp, 0.8, from);
+                }
+            }
             Event::Explosion { pos, radius, team } => {
                 self.blast(pos, radius, team);
                 self.sound_at(self.sounds.explosion, 1.0, pos);
@@ -377,6 +423,7 @@ impl BallClient {
                 let (sound, loud) = match kind {
                     HitKind::Push => (self.sounds.thump, 0.3 + strength / 25.0),
                     HitKind::Blast => (self.sounds.clang, 0.4 + strength / 30.0),
+                    HitKind::Shot => (self.sounds.clang, 0.3),
                 };
                 self.sound_at(sound, loud.min(1.0), pos);
             }
@@ -471,7 +518,7 @@ impl BallClient {
                 Some(Thing::Player(p)) => {
                     // Alive as of the newest snapshot too, so someone just killed doesn't linger.
                     let alive = p.alive && !v.teleporting && self.players.iter().any(|q| q.id == e.id && q.alive);
-                    seen.insert(e.id, (e.pos, e.yaw, e.pitch, p.team, alive));
+                    seen.insert(e.id, (e.pos, e.yaw, e.pitch, p.team, p.state.gun, alive));
                 }
                 Some(Thing::Ball) => ball = Some((e.pos, e.vel)),
                 Some(Thing::Rocket(r)) => {
@@ -487,13 +534,13 @@ impl BallClient {
         self.render_rockets(rockets);
     }
 
-    fn render_players(&mut self, seen: HashMap<u32, (Vec3, f32, f32, Team, bool)>, dt: f32) {
+    fn render_players(&mut self, seen: HashMap<u32, (Vec3, f32, f32, Team, Gun, bool)>, dt: f32) {
         let gone: Vec<u32> = self.rigs.iter().filter(|(id, rig)| seen.get(id).is_none_or(|s| s.3 != rig.team)).map(|(&id, _)| id).collect();
         for id in gone {
             let rig = self.rigs.remove(&id).unwrap();
             self.scene.push(Command::Despawn { id: rig.root });
         }
-        for (id, (pos, yaw, pitch, team, alive)) in seen {
+        for (id, (pos, yaw, pitch, team, gun, alive)) in seen {
             if !self.rigs.contains_key(&id) {
                 let rig = model::spawn_rig(&mut self.scene, team);
                 self.rigs.insert(id, rig);
@@ -506,6 +553,9 @@ impl BallClient {
             let out = &mut self.scene.out;
             out.push(Command::Set { id: rig.root, transform: Some(Transform::at(pos).rotated(Quat::from_rotation_y(yaw))), visible: Some(alive), light: None });
             out.push(Command::set_transform(rig.arms, Transform::at(Vec3::Y * 1.35).rotated(Quat::from_rotation_x(pitch))));
+            for (i, &node) in rig.guns.iter().enumerate() {
+                out.push(Command::set_visible(node, i == gun as usize));
+            }
             for (leg, (x, side)) in rig.legs.into_iter().zip([(-0.13, 1.0), (0.13, -1.0)]) {
                 out.push(Command::set_transform(leg, Transform::at(Vec3::new(x, 0.8, 0.0)).rotated(Quat::from_rotation_x(swing * side))));
             }
@@ -616,7 +666,8 @@ impl BallClient {
         self.pickups_up = up;
     }
 
-    /// Our launcher, moving like dust's: bobs while running, sways behind turns, kicks on firing, dips while reloading.
+    /// Our gun, moving like dust's: bobs while running, sways behind turns, kicks on firing, dips while reloading.
+    /// Hidden when scoped.
     fn render_viewmodel(&mut self, dt: f32) {
         let look = Vec2::new(self.yaw, self.pitch);
         let turn = (look - self.last_look) / dt.max(1e-3);
@@ -627,12 +678,16 @@ impl BallClient {
         let speed = if self.pred.on_ground { (self.pred.vel.with_y(0.0).length() / MAX_SPEED).min(1.0) } else { 0.0 };
         self.bob += dt * 10.0 * speed;
         let bob = Vec3::new(self.bob.sin() * 0.012, -(self.bob * 2.0).sin().abs() * 0.01, 0.0) * speed;
-        let reload = self.pred.hands.reloading as f32 / (ROCKET.reload_secs() * TICK_HZ as f32);
+        let gun = self.pred.gun;
+        let reload = self.pred.hands.reloading as f32 / (gun.ability().reload_secs() * TICK_HZ as f32);
         let dip = (reload * std::f32::consts::PI).sin();
-        let at = VIEWMODEL + bob + Vec3::new(self.sway.x, self.sway.y - 0.15 * dip, 0.05 * self.kick);
+        let at = viewmodel(gun) + bob + Vec3::new(self.sway.x, self.sway.y - 0.15 * dip, 0.05 * self.kick);
         let rot = Quat::from_rotation_x(-0.6 * dip + 0.12 * self.kick);
-        let shown = self.alive && self.me.is_some();
-        self.scene.push(Command::Set { id: self.viewmodel, transform: Some(Transform::at(at).rotated(rot)), visible: Some(shown), light: None });
+        let shown = self.alive && self.me.is_some() && !self.zoom;
+        for (i, &id) in self.viewmodels.iter().enumerate() {
+            let visible = Some(shown && i == gun as usize);
+            self.scene.push(Command::Set { id, transform: Some(Transform::at(at).rotated(rot)), visible, light: None });
+        }
     }
 
     /// A puff that grows to `1 + grow` times its size (shrinks when negative) and fades out over `life`.
@@ -655,6 +710,15 @@ impl BallClient {
         let node = self.scene.spawn(None, NodeKind::Mesh { mesh: self.assets.streak, material: id, shadows: false }, transform, true);
         let fx = Fx { node, pos, vel: None, rot, spin: Vec3::ZERO, material: Some((id, material)), light: None, age: 0.0, life: 0.45, size: radius, grow: -1.0, length: Some(length) };
         self.fx.push(fx);
+    }
+
+    /// An AWP round's streak, fading fast.
+    fn tracer(&mut self, from: Vec3, to: Vec3) {
+        let rot = Quat::from_rotation_arc(Vec3::Y, (to - from).normalize_or(Vec3::Y));
+        let (pos, length) = ((from + to) / 2.0, from.distance(to));
+        let transform = Transform { pos, rot, scale: Vec3::new(0.02, length, 0.02) };
+        let node = self.scene.spawn(None, NodeKind::Mesh { mesh: self.assets.streak, material: self.assets.tracer, shadows: false }, transform, true);
+        self.fx.push(Fx { node, pos, vel: None, rot, spin: Vec3::ZERO, material: None, light: None, age: 0.0, life: 0.35, size: 0.02, grow: -1.0, length: Some(length) });
     }
 
     /// A point light that dims to nothing over `life`.

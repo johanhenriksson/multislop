@@ -1,8 +1,8 @@
-//! The rocket launcher (dust's model) and the players carrying it (the arena's armored figures, in team colors).
-//! Models face -Z with the origin at the feet; the launcher's grip is at its origin.
+//! The rocket launcher and AWP (dust's models) and the players carrying them (the arena's armored figures, in team
+//! colors). Models face -Z with the origin at the feet; a gun's grip is at its origin.
 
 use super::{rgb, team_rgb};
-use crate::shared::Team;
+use crate::shared::{Gun, Team};
 use glam::{Quat, Vec3};
 use sdk::client::{Color, Material, MeshData, NodeKind, Transform};
 use sdk::scene::Scene;
@@ -11,6 +11,7 @@ use sdk::scene::Scene;
 enum Finish {
     Black,
     Green,
+    Steel,
     Glove,
     Sleeve,
 }
@@ -44,29 +45,65 @@ fn launcher() -> Vec<(Shape, Finish)> {
     ]
 }
 
-/// Gloved hands on both grips, forearms running back towards the bottom corners of the screen.
-fn hands() -> Vec<(Shape, Finish)> {
+/// Green stock and body, long black barrel with a muzzle brake, a big scope on top, bolt handle on the right.
+fn awp() -> Vec<(Shape, Finish)> {
+    vec![
+        b([0.06, 0.09, 0.5], [0.0, -0.015, 0.06], 0.0, Green),
+        b([0.05, 0.035, 0.18], [0.0, 0.04, 0.14], 0.0, Green),
+        b([0.062, 0.15, 0.045], [0.0, -0.04, 0.33], 0.0, Green),
+        b([0.045, 0.06, 0.24], [0.0, 0.035, -0.08], 0.0, Black),
+        t(0.014, 0.6, [0.0, 0.035, -0.5], Black),
+        t(0.023, 0.07, [0.0, 0.035, -0.82], Black),
+        t(0.022, 0.32, [0.0, 0.115, -0.08], Black),
+        t(0.034, 0.08, [0.0, 0.115, -0.27], Black),
+        t(0.029, 0.06, [0.0, 0.115, 0.1], Black),
+        b([0.016, 0.045, 0.022], [0.0, 0.075, -0.16], 0.0, Black),
+        b([0.016, 0.045, 0.022], [0.0, 0.075, 0.0], 0.0, Black),
+        b([0.07, 0.013, 0.013], [0.045, 0.035, 0.03], 0.0, Steel),
+        b([0.025, 0.025, 0.025], [0.08, 0.035, 0.03], 0.0, Steel),
+        b([0.04, 0.07, 0.08], [0.0, -0.08, -0.05], 0.0, Black),
+        b([0.012, 0.03, 0.05], [0.0, -0.075, 0.03], 0.0, Black),
+    ]
+}
+
+/// Gloved hands on the grip and under the barrel `support` ahead of it, forearms running back towards the bottom
+/// corners of the screen.
+fn hands(support: f32) -> Vec<(Shape, Finish)> {
     let grip = [0.0, -0.075, 0.075];
     vec![
         b([0.06, 0.07, 0.09], grip, 0.3, Glove),
         b([0.06, 0.06, 0.3], [grip[0] + 0.03, grip[1] - 0.08, grip[2] + 0.18], 0.45, Sleeve),
-        b([0.06, 0.06, 0.1], [-0.02, -0.05, -0.25], -0.2, Glove),
-        b([0.06, 0.06, 0.36], [-0.11, -0.14, -0.06], 0.4, Sleeve),
+        b([0.06, 0.06, 0.1], [-0.02, -0.05, support + 0.01], -0.2, Glove),
+        b([0.06, 0.06, 0.36], [-0.11, -0.14, support + 0.2], 0.4, Sleeve),
     ]
 }
 
 /// Where the barrel tip is, ahead of the grip.
-pub const BARREL: f32 = 0.61;
-/// First-person position of the grip, relative to the camera (dust's).
-pub const VIEWMODEL: Vec3 = Vec3::new(0.23, -0.21, -0.26);
+pub fn barrel(gun: Gun) -> f32 {
+    match gun {
+        Gun::Launcher => 0.61,
+        Gun::Awp => 0.86,
+    }
+}
 
-/// A launcher under `parent`; first person also gets hands holding it.
-pub fn spawn_launcher(scene: &mut Scene, parent: u32, at: Transform, first_person: bool) -> u32 {
+/// First-person position of the grip, relative to the camera (dust's).
+pub fn viewmodel(gun: Gun) -> Vec3 {
+    match gun {
+        Gun::Launcher => Vec3::new(0.23, -0.21, -0.26),
+        Gun::Awp => Vec3::new(0.21, -0.21, -0.12),
+    }
+}
+
+/// A gun under `parent`; first person also gets hands holding it.
+pub fn spawn_gun(scene: &mut Scene, parent: u32, gun: Gun, at: Transform, first_person: bool) -> u32 {
     let along_z = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
-    let root = scene.empty(Some(parent), at, true);
-    let mut shapes = launcher();
+    let root = scene.empty(Some(parent), at, gun == Gun::Launcher);
+    let (mut shapes, support) = match gun {
+        Gun::Launcher => (launcher(), -0.26),
+        Gun::Awp => (awp(), -0.3),
+    };
     if first_person {
-        shapes.extend(hands());
+        shapes.extend(hands(support));
     }
     for (shape, finish) in shapes {
         let material = scene.shared_material(format!("finish {}", finish as u8), || {
@@ -74,6 +111,7 @@ pub fn spawn_launcher(scene: &mut Scene, parent: u32, at: Transform, first_perso
             match finish {
                 Black => m(0.07, 0.07, 0.08, 0.5),
                 Green => m(0.2, 0.27, 0.17, 0.7),
+                Steel => Material { metallic: 0.8, ..m(0.55, 0.56, 0.58, 0.35) },
                 Glove => m(0.09, 0.09, 0.08, 0.9),
                 Sleeve => m(0.2, 0.22, 0.16, 0.95),
             }
@@ -108,12 +146,15 @@ pub struct Rig {
     pub root: u32,
     pub arms: u32,
     pub legs: [u32; 2],
+    /// The launcher and the AWP, only the one in hand shown.
+    pub guns: [u32; 2],
     pub team: Team,
     pub stride: f32,
     pub last_pos: Vec3,
 }
 
-/// An armored figure with plates in the team color, a glowing visor and stripe, a rocket launcher on the right shoulder.
+/// An armored figure with plates in the team color, a glowing visor and stripe, a rocket launcher on the right shoulder
+/// or an AWP shouldered.
 pub fn spawn_rig(scene: &mut Scene, team: Team) -> Rig {
     let armor = scene.shared_material("armor".into(), || Material { color: Color::srgb(0.13, 0.13, 0.15), roughness: 0.4, metallic: 0.6, ..Default::default() });
     let plate = scene.shared_material(format!("plate {team:?}"), || plate_material(team));
@@ -140,6 +181,7 @@ pub fn spawn_rig(scene: &mut Scene, team: Team) -> Rig {
     scene.mesh_node(Some(arms), arm, plate, Transform::at(Vec3::new(0.3, -0.12, -0.15)));
     scene.mesh_node(Some(arms), arm, plate, Transform::at(Vec3::new(-0.15, -0.14, -0.3)).rotated(Quat::from_rotation_y(-0.6)));
     // On the shoulder, sticking out ahead.
-    spawn_launcher(scene, arms, Transform::at(Vec3::new(0.24, 0.0, -0.3)).scaled(1.3), false);
-    Rig { root, arms, legs, team, stride: 0.0, last_pos: Vec3::ZERO }
+    let launcher = spawn_gun(scene, arms, Gun::Launcher, Transform::at(Vec3::new(0.24, 0.0, -0.3)).scaled(1.3), false);
+    let awp = spawn_gun(scene, arms, Gun::Awp, Transform::at(Vec3::new(0.2, -0.05, -0.35)).scaled(1.3), false);
+    Rig { root, arms, legs, guns: [launcher, awp], team, stride: 0.0, last_pos: Vec3::ZERO }
 }

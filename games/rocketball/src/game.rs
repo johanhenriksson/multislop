@@ -1,11 +1,11 @@
-//! Rocketball: two teams of four, a giant ball and rocket launchers. Rockets blast the ball and running into it pushes
-//! it; most goals in 5 minutes wins, a tie goes to golden goal. Bots fill both teams while anyone is playing.
+//! Rocketball: two teams of four, a giant ball, rocket launchers and AWPs. Rockets blast the ball, AWP rounds nudge it
+//! and running into it pushes it; most goals in 5 minutes wins, a tie goes to golden goal. Bots fill both teams while anyone is playing.
 
 use crate::bot::{Bot, Role, Seen, View};
 use crate::map::{GOAL_LINE, MAP, MAPS};
 use crate::shared::*;
 use glam::Vec3;
-use sdk::{Frame, GameInfo, ServerGame, log};
+use sdk::{Frame, GameInfo, History, ServerGame, log};
 use std::collections::BTreeMap;
 
 /// Players per team while any human is on, unless the host sets another player count: bots make up the rest.
@@ -17,7 +17,7 @@ const GOAL_SECS: f32 = 3.0;
 const END_SECS: f32 = 8.0;
 /// Matches per turn when the host rotates games.
 const ROTATE_AFTER: u32 = 2;
-pub const RESPAWN_SECS: f32 = 7.0;
+pub const RESPAWN_SECS: f32 = 5.0;
 /// How near a pickup's spot you have to walk to take it.
 const PICKUP_REACH: f32 = 1.2;
 
@@ -53,9 +53,11 @@ impl Player {
         Player { net, died_at: 0, inputs: vec![], teleport: 0, bot }
     }
 
-    /// Back at `pos` with full health, no armor and a fresh load, facing the center spot.
+    /// Back at `pos` with full health, no armor and a fresh load of both guns, the same one in hand, facing the
+    /// center spot.
     fn spawn(&mut self, pos: Vec3, frozen: bool) {
-        self.net.state = PlayerState::spawn(pos, f32::atan2(pos.x, pos.z), frozen);
+        let gun = self.net.state.gun;
+        self.net.state = PlayerState { gun, ..PlayerState::spawn(pos, f32::atan2(pos.x, pos.z), frozen) };
         (self.net.hp, self.net.armor, self.net.alive) = (MAX_HP, 0, true);
         self.teleport = self.teleport.wrapping_add(1);
     }
@@ -82,6 +84,8 @@ pub struct Rocketball {
     map: String,
     players: Players,
     rockets: Vec<Rocket>,
+    /// Players as they were, for lag-compensated AWP shots.
+    history: History,
     tick: u32,
     next_id: u32,
     next_rocket: u32,
@@ -114,6 +118,7 @@ impl Default for Rocketball {
             map: MAPS[0].into(),
             players: Players::new(),
             rockets: vec![],
+            history: History::new(MAX_REWIND_TICKS as usize + 8),
             tick: 0,
             next_id: 1,
             next_rocket: 0,
@@ -171,9 +176,9 @@ impl ServerGame for Rocketball {
         }
     }
 
-    fn input(&mut self, id: u32, seq: u32, _view_tick: f32, input: &[u8]) {
+    fn input(&mut self, id: u32, seq: u32, view_tick: f32, input: &[u8]) {
         if let (Some(p), Some(inp)) = (self.players.get_mut(&id), decode::<Input>(input)) {
-            p.inputs.push(Input { seq, ..inp });
+            p.inputs.push(Input { seq, view_tick, ..inp });
         }
     }
 
@@ -193,6 +198,7 @@ impl ServerGame for Rocketball {
         self.update_match();
 
         let mut entities: Vec<Entity> = self.players.values().map(|p| p.net.entity(p.teleport)).collect();
+        self.history.record(self.tick, &entities);
         entities.push(Entity { id: BALL_ID, pos: self.ball, vel: self.ball_vel, teleport: self.ball_teleport, data: encode(&Thing::Ball), ..Default::default() });
         entities.extend(self.rockets.iter().map(|r| Entity {
             id: r.id,
@@ -267,7 +273,8 @@ impl Rocketball {
         }
     }
 
-    /// One tick of play: bots decide, then every player's inputs since the last tick are applied and rockets leave.
+    /// One tick of play: bots decide, then every player's inputs since the last tick are applied, rockets leave and AWP
+    /// rounds hit.
     fn run_inputs(&mut self) {
         let seen: Vec<Seen> = self.players.values().map(|p| Seen { id: p.net.id, team: p.net.team, pos: p.net.state.pos, vel: p.net.state.vel, alive: p.net.alive }).collect();
         let roles = roles(&self.players, self.ball);
@@ -278,6 +285,7 @@ impl Rocketball {
                 p.inputs.push(bot.think(&p.net, role, &view, self.tick));
             }
         }
+        let mut shots = vec![];
         for p in self.players.values_mut() {
             for inp in std::mem::take(&mut p.inputs) {
                 if !p.net.alive {
@@ -285,6 +293,10 @@ impl Rocketball {
                 }
                 let Some(dir) = step_player(&mut p.net.state, &inp).fired else { continue };
                 let from = eye(&p.net.state);
+                if p.net.state.gun == Gun::Awp {
+                    shots.push((p.net.id, p.net.team, from, dir, inp.view_tick));
+                    continue;
+                }
                 let id = ROCKET_IDS | (self.next_rocket % ROCKET_IDS);
                 self.next_rocket = self.next_rocket.wrapping_add(1);
                 let fuse = self.tick + ticks(ROCKET_FUSE);
@@ -292,6 +304,34 @@ impl Rocketball {
                 self.events.push(Event::Launch { shooter: p.net.id, from, dir });
             }
         }
+        for (shooter, team, from, dir, view_tick) in shots {
+            self.snipe(shooter, team, from, dir, view_tick);
+        }
+    }
+
+    /// An AWP round: hits the first player (as the shooter saw them, rewound to `view_tick`) or the ball in its way,
+    /// short of the world. Teammates take `FRIENDLY_DAMAGE` as with rockets; the ball is sent on along the shot.
+    // ponytail: the ball isn't rewound, so a fast one is hit where it is now. Rewind it too if snipers complain.
+    fn snipe(&mut self, shooter: u32, team: Team, from: Vec3, dir: Vec3, view_tick: f32) {
+        let at = view_tick.clamp(self.tick as f32 - MAX_REWIND_TICKS, self.tick as f32);
+        let (mut hit, mut victim) = (trace_world(from, dir).0, None);
+        for p in self.players.values().filter(|p| p.net.alive && p.net.id != shooter) {
+            let now = Entity { id: p.net.id, pos: p.net.state.pos, teleport: p.teleport, ..Default::default() };
+            let Some(then) = self.history.rewind(&now, at) else { continue };
+            if let Some(t) = trace_capsule(from, dir, then.pos).filter(|&t| t < hit) {
+                (hit, victim) = (t, Some((p.net.id, p.net.team)));
+            }
+        }
+        if let Some(t) = trace_ball(from, dir, self.ball).filter(|&t| t < hit) {
+            (hit, victim) = (t, None);
+            self.ball_vel = (self.ball_vel + dir * SHOT_PUSH).clamp_length_max(BALL_MAX_SPEED);
+            self.touch(shooter, team);
+            self.events.push(Event::BallHit { pos: self.ball, strength: SHOT_PUSH, kind: HitKind::Shot });
+        }
+        if let Some((id, their_team)) = victim {
+            self.hurt(shooter, id, AWP_DAMAGE * if their_team == team { FRIENDLY_DAMAGE } else { 1.0 });
+        }
+        self.events.push(Event::Shot { shooter, from, to: from + dir * hit });
     }
 
     /// Flies rockets, setting off those that touch the world, anyone but the shooter, or the ball, or whose fuse has
@@ -484,9 +524,9 @@ fn take(p: &mut NetPlayer, item: Item) -> bool {
         Item::Armor => (&mut p.armor, 50, MAX_ARMOR),
         Item::HeavyArmor => (&mut p.armor, 100, HEAVY_ARMOR),
         Item::Rockets => {
-            let reserve = &mut p.state.ammo.1;
-            let useful = *reserve < MAX_RESERVE;
-            *reserve = (*reserve + 8).min(MAX_RESERVE);
+            let (rockets, rounds) = (&mut p.state.ammo.1, &mut p.state.rounds.1);
+            let useful = *rockets < MAX_RESERVE || *rounds < MAX_ROUNDS;
+            (*rockets, *rounds) = ((*rockets + 8).min(MAX_RESERVE).max(*rockets), (*rounds + 5).min(MAX_ROUNDS).max(*rounds));
             return useful;
         }
     };
@@ -676,6 +716,36 @@ mod tests {
     }
 
     #[test]
+    fn the_awp_kills_where_the_shooter_saw_them_and_nudges_the_ball() {
+        let (mut game, a, b) = duel();
+        place(&mut game, a, Vec3::new(0.0, 0.0, 30.0));
+        place(&mut game, b, Vec3::new(0.0, 0.0, -10.0));
+        game.ball = Vec3::new(20.0, BALL_RADIUS, 0.0);
+        game.players.get_mut(&a).unwrap().net.state.gun = Gun::Awp;
+        game.tick();
+        let seen = game.tick as f32;
+        // b steps aside before the shot arrives, but a fired at where they saw b.
+        place(&mut game, b, Vec3::new(3.0, 0.0, -10.0));
+        let level = (EYE - 1.0f32).atan2(40.0);
+        let shot = Input { fire: true, gun: Gun::Awp, zoom: true, pitch: -level, ..Default::default() };
+        game.input(a, 1, seen, &encode(&shot));
+        let events: Vec<Event> = game.tick().events.iter().filter_map(|e| decode(&e.data)).collect();
+        assert!(events.contains(&Event::Kill { killer: a, victim: b }), "{events:?}");
+        // Now at the ball, from beside it.
+        game.tick();
+        place(&mut game, a, Vec3::new(10.0, 0.0, 0.0));
+        let still = game.ball;
+        let at_ball = Input { fire: true, gun: Gun::Awp, zoom: true, yaw: -std::f32::consts::FRAC_PI_2, pitch: -(EYE - BALL_RADIUS).atan2(10.0), ..Default::default() };
+        for (secs, inp) in [(AWP.cycle, Input { fire: false, ..at_ball }), (0.5, at_ball)] {
+            for _ in 0..ticks(secs) {
+                game.input(a, 2, game.tick as f32, &encode(&inp));
+                game.tick();
+            }
+        }
+        assert!(game.ball.x > still.x + 1.0 && game.last_touch == Some(game.players[&a].net.team), "{}", game.ball);
+    }
+
+    #[test]
     fn self_damage_is_half_and_everyone_is_thrown() {
         let (mut game, a, b) = duel();
         let team_a = game.players[&a].net.team;
@@ -722,13 +792,14 @@ mod tests {
         game.connect(&"observer".into());
         // Kickoffs bring the observer back, so it's taken off the pitch every tick.
         let observer = *game.players.keys().next().unwrap();
-        let (mut rockets, mut kills, mut goals, mut touches, mut own, mut team_kills) = (0, 0, 0, 0, 0, 0);
+        let (mut rockets, mut shots, mut kills, mut goals, mut touches, mut own, mut team_kills) = (0, 0, 0, 0, 0, 0, 0);
         for _ in 0..ticks(MATCH_SECS) {
             let o = game.players.get_mut(&observer).unwrap();
             (o.net.alive, o.died_at) = (false, u32::MAX / 2);
             for e in game.tick().events {
                 match decode::<Event>(&e.data) {
                     Some(Event::Launch { .. }) => rockets += 1,
+                    Some(Event::Shot { .. }) => shots += 1,
                     Some(Event::Kill { killer, victim }) => {
                         let team = |id| game.players.get(&id).map(|p: &Player| p.net.team);
                         kills += 1;
@@ -744,7 +815,7 @@ mod tests {
             }
             assert!(in_bounds(game.ball) && game.ball.x.abs() < 24.0, "ball at {}", game.ball);
         }
-        println!("5 min: {goals} goals ({own} own), score {:?}, {kills} kills ({team_kills} teammates), {rockets} rockets, {touches} ball hits", game.score);
+        println!("5 min: {goals} goals ({own} own), score {:?}, {kills} kills ({team_kills} teammates), {rockets} rockets, {shots} AWP shots, {touches} ball hits", game.score);
         assert!(goals >= 2, "bots should score: {goals}");
         assert!(kills >= 10, "and fight: {kills}");
     }
