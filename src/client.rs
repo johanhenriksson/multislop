@@ -107,6 +107,8 @@ struct Client {
     /// The map the world is built for, and the one the server says it's on.
     map: Option<String>,
     want_map: Option<String>,
+    /// The newest snapshot that came before the world for its map was built, handed to the game once it is.
+    deferred: Option<ClientSnapshot>,
     fetch: Fetch,
     /// Why the game couldn't be loaded.
     error: Option<String>,
@@ -156,6 +158,7 @@ impl Client {
             module: local.clone().unwrap_or_default(),
             map: None,
             want_map: None,
+            deferred: None,
             error: None,
             asked_at: None,
             heard_at: 0.0,
@@ -280,9 +283,13 @@ fn start(mut client: ResMut<Client>, mut renderer: Renderer, net: Res<Net>) {
             Err(e) => return client.error = Some(format!("can't restart the game: {e}")),
         }
     }
+    let deferred = client.deferred.take();
     let Some(game) = &mut client.game else { return };
     let cmds = game.start(&want);
     renderer.apply(cmds);
+    if let Some(snap) = deferred {
+        game.snapshot(&snap);
+    }
     (client.map, client.started) = (Some(want), true);
 }
 
@@ -412,15 +419,15 @@ fn receive(mut net: ResMut<Net>, mut client: ResMut<Client>, mut browser: ResMut
             Some(ServerMsg::Chunk { index, data }) => on_chunk(&mut client, index, &data),
             Some(ServerMsg::Game { .. } | ServerMsg::Info { .. }) => {}
             Some(ServerMsg::Snapshot(snap)) => {
-                let Client { game: Some(game), netcode, map, want_map, .. } = &mut *client else { continue };
+                let Client { game: Some(game), netcode, map, want_map, deferred, .. } = &mut *client else { continue };
                 let Some(snap) = netcode.snapshot(snap, &mut |e, i, s| game.predict(e, i, s, false)) else { continue };
-                // The world isn't built for this map yet: `start` does that first.
+                let view = ClientSnapshot { tick: snap.tick, you: snap.you, state: snap.state.clone(), entities: snap.entities.clone(), events: snap.events.clone() };
+                // The world isn't built for this map yet: `start` does that first, then gets this snapshot.
                 if map.as_ref() != Some(&snap.map) {
-                    *want_map = Some(snap.map.clone());
+                    (*want_map, *deferred) = (Some(snap.map.clone()), Some(view));
                     continue;
                 }
-                let snap = ClientSnapshot { tick: snap.tick, you: snap.you, state: snap.state.clone(), entities: snap.entities.clone(), events: snap.events.clone() };
-                game.snapshot(&snap);
+                game.snapshot(&view);
             }
             Some(ServerMsg::WrongBuild { server }) => client.wrong_build = Some(server),
             None => client.incompatible = true,

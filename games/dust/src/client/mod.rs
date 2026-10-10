@@ -688,7 +688,7 @@ impl DustClient {
             if Some(p.id) == carrier {
                 carrier_pos = Some(pos);
             }
-            seen.insert(p.id, (pos, yaw, pitch, life, p.state.weapon(), p.state.duck));
+            seen.insert(p.id, (pos, yaw, pitch, life, p.state.weapon(), p.state.duck, p.team));
         }
         self.render_grenades(grenades);
         (self.spectate, self.carrier_pos) = (spectate, carrier_pos);
@@ -709,9 +709,8 @@ impl DustClient {
             let rig = self.rigs.remove(&id).unwrap();
             self.scene.push(Command::Despawn { id: rig.root });
         }
-        for (&id, &(pos, yaw, pitch, life, weapon, duck)) in &seen {
+        for (&id, &(pos, yaw, pitch, life, weapon, duck, team)) in &seen {
             if !self.rigs.contains_key(&id) {
-                let team = self.teams.get(&id).copied().unwrap_or(Team::T);
                 let rig = spawn_soldier(&mut self.scene, team, Transform::at(pos).rotated(Quat::from_rotation_y(yaw)));
                 self.rigs.insert(id, rig);
             }
