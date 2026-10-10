@@ -48,8 +48,8 @@ Deadline: playable before 00:00. One weapon, one simple map.
   of your spawn.
 - HE grenade: hold fire to wind up (harder throw the longer, up to 0.6 s), release to throw (up to 25 m/s); it
   bounces and goes off after 2 s, up to 98 damage to enemies in the open within 8.9 m. Survivors keep it.
-- Rocket launcher (primary, 1 + 3 rockets, 2.5 s reload, 75% move speed): a straight 35 m/s rocket that explodes on
-  touching a wall, the floor or an enemy, up to 150 damage within 5 m; smoke trail, launch flash and sound for all,
+- Rocket launcher (primary, 4 + 16 rockets, one every 0.7 s, 3 s reload, 75% move speed): a straight 35 m/s rocket
+  that explodes on touching a wall, the floor or an enemy, up to 250 damage within 7 m; smoke trail, launch flash and sound for all,
   fireball and smoke on impact (explosions from grenades too).
 - Slots: 1 primary, 2 pistol, 3 knife, 4 grenade, Q last; R reload (auto when empty), draw delay on switch, semi-auto needs a
   click per shot. Mag + reserve ammo, refilled at round start.

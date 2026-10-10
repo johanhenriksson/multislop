@@ -156,7 +156,7 @@ const HE: Spec = gun(
         payload: Payload::Explode { damage: 98.0, radius: 8.9, armor_pen: 0.5 },
     },
 );
-/// A rocket launcher: one rocket at a time, flying straight and fast and going off on whatever it touches.
+/// A rocket launcher: four rockets to a load, flying straight and fast and going off on whatever they touch.
 const ROCKET: Spec = Spec {
     speed: 0.75,
     ..gun(
@@ -166,11 +166,11 @@ const ROCKET: Spec = Spec {
         Slot::Primary,
         Ability {
             trigger: Trigger::Semi,
-            cost: Cost::Ammo { mag: 1, reserve: 3, reload: 2.5 },
-            cycle: 0.8,
+            cost: Cost::Ammo { mag: 4, reserve: 16, reload: 3.0 },
+            cycle: 0.7,
             accuracy: Accuracy { spread: 0.0, moving: 0.01, airborne: 0.03, kick: 0.08 },
             delivery: Delivery::Projectile { speed: 35.0, gravity: 0.0, bounce: 0.0, fuse: 6.0, contact: true },
-            payload: Payload::Explode { damage: 150.0, radius: 5.0, armor_pen: 0.6 },
+            payload: Payload::Explode { damage: 250.0, radius: 7.0, armor_pen: 0.8 },
         },
     )
 };

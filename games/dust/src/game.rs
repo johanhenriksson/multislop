@@ -917,7 +917,7 @@ mod tests {
         let (hits, booms, after) = fire_rocket(east, Some(10.0));
         assert_eq!(booms.len(), 1);
         assert!(after.unwrap() < ticks(0.5), "went off on contact, {after:?} ticks after firing");
-        assert!(hits.iter().any(|h| h.victim == 2 && h.weapon == Weapon::Rocket && h.damage > 80), "{hits:?}");
+        assert!(hits.iter().any(|h| h.victim == 2 && h.weapon == Weapon::Rocket && h.killed), "a direct hit kills: {hits:?}");
         let (_, booms, after) = fire_rocket(0.0, None);
         assert_eq!(booms.len(), 1, "into the wall to the north");
         assert!(after.unwrap() < ticks(1.0));
