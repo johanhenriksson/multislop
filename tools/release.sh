@@ -5,8 +5,8 @@
 #   tools/release.sh publish    build, then upload to the VPS
 #
 # Same scheme as zulkan's package-mac.sh, minus assets: the payload is the gzipped
-# binary and the gzipped game module (dust.wasm, which servers run and send to
-# clients), each with a sha256 file that is its update trigger, uploaded last.
+# binary and the gzipped game modules (dust.wasm and race.wasm, which servers run
+# and send to clients), each with a sha256 file that is its update trigger, uploaded last.
 set -eu
 
 PUBLIC="${FPS16_PUBLIC:-http://game.stackpoint.se/fps16}"
@@ -36,10 +36,12 @@ strip "$bin"
 codesign --force --sign - "$bin"
 codesign --verify "$bin"
 
-cargo build -p dust --release --target wasm32-unknown-unknown
-cp target/wasm32-unknown-unknown/release/dust.wasm "$app/Contents/Resources/dust.wasm"
+for game in dust race; do
+    cargo build -p "$game" --release --target wasm32-unknown-unknown
+    cp "target/wasm32-unknown-unknown/release/$game.wasm" "$app/Contents/Resources/$game.wasm"
+done
 
-for f in fps16 dust.wasm; do
+for f in fps16 dust.wasm race.wasm; do
     shasum -a 256 "$app/Contents/Resources/$f" | cut -d' ' -f1 > "$app/Contents/Resources/$f.sha256"
     cp "$app/Contents/Resources/$f.sha256" "$out/$f.sha256"
     gzip -c "$app/Contents/Resources/$f" > "$out/$f.gz"
@@ -59,7 +61,7 @@ xattr -dr com.apple.quarantine "$(cd "$(dirname "$0")/../.." && pwd)" 2>/dev/nul
 # ponytail: the bundled files only seed missing copies; a newer re-downloaded app is picked up via the update check.
 data="$HOME/Library/Application Support/fps16"
 mkdir -p "$data"
-for f in fps16 dust.wasm; do
+for f in fps16 dust.wasm race.wasm; do
     if [ ! -f "$data/$f" ]; then
         cp "$bundled/$f" "$data/$f"
         cp "$bundled/$f.sha256" "$data/$f.sha256"
@@ -94,6 +96,7 @@ update() {
 }
 update fps16
 update dust.wasm
+update race.wasm
 
 if [ $# -gt 0 ]; then exec ./fps16 "$@"; fi
 
@@ -118,12 +121,12 @@ cat > "$app/Contents/Info.plist" <<'EOF'
 EOF
 
 (cd "$out" && ditto -ck --sequesterRsrc --keepParent fps16.app fps16-mac.zip)
-du -sh "$out/fps16-mac.zip" "$out/fps16.gz" "$out/dust.wasm.gz"
+du -sh "$out/fps16-mac.zip" "$out/fps16.gz" "$out/dust.wasm.gz" "$out/race.wasm.gz"
 
 if [ "${1:-}" = publish ]; then
     echo "==> publishing to $HOST:$REMOTE"
     ssh "$HOST" "mkdir -p $REMOTE"
-    rsync -az "$out/fps16.gz" "$out/dust.wasm.gz" "$out/fps16-mac.zip" "$HOST:$REMOTE/"
-    rsync -az "$out/fps16.sha256" "$out/dust.wasm.sha256" "$HOST:$REMOTE/"
+    rsync -az "$out/fps16.gz" "$out/dust.wasm.gz" "$out/race.wasm.gz" "$out/fps16-mac.zip" "$HOST:$REMOTE/"
+    rsync -az "$out/fps16.sha256" "$out/dust.wasm.sha256" "$out/race.wasm.sha256" "$HOST:$REMOTE/"
     echo "published: $PUBLIC/fps16-mac.zip"
 fi

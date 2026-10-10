@@ -440,10 +440,52 @@ fn receive(mut net: ResMut<Net>, mut client: ResMut<Client>, mut browser: ResMut
     }
 }
 
-/// Keys held now, plus the synthetic ones the debug switches press.
-fn held_keys(keys: &ButtonInput<KeyCode>, mouse: &ButtonInput<MouseButton>) -> Vec<Key> {
+/// Controller buttons as the keys games already read, so every game plays with a controller unchanged: the left
+/// stick is WASD (`stick_keys`) and the right stick the mouse (`stick_look`).
+const PAD: [(GamepadButton, Key); 14] = [
+    (GamepadButton::South, Key::Space),
+    (GamepadButton::East, Key::ControlLeft),
+    (GamepadButton::West, Key::R),
+    (GamepadButton::North, Key::Q),
+    (GamepadButton::RightTrigger2, Key::MouseLeft),
+    (GamepadButton::LeftTrigger2, Key::MouseRight),
+    (GamepadButton::RightTrigger, Key::E),
+    (GamepadButton::LeftTrigger, Key::G),
+    (GamepadButton::LeftThumb, Key::ShiftLeft),
+    (GamepadButton::DPadUp, Key::Digit1),
+    (GamepadButton::DPadRight, Key::Digit2),
+    (GamepadButton::DPadDown, Key::Digit3),
+    (GamepadButton::DPadLeft, Key::Digit4),
+    (GamepadButton::Select, Key::Tab),
+];
+/// Start opens the buy menu, where the d-pad picks.
+const PAD_START: Key = Key::B;
+/// Look speed at full right stick, in mouse counts per second; the stick is squared for fine aim near the middle.
+const PAD_LOOK: f32 = 1800.0;
+
+fn pad_key(button: GamepadButton) -> Option<Key> {
+    if button == GamepadButton::Start { Some(PAD_START) } else { PAD.iter().find(|(b, _)| *b == button).map(|(_, k)| *k) }
+}
+
+/// The left stick as WASD, past half way on each axis.
+fn stick_keys(pad: &Gamepad) -> impl Iterator<Item = Key> {
+    let s = pad.left_stick();
+    [(s.y > 0.5, Key::W), (s.y < -0.5, Key::S), (s.x > 0.5, Key::D), (s.x < -0.5, Key::A)].into_iter().filter(|(on, _)| *on).map(|(_, k)| k)
+}
+
+/// The right stick as mouse motion over `dt` seconds.
+fn stick_look(pads: &Query<&Gamepad>, dt: f32) -> Vec2 {
+    let s: Vec2 = pads.iter().map(|p| p.right_stick()).sum();
+    Vec2::new(s.x, -s.y) * s.length().min(1.0) * PAD_LOOK * dt
+}
+
+/// Keys held now, from the keyboard, mouse and controllers, plus the synthetic ones the debug switches press.
+fn held_keys(keys: &ButtonInput<KeyCode>, mouse: &ButtonInput<MouseButton>, pads: &Query<&Gamepad>) -> Vec<Key> {
     let mut held: Vec<Key> = KEYS.iter().filter(|(code, _)| keys.pressed(*code)).map(|(_, k)| *k).collect();
     held.extend(BUTTONS.iter().filter(|(b, _)| mouse.pressed(*b)).map(|(_, k)| *k));
+    for pad in pads {
+        held.extend(pad.get_pressed().filter_map(|b| pad_key(*b)).chain(stick_keys(pad)));
+    }
     // FPS16_FIRE clicks repeatedly, for screenshots of effects; FPS16_STRAFE runs left and right, for checking
     // prediction without a person at the keys.
     if std::env::var_os("FPS16_FIRE").is_some() && clock() % 0.125 < 0.0625 {
@@ -464,6 +506,7 @@ fn net_tick(
     mut client: ResMut<Client>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
+    pads: Query<&Gamepad>,
     cursor: Single<&CursorOptions, With<PrimaryWindow>>,
     mut ticks: Local<u32>,
 ) {
@@ -488,7 +531,7 @@ fn net_tick(
             send(ClientMsg::Chunks { cookie: *cookie, chunks });
         }
         Fetch::Done => {
-            let raw = RawInput { held: held_keys(&keys, &mouse), captured: captured(&cursor), ..default() };
+            let raw = RawInput { held: held_keys(&keys, &mouse, &pads), captured: captured(&cursor), ..default() };
             let Client { game: Some(game), netcode, .. } = &mut *client else { return };
             let input = game.input(&raw);
             netcode.input(input, &mut |e, i, s| game.predict(e, i, s, true));
@@ -506,6 +549,7 @@ fn frame(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     motion: Res<AccumulatedMouseMotion>,
+    pads: Query<&Gamepad>,
     cursor: Single<&CursorOptions, With<PrimaryWindow>>,
     mut clicked: ResMut<Clicked>,
     camera: Single<(&mut Transform, &mut Projection), With<Camera3d>>,
@@ -516,7 +560,9 @@ fn frame(
     let captured = captured(&cursor);
     let mut pressed: Vec<Key> = KEYS.iter().filter(|(code, _)| keys.just_pressed(*code)).map(|(_, k)| *k).collect();
     pressed.extend(BUTTONS.iter().filter(|(b, _)| mouse.just_pressed(*b)).map(|(_, k)| *k));
-    let input = RawInput { held: held_keys(&keys, &mouse), pressed, mouse: if captured { motion.delta } else { Vec2::ZERO }, captured };
+    pressed.extend(pads.iter().flat_map(|p| p.get_just_pressed().filter_map(|b| pad_key(*b))));
+    let look = motion.delta + stick_look(&pads, time.delta_secs());
+    let input = RawInput { held: held_keys(&keys, &mouse, &pads), pressed, mouse: if captured { look } else { Vec2::ZERO }, captured };
     if !client.started {
         return;
     }
@@ -550,11 +596,13 @@ fn grab_cursor(
     mut cursor: Single<&mut CursorOptions, With<PrimaryWindow>>,
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
+    pads: Query<&Gamepad>,
     client: Res<Client>,
     net: Res<Net>,
 ) {
     // Not while picking a server or loading: the mouse is for the browser then.
-    if mouse.just_pressed(MouseButton::Left) && client.started && net.server.is_some() {
+    let pad = pads.iter().any(|p| p.get_just_pressed().next().is_some());
+    if (mouse.just_pressed(MouseButton::Left) || pad) && client.started && net.server.is_some() {
         cursor.grab_mode = CursorGrabMode::Locked;
         cursor.visible = false;
     }

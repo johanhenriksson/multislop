@@ -5,7 +5,7 @@ Deadline: playable before 00:00. One weapon, one simple map.
 ## Run
 - `cargo build -p dust --release --target wasm32-unknown-unknown` builds the game module. The host has no game built
   in: servers run a module and clients download it from the server.
-- `cargo run --release -- server [port] [--game game.wasm] [--map map] [--bots n]` (headless, default port 5000; the game defaults to
+- `cargo run --release -- server [port] [--game game.wasm] [--map map]` (headless, default port 5000; the game defaults to
   `dust.wasm` next to the executable, so in development pass `--game target/wasm32-unknown-unknown/release/dust.wasm`)
 - `cargo run --release -- client [host:port] [--game game.wasm] [--lag ms] [--jitter ms] [--interp ms]` (`--game` uses a local module instead of downloading the server's, `--lag`/`--jitter` fake delay and bursty arrival to test netcode, `--interp` is the minimum remote-player buffer, default 50)
 
@@ -25,8 +25,7 @@ Deadline: playable before 00:00. One weapon, one simple map.
   `~/Library/Application Support/fps16/host`) and press Enter.
 - Back to the browser, with the reason shown, when the server goes quiet for 5 s in a game, never answers for 10 s,
   or runs another build; the game's scene, HUD, sounds and environment are torn down and the mouse is freed.
-- "Host a LAN game" has a bot count (- / +: the game's default, or 0 to 31; `--bots` on a server) passed to the game
-  with `ServerGame::set_bots`, and lists every map of the game modules it can find (`--game`, `.wasm` files next to the binary,
+- "Host a LAN game" lists every map of the game modules it can find (`--game`, `.wasm` files next to the binary,
   downloaded ones in `games/`), e.g. "Counterslop on dust", using only the newest file of each game. The scan runs
   in the background from when the browser opens. The picked one runs as a server on a thread in the client, on the
   first free port of 5000-5009, named "<user>'s game", and the client joins it. Compiled module code is cached in
@@ -110,6 +109,10 @@ Deadline: playable before 00:00. One weapon, one simple map.
 - Team radio: bots call "Enemy spotted!", "Need backup!", "I'm in position.", "Sector clear.", "Cover me!" (with
   cooldowns), players with Z then 1-5 (2 s cooldown); the server sends calls only to the caller's team; clients play
   the voice and show a yellow chat line.
+- Controllers (via gilrs): the host maps them onto the keys and mouse games already read, so every game works
+  unchanged. Left stick WASD, right stick looks (squared, 1800 counts/s at full tilt), A Space, B Ctrl, X R, Y Q, RT/LT
+  mouse buttons, RB E, LB G, left stick click Shift, d-pad 1-4, View Tab, Menu B. Any button captures like a click. In
+  the server browser the d-pad picks and A joins; hosting still needs the mouse.
 - `FPS16_SHOT=out.png [FPS16_POSE="x,y,z,yaw,pitch"]` renders off-screen with the window hidden, saves a screenshot
   and quits, for checking visuals without a person at the screen.
 
@@ -174,3 +177,17 @@ Grenades, dropped/pickup weapons, halftime/match end, team switching, map height
   after 10 min wins; 8 s scoreboard, then a fresh match. Bots fill up to 8 players while anyone is on.
 - Run: `cargo build -p arena --release --target wasm32-unknown-unknown`, then
   `cargo run --release -- server --game target/wasm32-unknown-unknown/release/arena.wasm`. Not in releases yet.
+
+## Raceslop (`games/race`)
+- A third game module: an obstacle course race on one 30 x 172 m course, "gauntlet", over lava. From the start line:
+  stepping stones, a climb of 1 m blocks, a one-cell beam that zigzags, jump pads up onto a ledge, islands across
+  4 m gaps, and a platform swept by two spinning laser bars, then the checkered finish under a banner. Same height grid
+  as the arena; 0 is lava.
+- Movement as in Instaslop (fast, floaty, strong air control), no weapons. Lava or a laser bar sends you back to the
+  last of 3 checkpoints; R does it on purpose. The lasers run on the race clock, so client and server agree on them.
+- Races: 4 s countdown frozen on the line, then go. Ends when every person is over the line, 30 s after the first
+  finisher, or after 5 min; 8 s of standings (place, time, wins), then the next race. Bots fill up to 6 runners and run
+  the course along a distance field over walk, jump and pad moves, jumping at ledges and over incoming bars.
+- Run: `cargo build -p race --release --target wasm32-unknown-unknown`, then
+  `cargo run --release -- server --game target/wasm32-unknown-unknown/release/race.wasm`. Shipped in releases next to
+  `dust.wasm`, so it shows up under "Host a LAN game".
