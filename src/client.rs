@@ -1589,6 +1589,31 @@ fn spawn_world(
         }
     }
 
+    // A darker base course along walls where they meet open ground, at that spot's floor height. Two shared meshes
+    // (one per wall direction) since there are hundreds of them.
+    let base_mat = mats.add(StandardMaterial { base_color: Color::srgb(0.78, 0.7, 0.62), ..mats.get(&stone).unwrap().clone() });
+    let base_meshes = [
+        meshes.add(textured_box(Vec3::ZERO, Vec3::new(0.05, 0.2, CELL / 2.0), Vec2::new(4.0, 4.0), false)),
+        meshes.add(textured_box(Vec3::ZERO, Vec3::new(CELL / 2.0, 0.2, 0.05), Vec2::new(4.0, 4.0), false)),
+    ];
+    for z in 0..MAP.depth() {
+        for x in 0..MAP.width() {
+            if !MAP.is_wall(x, z) {
+                continue;
+            }
+            for (dx, dz) in [(1isize, 0isize), (-1, 0), (0, 1), (0, -1)] {
+                let (nx, nz) = (x.wrapping_add_signed(dx), z.wrapping_add_signed(dz));
+                if !MAP.walkable(nx, nz) {
+                    continue;
+                }
+                let normal = Vec3::new(dx as f32, 0.0, dz as f32);
+                let at = MAP.center(x, z) + normal * (CELL / 2.0 + 0.05) + Vec3::Y * (MAP.ground(nx, nz).y + 0.2);
+                let mesh = base_meshes[if dx != 0 { 0 } else { 1 }].clone();
+                commands.spawn((Mesh3d(mesh), MeshMaterial3d(base_mat.clone()), Transform::from_translation(at)));
+            }
+        }
+    }
+
     // Arched doors at street level and shutters higher up, sprinkled on walls that face open ground.
     for z in 0..MAP.depth() {
         for x in 0..MAP.width() {
