@@ -5,7 +5,7 @@ Deadline: playable before 00:00. One weapon, one simple map.
 ## Run
 - `cargo run --release -- server [port] [--game game.wasm]` (headless, default 5000; `--game` runs the game from a
   wasm module instead of the linked-in one: `cargo build -p dust --release --target wasm32-unknown-unknown`)
-- `cargo run --release -- client <host:port> [--lag ms] [--jitter ms] [--interp ms]` (`--lag`/`--jitter` fake delay and bursty arrival to test netcode, `--interp` is the minimum remote-player buffer, default 50)
+- `cargo run --release -- client <host:port> [--game game.wasm] [--lag ms] [--jitter ms] [--interp ms]` (`--lag`/`--jitter` fake delay and bursty arrival to test netcode, `--interp` is the minimum remote-player buffer, default 50)
 
 ## Distribution
 - `tools/release.sh` builds `dist/fps16-mac.zip`: a universal, unsigned `fps16.app` whose launcher self-updates from
@@ -87,12 +87,19 @@ Deadline: playable before 00:00. One weapon, one simple map.
   `ability` describes anything a player uses as data (trigger, cost, cycle, accuracy, delivery, payload) and runs
   the predicted part (`Hands`: cooldown, reload, bloom, charge, aim); delivery and payload are resolved by the game.
   Each dust weapon is a `Spec` (price, team, slot, kill reward, move speed) around an `Ability`.
+- `sdk::client`: the client half. `ClientGame` (start, snapshot, input, predict, frame) returns retained commands the
+  host applies: assets (textures, meshes, materials, sounds), environment (sky, sun, fog), a scene tree (node 0 is
+  the camera), and a HUD of flexbox-like nodes with text, images, click reporting and world-anchored placement;
+  plus per-frame camera, sounds, lines and spheres. Input arrives as raw keys and mouse motion; the game binds them.
+- `games/dust/src/client`: everything you see and hear in dust (world, models, textures, sounds, effects, HUD),
+  with no Bevy dependency; `scene.rs` hands out ids, shares meshes/materials and only resends changed HUD nodes.
 - Root crate: the host. Networking (`src/net.rs` envelope, `src/server.rs` transport, input queues, link stats),
   `src/netclient.rs` (clock sync, input stamping and redundancy, prediction/reconciliation through the game's
-  `predict` step, entity interpolation, net_graph stats), wasmtime loader (`src/wasm.rs`: memory cap, 1 s per call
-  limit), and for now the rest of the client.
-- Goal: games become downloadable wasm modules that own rules, assets and HUD; the client host becomes a generic
-  renderer. Next: the client half of the boundary.
+  `predict` step, entity interpolation, net_graph stats), `src/client.rs` (window, raw input, overlays: connection
+  status and net graph, Esc always releases the mouse, screenshot and synthetic-input debug switches),
+  `src/render.rs` (commands to Bevy), wasmtime loader (`src/wasm.rs`: memory cap, 1 s per call limit).
+- Goal: games are downloadable wasm modules that own rules, assets and HUD. Next: the server sends its module and
+  clients download and cache it.
 
 ## Netcode (server authoritative, Valve-style)
 - Plain UDP, postcard-serialized messages. Fixed tick 128 Hz on both sides; snapshots sent at 32 Hz, input packets at 64 Hz

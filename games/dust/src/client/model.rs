@@ -1,17 +1,19 @@
 //! Player and weapon models built from primitives, so the game ships as a single binary with no asset files.
 //! Everything fits inside the hit capsule (radius 0.4, height 1.8). Models face -Z with the origin at the feet.
 
-use dust::shared::{RADIUS, Team};
-use dust::weapons::{ALL_WEAPONS, Weapon};
-use bevy::prelude::*;
+use super::scene::Scene;
+use crate::shared::{RADIUS, Team};
+use crate::weapons::{ALL_WEAPONS, Weapon};
+use glam::{Quat, Vec3};
+use sdk::client::{Color, Material, MeshData, Transform};
 
-/// Moving parts of a player model: legs swing with speed, arms and rifle follow the aim pitch.
-#[derive(Component)]
+/// Moving parts of a player model (scene node ids): legs swing with speed, arms and rifle follow the aim pitch.
 pub struct Rig {
-    pub legs: [Entity; 2],
-    pub arms: Entity,
+    pub root: u32,
+    pub legs: [u32; 2],
+    pub arms: u32,
     /// One model per weapon, indexed by `Weapon as usize`; the held one is shown.
-    pub guns: Vec<Entity>,
+    pub guns: Vec<u32>,
     /// Walk cycle phase in radians, advanced by distance moved.
     pub phase: f32,
     pub last_pos: Option<Vec3>,
@@ -19,6 +21,8 @@ pub struct Rig {
     pub stride: f32,
     /// When (client clock) we saw this player die, for the fall.
     pub died_at: Option<f64>,
+    /// The gun shown, as last sent.
+    pub gun: Option<usize>,
 }
 
 impl Rig {
@@ -65,76 +69,62 @@ fn palette(team: Team) -> Palette {
     }
 }
 
-pub fn spawn_soldier(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    mats: &mut Assets<StandardMaterial>,
-    team: Team,
-    root: impl Bundle,
-) -> Entity {
+pub fn spawn_soldier(scene: &mut Scene, team: Team, root: Transform) -> Rig {
     let pal = palette(team);
     let dark = Color::srgb(0.08, 0.08, 0.08);
     let gear = Color::srgb(0.22, 0.2, 0.16);
+    let body = scene.empty(None, root, true);
     // A box: size, center, and yaw (radians) so forearms can angle in towards the gun.
-    let mut spawn = |commands: &mut Commands, size: [f32; 3], at: [f32; 3], yaw: f32, color: Color| {
-        let t = Transform::from_translation(Vec3::from(at)).with_rotation(Quat::from_rotation_y(yaw));
-        commands.spawn((Mesh3d(meshes.add(Cuboid::from_size(Vec3::from(size)))), MeshMaterial3d(mats.add(color)), t)).id()
+    let spawn = |scene: &mut Scene, parent: u32, size: [f32; 3], at: [f32; 3], yaw: f32, color: Color| {
+        let t = Transform::at(Vec3::from(at)).rotated(Quat::from_rotation_y(yaw));
+        let (mesh, material) = (scene.cuboid(Vec3::from(size)), scene.color(color));
+        scene.mesh_node(Some(parent), mesh, material, t);
     };
 
     // Legs swing from the hips: thigh to shin in one, knee pad, boot.
     let legs = [-0.11f32, 0.11].map(|x| {
-        let parts = [
-            spawn(commands, [0.19, 0.84, 0.21], [0.0, -0.42, 0.0], 0.0, pal.pants),
-            spawn(commands, [0.2, 0.11, 0.06], [0.0, -0.46, -0.11], 0.0, gear),
-            spawn(commands, [0.21, 0.15, 0.3], [0.0, -0.85, -0.04], 0.0, dark),
-        ];
-        let hip = commands.spawn((Transform::from_xyz(x, 0.92, 0.0), Visibility::Inherited)).id();
-        commands.entity(hip).add_children(&parts);
+        let hip = scene.empty(Some(body), Transform::at(Vec3::new(x, 0.92, 0.0)), true);
+        spawn(scene, hip, [0.19, 0.84, 0.21], [0.0, -0.42, 0.0], 0.0, pal.pants);
+        spawn(scene, hip, [0.2, 0.11, 0.06], [0.0, -0.46, -0.11], 0.0, gear);
+        spawn(scene, hip, [0.21, 0.15, 0.3], [0.0, -0.85, -0.04], 0.0, dark);
         hip
     });
 
-    let mut body_parts = vec![
+    let body_parts = [
         // Hips and belt.
-        spawn(commands, [0.42, 0.16, 0.24], [0.0, 0.96, 0.0], 0.0, pal.pants),
-        spawn(commands, [0.44, 0.05, 0.26], [0.0, 1.02, 0.0], 0.0, dark),
+        ([0.42, 0.16, 0.24], [0.0, 0.96, 0.0], pal.pants),
+        ([0.44, 0.05, 0.26], [0.0, 1.02, 0.0], dark),
         // Torso, broad shoulders, vest with pouches.
-        spawn(commands, [0.44, 0.48, 0.26], [0.0, 1.27, 0.0], 0.0, pal.shirt),
-        spawn(commands, [0.56, 0.13, 0.26], [0.0, 1.47, 0.0], 0.0, pal.shirt),
-        spawn(commands, [0.47, 0.36, 0.31], [0.0, 1.27, 0.0], 0.0, pal.vest),
-        spawn(commands, [0.1, 0.1, 0.05], [-0.13, 1.17, -0.17], 0.0, gear),
-        spawn(commands, [0.1, 0.1, 0.05], [0.0, 1.17, -0.17], 0.0, gear),
-        spawn(commands, [0.1, 0.1, 0.05], [0.13, 1.17, -0.17], 0.0, gear),
+        ([0.44, 0.48, 0.26], [0.0, 1.27, 0.0], pal.shirt),
+        ([0.56, 0.13, 0.26], [0.0, 1.47, 0.0], pal.shirt),
+        ([0.47, 0.36, 0.31], [0.0, 1.27, 0.0], pal.vest),
+        ([0.1, 0.1, 0.05], [-0.13, 1.17, -0.17], gear),
+        ([0.1, 0.1, 0.05], [0.0, 1.17, -0.17], gear),
+        ([0.1, 0.1, 0.05], [0.13, 1.17, -0.17], gear),
         // Neck and head.
-        spawn(commands, [0.12, 0.08, 0.12], [0.0, 1.56, 0.0], 0.0, pal.skin),
-        spawn(commands, [0.24, 0.27, 0.26], [0.0, 1.7, 0.0], 0.0, pal.head),
+        ([0.12, 0.08, 0.12], [0.0, 1.56, 0.0], pal.skin),
+        ([0.24, 0.27, 0.26], [0.0, 1.7, 0.0], pal.head),
     ];
-    match pal.helmet {
+    let extra = match pal.helmet {
         // CT: helmet with a brim, goggles strap.
-        Some(c) => {
-            body_parts.push(spawn(commands, [0.29, 0.12, 0.31], [0.0, 1.85, 0.0], 0.0, c));
-            body_parts.push(spawn(commands, [0.25, 0.04, 0.02], [0.0, 1.76, -0.135], 0.0, dark));
-            body_parts.push(spawn(commands, [0.3, 0.12, 0.12], [0.0, 1.32, 0.2], 0.0, gear));
-        }
+        Some(c) => vec![([0.29, 0.12, 0.31], [0.0, 1.85, 0.0], c), ([0.25, 0.04, 0.02], [0.0, 1.76, -0.135], dark), ([0.3, 0.12, 0.12], [0.0, 1.32, 0.2], gear)],
         // T: balaclava eye slit, and a backpack.
-        None => {
-            body_parts.push(spawn(commands, [0.2, 0.05, 0.02], [0.0, 1.73, -0.131], 0.0, pal.skin));
-            body_parts.push(spawn(commands, [0.32, 0.36, 0.14], [0.0, 1.3, 0.21], 0.0, gear));
-        }
+        None => vec![([0.2, 0.05, 0.02], [0.0, 1.73, -0.131], pal.skin), ([0.32, 0.36, 0.14], [0.0, 1.3, 0.21], gear)],
+    };
+    for (size, at, color) in body_parts.into_iter().chain(extra) {
+        spawn(scene, body, size, at, 0.0, color);
     }
 
     // Arms aim with the view pitch, pivoting at the chest: upper arms from the shoulders, forearms angled in to the
     // gun, gloved hands.
-    let arm_parts = [
-        spawn(commands, [0.12, 0.12, 0.28], [0.27, -0.06, -0.1], 0.15, pal.shirt),
-        spawn(commands, [0.11, 0.11, 0.3], [0.18, -0.07, -0.36], 0.45, pal.shirt),
-        spawn(commands, [0.1, 0.1, 0.1], [0.1, -0.06, -0.5], 0.0, dark),
-        spawn(commands, [0.12, 0.12, 0.28], [-0.27, -0.06, -0.1], -0.15, pal.shirt),
-        spawn(commands, [0.11, 0.11, 0.34], [-0.15, -0.05, -0.4], -0.6, pal.shirt),
-        spawn(commands, [0.1, 0.1, 0.1], [-0.03, -0.04, -0.58], 0.0, dark),
-    ];
-    let arms = commands.spawn((Transform::from_xyz(0.0, 1.42, 0.0), Visibility::Inherited)).id();
-    commands.entity(arms).add_children(&arm_parts);
-    let guns: Vec<Entity> = ALL_WEAPONS
+    let arms = scene.empty(Some(body), Transform::at(Vec3::new(0.0, 1.42, 0.0)), true);
+    spawn(scene, arms, [0.12, 0.12, 0.28], [0.27, -0.06, -0.1], 0.15, pal.shirt);
+    spawn(scene, arms, [0.11, 0.11, 0.3], [0.18, -0.07, -0.36], 0.45, pal.shirt);
+    spawn(scene, arms, [0.1, 0.1, 0.1], [0.1, -0.06, -0.5], 0.0, dark);
+    spawn(scene, arms, [0.12, 0.12, 0.28], [-0.27, -0.06, -0.1], -0.15, pal.shirt);
+    spawn(scene, arms, [0.11, 0.11, 0.34], [-0.15, -0.05, -0.4], -0.6, pal.shirt);
+    spawn(scene, arms, [0.1, 0.1, 0.1], [-0.03, -0.04, -0.58], 0.0, dark);
+    let guns: Vec<u32> = ALL_WEAPONS
         .iter()
         .map(|&w| {
             let at = match w {
@@ -142,16 +132,11 @@ pub fn spawn_soldier(
                 Weapon::Glock | Weapon::Usp | Weapon::Deagle => Vec3::new(0.04, 0.0, -0.58),
                 _ => Vec3::new(0.08, 0.0, -0.45),
             };
-            spawn_weapon(commands, meshes, mats, w, Transform::from_translation(at), false)
+            spawn_weapon(scene, arms, w, Transform::at(at), false)
         })
         .collect();
-    commands.entity(arms).add_children(&guns);
-
-    let rig = Rig { legs, arms, guns, phase: 0.0, last_pos: None, stride: 0.0, died_at: None };
-    let body = commands.spawn((root, rig, Visibility::Inherited)).id();
-    commands.entity(body).add_children(&body_parts).add_children(&legs).add_child(arms);
     debug_assert!(0.56 / 2.0 < RADIUS);
-    body
+    Rig { root: body, legs, arms, guns, phase: 0.0, last_pos: None, stride: 0.0, died_at: None, gun: None }
 }
 
 #[derive(Clone, Copy)]
@@ -333,38 +318,36 @@ pub fn viewmodel_offset(weapon: Weapon) -> Vec3 {
     }
 }
 
-/// A weapon model; first person also gets gloved hands holding it.
-pub fn spawn_weapon(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    mats: &mut Assets<StandardMaterial>,
-    weapon: Weapon,
-    at: Transform,
-    first_person: bool,
-) -> Entity {
+/// A weapon model (hidden at first) under `parent`; first person also gets gloved hands holding it.
+pub fn spawn_weapon(scene: &mut Scene, parent: u32, weapon: Weapon, at: Transform, first_person: bool) -> u32 {
     let along_z = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
-    let root = commands.spawn((at, Visibility::Hidden)).id();
+    let root = scene.empty(Some(parent), at, false);
     let mut shapes = parts(weapon);
     if first_person {
         shapes.extend(hands(weapon));
     }
     for (shape, finish) in shapes {
-        let material = mats.add(match finish {
-            Black => StandardMaterial { base_color: Color::srgb(0.07, 0.07, 0.08), perceptual_roughness: 0.5, ..default() },
-            Polymer => StandardMaterial { base_color: Color::srgb(0.14, 0.14, 0.14), perceptual_roughness: 0.8, ..default() },
-            Wood => StandardMaterial { base_color: Color::srgb(0.45, 0.24, 0.1), perceptual_roughness: 0.6, ..default() },
-            Green => StandardMaterial { base_color: Color::srgb(0.2, 0.27, 0.17), perceptual_roughness: 0.7, ..default() },
-            Silver => StandardMaterial { base_color: Color::srgb(0.72, 0.72, 0.74), metallic: 0.8, perceptual_roughness: 0.35, ..default() },
-            Steel => StandardMaterial { base_color: Color::srgb(0.78, 0.8, 0.83), metallic: 0.9, perceptual_roughness: 0.25, ..default() },
-            Glove => StandardMaterial { base_color: Color::srgb(0.09, 0.09, 0.08), perceptual_roughness: 0.9, ..default() },
-            Sleeve => StandardMaterial { base_color: Color::srgb(0.2, 0.22, 0.16), perceptual_roughness: 0.95, ..default() },
+        let material = scene.shared_material(format!("finish {}", finish as u8), || {
+            let m = |r, g, b, roughness| Material { color: Color::srgb(r, g, b), roughness, ..Default::default() };
+            match finish {
+                Black => m(0.07, 0.07, 0.08, 0.5),
+                Polymer => m(0.14, 0.14, 0.14, 0.8),
+                Wood => m(0.45, 0.24, 0.1, 0.6),
+                Green => m(0.2, 0.27, 0.17, 0.7),
+                Silver => Material { metallic: 0.8, ..m(0.72, 0.72, 0.74, 0.35) },
+                Steel => Material { metallic: 0.9, ..m(0.78, 0.8, 0.83, 0.25) },
+                Glove => m(0.09, 0.09, 0.08, 0.9),
+                Sleeve => m(0.2, 0.22, 0.16, 0.95),
+            }
         });
         let (mesh, transform) = match shape {
-            Block(size, pos, tilt) => (Mesh::from(Cuboid::from_size(size)), Transform::from_translation(pos).with_rotation(Quat::from_rotation_x(tilt))),
-            Tube(r, len, pos) => (Mesh::from(Cylinder::new(r, len)), Transform::from_translation(pos).with_rotation(along_z)),
+            Block(size, pos, tilt) => (scene.cuboid(size), Transform::at(pos).rotated(Quat::from_rotation_x(tilt))),
+            Tube(r, len, pos) => {
+                let mesh = scene.shared_mesh(format!("tube {r} {len}"), || MeshData::Cylinder { radius: r, height: len });
+                (mesh, Transform::at(pos).rotated(along_z))
+            }
         };
-        let part = commands.spawn((Mesh3d(meshes.add(mesh)), MeshMaterial3d(material), transform)).id();
-        commands.entity(root).add_child(part);
+        scene.mesh_node(Some(root), mesh, material, transform);
     }
     root
 }

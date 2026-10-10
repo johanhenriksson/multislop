@@ -1,9 +1,10 @@
-use glam::{EulerRot, Quat, Vec3};
+use glam::Vec3;
 use crate::map::MAP;
 use crate::weapons::{AWP_SCOPED_SPREAD, DRAW_SECS, SCOPED_SPEED, Slot, Weapon};
 use sdk::ability::Hands;
 use serde::{Deserialize, Serialize};
 
+pub use sdk::client::look_rot;
 pub use sdk::{TICK_HZ, decode, encode};
 use sdk::Entity;
 pub const DT: f32 = 1.0 / TICK_HZ as f32;
@@ -200,16 +201,15 @@ pub enum Event {
     Explosion { pos: Vec3, radius: f32 },
 }
 
-/// Client-side prediction of our own player: one input on top of `me`. Returns the `Option<Fired>`, encoded.
-pub fn predict(me: &mut Entity, input: &[u8], seq: u32) -> Vec<u8> {
-    let mut shot = None;
-    if let (Some(mut p), Some(inp)) = (NetPlayer::from_entity(me), decode::<Input>(input)) {
-        if p.hp > 0 {
-            shot = step_player(&mut p.state, &Input { seq, ..inp });
-            *me = p.entity(me.teleport);
-        }
+/// Client-side prediction of our own player: one input on top of `me`. Returns the use that went off, if any.
+pub fn predict(me: &mut Entity, input: &[u8], seq: u32) -> Option<Fired> {
+    let (mut p, inp) = (NetPlayer::from_entity(me)?, decode::<Input>(input)?);
+    if p.hp <= 0 {
+        return None;
     }
-    encode(&shot)
+    let fired = step_player(&mut p.state, &Input { seq, ..inp });
+    *me = p.entity(me.teleport);
+    fired
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug)]
@@ -261,9 +261,6 @@ pub struct Hit {
     pub killed: bool,
 }
 
-pub fn look_rot(yaw: f32, pitch: f32) -> Quat {
-    Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0)
-}
 
 pub fn eye(s: &PlayerState) -> Vec3 {
     s.pos + Vec3::Y * EYE

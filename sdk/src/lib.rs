@@ -1,10 +1,11 @@
-//! The boundary between the fps16 host and a game. A game implements `ServerGame` and calls `export_server!` so the
-//! host can run it natively (linked in) or as a downloaded `.wasm` module.
+//! The boundary between the fps16 host and a game. A game implements `ServerGame` and `client::ClientGame` and calls
+//! `export_server!` / `export_client!` so the host can run it natively (linked in) or as a downloaded `.wasm` module.
 //!
 //! The wasm ABI is a single shared byte buffer: the host asks for `fps16_buf(len)`, writes its argument there and
 //! calls the export with the length; exports that return bytes leave them in the buffer and return `ptr << 32 | len`.
 
 pub mod ability;
+pub mod client;
 
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,15 @@ pub struct Entity {
     /// Bumped by the game whenever the entity jumps (a respawn), so nobody draws or rewinds across the jump.
     pub teleport: u8,
     pub data: Vec<u8>,
+}
+
+/// A remote entity as the netcode would draw it now.
+#[derive(Serialize, Deserialize, Clone, Default, Debug)]
+pub struct Interpolated {
+    /// Pose interpolated (or briefly extrapolated); data from the newer of the two snapshots it's between.
+    pub entity: Entity,
+    /// Shown at a spot it has since teleported away from (a respawn being interpolated past): best hidden.
+    pub teleporting: bool,
 }
 
 /// Something that happened, sent once to `to` (everyone when None).
@@ -112,6 +122,36 @@ pub fn log(msg: &str) {
     println!("{msg}");
 }
 
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static BUF: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The shared argument and result buffer, resized to `len`: the host writes arguments here.
+#[cfg(target_arch = "wasm32")]
+#[unsafe(no_mangle)]
+pub extern "C" fn fps16_buf(len: usize) -> *mut u8 {
+    BUF.with_borrow_mut(|b| {
+        b.resize(len, 0);
+        b.as_mut_ptr()
+    })
+}
+
+#[doc(hidden)]
+#[cfg(target_arch = "wasm32")]
+pub fn wasm_arg<R>(len: usize, f: impl FnOnce(&[u8]) -> R) -> R {
+    BUF.with_borrow(|b| f(&b[..len]))
+}
+
+#[doc(hidden)]
+#[cfg(target_arch = "wasm32")]
+pub fn wasm_ret(bytes: Vec<u8>) -> u64 {
+    BUF.with_borrow_mut(|b| {
+        *b = bytes;
+        (b.as_ptr() as u64) << 32 | b.len() as u64
+    })
+}
+
 /// Exports a `ServerGame` from a wasm module, made by `$new` on first use.
 #[macro_export]
 macro_rules! export_server {
@@ -127,35 +167,15 @@ macro_rules! export_server {
                     std::panic::set_hook(Box::new(|info| $crate::log(&info.to_string())));
                     Box::new($new)
                 });
-                static BUF: RefCell<Vec<u8>> = RefCell::new(Vec::new());
             }
 
             fn game<R>(f: impl FnOnce(&mut dyn ServerGame) -> R) -> R {
                 GAME.with_borrow_mut(|g| f(g.as_mut()))
             }
 
-            fn arg<R>(len: usize, f: impl FnOnce(&[u8]) -> R) -> R {
-                BUF.with_borrow(|b| f(&b[..len]))
-            }
-
-            fn ret(bytes: Vec<u8>) -> u64 {
-                BUF.with_borrow_mut(|b| {
-                    *b = bytes;
-                    (b.as_ptr() as u64) << 32 | b.len() as u64
-                })
-            }
-
-            #[unsafe(no_mangle)]
-            extern "C" fn fps16_buf(len: usize) -> *mut u8 {
-                BUF.with_borrow_mut(|b| {
-                    b.resize(len, 0);
-                    b.as_mut_ptr()
-                })
-            }
-
             #[unsafe(no_mangle)]
             extern "C" fn fps16_connect(len: usize) -> u32 {
-                let name = arg(len, |b| String::from_utf8_lossy(b).into_owned());
+                let name = $crate::wasm_arg(len, |b| String::from_utf8_lossy(b).into_owned());
                 game(|g| g.connect(&name))
             }
 
@@ -171,13 +191,13 @@ macro_rules! export_server {
 
             #[unsafe(no_mangle)]
             extern "C" fn fps16_input(id: u32, seq: u32, view_tick: f32, len: usize) {
-                let input = arg(len, <[u8]>::to_vec);
+                let input = $crate::wasm_arg(len, <[u8]>::to_vec);
                 game(|g| g.input(id, seq, view_tick, &input))
             }
 
             #[unsafe(no_mangle)]
             extern "C" fn fps16_tick() -> u64 {
-                ret($crate::encode(&game(|g| g.tick())))
+                $crate::wasm_ret($crate::encode(&game(|g| g.tick())))
             }
         }
     };

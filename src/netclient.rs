@@ -3,13 +3,13 @@
 
 use crate::net::*;
 use bevy::math::Vec3;
-use sdk::{Entity, TICK_HZ};
+use sdk::{Entity, Interpolated, TICK_HZ};
 use std::collections::VecDeque;
 use std::time::Instant;
 
-/// One input applied to our entity, as the game's client-side step: returns the game's events for it (a shot fired).
-/// It runs again for every unacked input on each snapshot; those replays' events are dropped.
-pub type Predict<'a> = &'a mut dyn FnMut(&mut Entity, &[u8], u32) -> Vec<u8>;
+/// One input (with its seq) applied to our entity: the game's client-side step. Runs once fresh from `input`, then
+/// again for every unacked input on each snapshot.
+pub type Predict<'a> = &'a mut dyn FnMut(&mut Entity, &[u8], u32);
 
 /// Unacked inputs resent in every packet, so a lost packet costs nothing.
 const REDUNDANCY: usize = 8;
@@ -21,14 +21,6 @@ pub struct NetGraph {
     pub max_gap_ms: f32,
     pub max_fix_cm: f32,
     pub starved: u32,
-}
-
-/// A remote entity as it should be drawn now.
-pub struct Interpolated {
-    /// Pose interpolated (or briefly extrapolated); data from the newer of the two snapshots.
-    pub entity: Entity,
-    /// Shown at a spot it has since teleported away from (a respawn being interpolated past): best hidden.
-    pub teleporting: bool,
 }
 
 #[derive(Default)]
@@ -83,8 +75,8 @@ impl NetClient {
         self.tick_offset.map_or(0.0, |o| clock() * TICK_HZ + o)
     }
 
-    /// One tick of input: stamps it, predicts it and queues it for sending. Returns the prediction's events.
-    pub fn input(&mut self, data: Vec<u8>, predict: Predict) -> Option<Vec<u8>> {
+    /// One tick of input: stamps it, predicts it and queues it for sending.
+    pub fn input(&mut self, data: Vec<u8>, predict: Predict) {
         // Grow the buffer fast when snapshots arrive late, shrink it slowly once they don't.
         let target = (self.jitter_ticks + 2.0).clamp(self.min_interp_ticks, 0.15 * TICK_HZ);
         let rate = if target > self.interp_ticks { 0.2 } else { 0.005 };
@@ -92,16 +84,14 @@ impl NetClient {
 
         self.seq += 1;
         let view_tick = (self.server_tick() - self.interp_ticks) as f32;
-        let mut events = None;
         if let Some(pred) = &mut self.pred {
             self.prev_pos = pred.pos;
-            events = Some(predict(pred, &data, self.seq));
+            predict(pred, &data, self.seq);
         }
         self.pending.push_back(InputMsg { seq: self.seq, view_tick, data });
         while self.pending.len() > 128 {
             self.pending.pop_front();
         }
-        events
     }
 
     /// The packet to send this tick, if it's a sending tick.
@@ -229,15 +219,15 @@ mod tests {
     }
 
     /// Each input moves the entity by its one byte along x.
-    fn step(e: &mut Entity, input: &[u8], _seq: u32) -> Vec<u8> {
+    fn step(e: &mut Entity, input: &[u8], _seq: u32) {
         e.pos.x += input[0] as f32;
-        vec![]
     }
 
     #[test]
     fn reconciles_by_replaying_unacked_inputs() {
         let mut nc = NetClient::new(50);
-        assert!(nc.input(vec![1], &mut step).is_none(), "nothing to predict before the first snapshot");
+        nc.input(vec![1], &mut step);
+        assert!(nc.pred.is_none(), "nothing to predict before the first snapshot");
         nc.snapshot(snap(10, 1, 0.0), &mut step).unwrap();
         for _ in 0..4 {
             nc.input(vec![1], &mut step);

@@ -1,6 +1,6 @@
 //! Sound effects synthesized at startup, so the game stays a single binary with no asset files.
 
-use dust::weapons::Weapon;
+use crate::weapons::Weapon;
 use std::f32::consts::TAU;
 
 const RATE: u32 = 44100;
@@ -135,22 +135,22 @@ fn tone(secs: f32, hz: f32, decay: f32) -> Samples {
 }
 
 /// Announcer lines, voiced with ElevenLabs ("Adam") and embedded so the game stays one binary.
-pub const VOICE_T_WIN: &[u8] = include_bytes!("../assets/voice/t_win.wav");
-pub const VOICE_CT_WIN: &[u8] = include_bytes!("../assets/voice/ct_win.wav");
-pub const VOICE_PLANTED: &[u8] = include_bytes!("../assets/voice/planted.wav");
-pub const VOICE_DEFUSED: &[u8] = include_bytes!("../assets/voice/defused.wav");
-pub const VOICE_GO: &[u8] = include_bytes!("../assets/voice/go.wav");
-pub const VOICE_ENEMY_DOWN: &[u8] = include_bytes!("../assets/voice/enemy_down.wav");
+pub const VOICE_T_WIN: &[u8] = include_bytes!("../../assets/voice/t_win.wav");
+pub const VOICE_CT_WIN: &[u8] = include_bytes!("../../assets/voice/ct_win.wav");
+pub const VOICE_PLANTED: &[u8] = include_bytes!("../../assets/voice/planted.wav");
+pub const VOICE_DEFUSED: &[u8] = include_bytes!("../../assets/voice/defused.wav");
+pub const VOICE_GO: &[u8] = include_bytes!("../../assets/voice/go.wav");
+pub const VOICE_ENEMY_DOWN: &[u8] = include_bytes!("../../assets/voice/enemy_down.wav");
 
 /// Team radio lines, same voice.
-pub fn radio_line(call: dust::shared::Radio) -> &'static [u8] {
-    use dust::shared::Radio::*;
+pub fn radio_line(call: crate::shared::Radio) -> &'static [u8] {
+    use crate::shared::Radio::*;
     match call {
-        EnemySpotted => include_bytes!("../assets/voice/enemy_spotted.wav"),
-        NeedBackup => include_bytes!("../assets/voice/need_backup.wav"),
-        InPosition => include_bytes!("../assets/voice/in_position.wav"),
-        SectorClear => include_bytes!("../assets/voice/sector_clear.wav"),
-        CoverMe => include_bytes!("../assets/voice/cover_me.wav"),
+        EnemySpotted => include_bytes!("../../assets/voice/enemy_spotted.wav"),
+        NeedBackup => include_bytes!("../../assets/voice/need_backup.wav"),
+        InPosition => include_bytes!("../../assets/voice/in_position.wav"),
+        SectorClear => include_bytes!("../../assets/voice/sector_clear.wav"),
+        CoverMe => include_bytes!("../../assets/voice/cover_me.wav"),
     }
 }
 
@@ -308,7 +308,7 @@ fn wav_at(samples: &[f32], rate: u32) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use dust::weapons::Weapon;
+    use crate::weapons::Weapon;
 
     #[test]
     fn valid_wav() {

@@ -1,10 +1,21 @@
 //! Procedural textures in the style of de_dust: sandstone blocks, frieze trim, flagstone floor, wooden and green
 //! crates, arched doors and shutters. Generated at startup so the game stays a single binary.
 
-use bevy::asset::RenderAssetUsages;
-use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
-use bevy::prelude::*;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use sdk::client::Command;
+
+/// RGBA8 sRGB pixels with all mip levels, as `Command::Texture` takes them.
+pub struct Texture {
+    w: u32,
+    h: u32,
+    mips: u32,
+    rgba: Vec<u8>,
+}
+
+impl Texture {
+    pub fn command(self, id: u32) -> Command {
+        Command::Texture { id, w: self.w, h: self.h, mips: self.mips, rgba: self.rgba }
+    }
+}
 
 fn hash(x: i32, y: i32, seed: u32) -> f32 {
     let mut h = (x as u32).wrapping_mul(0x8DA6_B343) ^ (y as u32).wrapping_mul(0xD816_3841) ^ seed.wrapping_mul(0xCB1A_B31F);
@@ -26,8 +37,8 @@ fn noise(x: f32, y: f32, cell: f32, period: i32, seed: u32) -> f32 {
     top + (bottom - top) * sy
 }
 
-/// Builds a repeating, mipmapped sRGB texture from a color function of pixel position.
-fn texture(w: u32, h: u32, f: impl Fn(u32, u32) -> [f32; 4]) -> Image {
+/// Builds a mipmapped sRGB texture from a color function of pixel position.
+fn texture(w: u32, h: u32, f: impl Fn(u32, u32) -> [f32; 4]) -> Texture {
     let mut level: Vec<[f32; 4]> = (0..h).flat_map(|y| (0..w).map(move |x| (x, y))).map(|(x, y)| f(x, y)).collect();
     let (mut lw, mut lh) = (w, h);
     let mut data: Vec<u8> = vec![];
@@ -50,19 +61,7 @@ fn texture(w: u32, h: u32, f: impl Fn(u32, u32) -> [f32; 4]) -> Image {
             .collect();
         (lw, lh) = (nw, nh);
     }
-    let size = Extent3d { width: w, height: h, depth_or_array_layers: 1 };
-    let mut image = Image::new(size, TextureDimension::D2, data, TextureFormat::Rgba8UnormSrgb, RenderAssetUsages::RENDER_WORLD);
-    image.texture_descriptor.mip_level_count = mips;
-    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-        address_mode_u: ImageAddressMode::Repeat,
-        address_mode_v: ImageAddressMode::Repeat,
-        mag_filter: ImageFilterMode::Linear,
-        min_filter: ImageFilterMode::Linear,
-        mipmap_filter: ImageFilterMode::Linear,
-        anisotropy_clamp: 8,
-        ..default()
-    });
-    image
+    Texture { w, h, mips, rgba: data }
 }
 
 fn rgb(r: f32, g: f32, b: f32, k: f32) -> [f32; 4] {
@@ -70,7 +69,7 @@ fn rgb(r: f32, g: f32, b: f32, k: f32) -> [f32; 4] {
 }
 
 /// Sandstone wall, 4 m square: big blocks in staggered courses with mortar, each block a slightly different shade.
-pub fn sandstone() -> Image {
+pub fn sandstone() -> Texture {
     texture(256, 256, |x, y| {
         let (bw, bh) = (64, 32);
         let row = y / bh;
@@ -89,7 +88,7 @@ pub fn sandstone() -> Image {
 }
 
 /// Frieze band along wall tops, 4 m x 0.5 m: carved zigzag between thin moldings.
-pub fn frieze() -> Image {
+pub fn frieze() -> Texture {
     texture(256, 32, |x, y| {
         let molding = !(4..=27).contains(&y);
         let zig = ((x % 16) as f32 - 8.0).abs() * 1.6 + 9.0;
@@ -104,7 +103,7 @@ pub fn frieze() -> Image {
 }
 
 /// Ground, 4 m square: sand with worn flagstones (Voronoi cells) showing through.
-pub fn ground() -> Image {
+pub fn ground() -> Texture {
     let points: Vec<(f32, f32)> = (0..14).map(|i| (hash(i, 0, 7) * 256.0, hash(i, 1, 7) * 256.0)).collect();
     texture(256, 256, move |x, y| {
         let (px, py) = (x as f32, y as f32);
@@ -132,7 +131,7 @@ pub fn ground() -> Image {
 }
 
 /// Wooden crate face, 1 m square: frame, vertical planks and an X brace.
-pub fn wood_crate() -> Image {
+pub fn wood_crate() -> Texture {
     texture(64, 64, |x, y| {
         let (fx, fy) = (x as f32 / 63.0, y as f32 / 63.0);
         let frame = !(6..58).contains(&x) || !(6..58).contains(&y);
@@ -149,7 +148,7 @@ pub fn wood_crate() -> Image {
 }
 
 /// Green ammo crate face, 1 m square: ribbed metal with a hazard stripe along the bottom.
-pub fn ammo_crate() -> Image {
+pub fn ammo_crate() -> Texture {
     texture(64, 64, |x, y| {
         let rib = y % 16 < 2 || x < 3 || x > 60;
         if y > 54 {
@@ -162,7 +161,7 @@ pub fn ammo_crate() -> Image {
 }
 
 /// Arched wooden door, 1.6 x 2.6 m: dark planks with iron bands; outside the arch is transparent.
-pub fn door() -> Image {
+pub fn door() -> Texture {
     texture(64, 104, |x, y| {
         let (cx, r) = (32.0, 32.0);
         let (dx, dy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - r);
@@ -179,7 +178,7 @@ pub fn door() -> Image {
 }
 
 /// Soft white clouds on transparent, tiling.
-pub fn clouds() -> Image {
+pub fn clouds() -> Texture {
     texture(256, 256, |x, y| {
         let (px, py) = (x as f32, y as f32);
         let n = noise(px, py, 64.0, 4, 20) * 0.5 + noise(px, py, 32.0, 8, 21) * 0.3 + noise(px, py, 12.0, 21, 22) * 0.2;
