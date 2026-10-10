@@ -93,7 +93,7 @@ Deadline: playable before 00:00. One weapon, one simple map.
   Maps are ASCII grids (`games/dust/src/maps/<map>.txt`) with a height grid each (`<map>_heights.txt`, quarter
   meters as base-62 digits 0-9a-zA-Z), in layers separated by a blank line; cell size per map (dust 1 m, aztec 2 m).
   The base layer: `#` wall (height = its top; walls 6.5 m and up get a random 0-3 m extra for the skyline), `x`/`X`
-  low/tall crate standing on its height, `k` crate whose top is its height (standing on the lowest floor beside it),
+  low/tall crate standing on its height, `k` crate whose top is its height (standing on the lowest floor beside its pile),
   `A`/`B` site floor, `T`/`C` spawn, `.` floor. Upper layers (blank = nothing): `.` (or a site/spawn letter) a floor
   slab 0.6 m thick whose top is the height, `#` a 2 m roof block whose underside is the height. So a cell has a stack
   of floors (`map::Floor`: a surface over a solid underside, the ground solid all the way down), with air between.

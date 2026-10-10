@@ -135,6 +135,33 @@ impl Map {
         // Solids per layer as (kind, bottom, top), merged into boxes below, and the floors of each cell.
         let mut solids: Vec<Vec<Solid>> = vec![vec![None; w * d]; layers.len()];
         let mut cells: Vec<Vec<Floor>> = vec![vec![]; w * d];
+        // A `k` crate stands on the lowest floor next to its pile, so the ones inside a pile reach the ground too.
+        let sides = |x: usize, z: usize| [(1isize, 0isize), (-1, 0), (0, 1), (0, -1)].map(|(dx, dz)| (x.wrapping_add_signed(dx), z.wrapping_add_signed(dz)));
+        let mut crate_low = vec![f32::NAN; w * d];
+        for start in 0..w * d {
+            if map.rows[start / w][start % w] != b'k' || !crate_low[start].is_nan() {
+                continue;
+            }
+            let (mut pile, mut low) = (vec![start], f32::INFINITY);
+            crate_low[start] = low;
+            let mut i = 0;
+            while let Some(&c) = pile.get(i) {
+                i += 1;
+                for (sx, sz) in sides(c % w, c / w) {
+                    match at(&map.rows, sx, sz) {
+                        b'k' if crate_low[sz * w + sx].is_nan() => {
+                            crate_low[sz * w + sx] = low;
+                            pile.push(sz * w + sx);
+                        }
+                        ch if walkable_char(ch) => low = low.min(base_height(sx, sz)),
+                        _ => {}
+                    }
+                }
+            }
+            for c in pile {
+                crate_low[c] = low;
+            }
+        }
         let floor = |y: f32, bottom: f32, open: bool, tag: u8| Floor { y, bottom, corners: [y; 4], open, tag };
         for z in 0..d {
             for x in 0..w {
@@ -149,9 +176,7 @@ impl Map {
                         floor(h, f32::NEG_INFINITY, false, c)
                     }
                     b'k' => {
-                        // The crate stands on the lowest floor next to it.
-                        let sides = [(1isize, 0isize), (-1, 0), (0, 1), (0, -1)].map(|(dx, dz)| (x.wrapping_add_signed(dx), z.wrapping_add_signed(dz)));
-                        let low = sides.iter().filter(|&&(sx, sz)| walkable_char(at(&map.rows, sx, sz))).map(|&(sx, sz)| base_height(sx, sz)).fold(h, f32::min);
+                        let low = crate_low[z * w + x];
                         let bottom = if low < h { low } else { h - 1.0 };
                         solids[0][z * w + x] = Some((c, bottom, h));
                         floor(bottom, f32::NEG_INFINITY, false, c)
