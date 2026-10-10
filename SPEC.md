@@ -56,7 +56,7 @@ Deadline: playable before 00:00. One weapon, one simple map.
 - Money: $800 start, $16000 cap; kill $300 (AWP $100, MP5 $600, knife $1500); win $3250, loss $1400 + $500 per
   consecutive loss (up to 3); plant/defuse $300. Survivors keep guns; the dead restart with the team pistol.
 - Each weapon has its own model (`src/model.rs`) and its own synthesized sound (silenced thwip for M4A1/USP, booming
-  echoing Deagle/AWP with bolt work, harsh AK crack, light MP5/Glock), plus reload, buy, headshot, hit and hurt sounds.
+  echoing Deagle, the AWP a recorded sample (`games/dust/assets/sfx/awp.wav`, from the office soundboard), harsh AK crack, light MP5/Glock), plus reload, buy, headshot, hit and hurt sounds.
 - Movement speed depends on the weapon in hand: knife 108%, pistols/MP5 100%, M4A1 92%, AK 88%, AWP 84% (60% scoped).
 - Player names: the logged-in user (`$USER`); bots are named "BOT Hans" etc.
 - HUD: HP/armor/money, weapon + ammo, buy menu, kill feed, red flash when hit. Short tracers (AWP longer).
@@ -89,7 +89,9 @@ Deadline: playable before 00:00. One weapon, one simple map.
   wooden X-braced and green ammo crates; clouds, two rings of mountains, desert beyond the map, distance haze,
   warm hard sun. First-person weapons are held by gloved hands.
 - Combat effects: muzzle flash with a light burst, dust puff and bullet hole where shots land (last 80 holes kept),
-  blood puff on player hits. Footsteps for anyone running, by distance; Shift walks slowly and silently.
+  blood on player hits: droplets sprayed mostly out the far side (more for damage, headshots and kills) that splat
+  where they land, a big splash on a wall up to 3 m behind, pools spreading under the dead, blood over your own
+  screen when you're hit; at most 150 splats, cleared each round. Footsteps for anyone running, by distance; Shift walks slowly and silently.
 - Announcer: "Go, go, go!", "Terrorists/Counter-terrorists win", "The bomb has been planted", "Bomb has been defused",
   voiced with ElevenLabs ("Adam") into `assets/voice/` and embedded, radio-filtered, with big centered text; "Enemy
   down" after your kills.

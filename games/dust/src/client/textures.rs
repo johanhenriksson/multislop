@@ -186,3 +186,30 @@ pub fn clouds() -> Texture {
         [1.0, 1.0, 1.0, a]
     })
 }
+
+/// A splash of blood: a ragged blob with spatters flung around it, transparent elsewhere. Dark red, wet and glossy
+/// once lit.
+pub fn blood() -> Texture {
+    // Spatter droplets: position (from the center, in pixels) and radius.
+    let drops: Vec<(f32, f32, f32)> = (0..18)
+        .map(|i| {
+            let (a, d) = (hash(i, 1, 41) * std::f32::consts::TAU, 30.0 + hash(i, 2, 41) * 30.0);
+            (a.cos() * d, a.sin() * d, 1.5 + hash(i, 3, 41) * 4.0)
+        })
+        .collect();
+    texture(128, 128, |x, y| {
+        let (px, py) = (x as f32 - 64.0, y as f32 - 64.0);
+        let (r, a) = ((px * px + py * py).sqrt(), py.atan2(px));
+        // A wobbly edge: noise around the rim plus a few longer streaks.
+        let rim = noise(64.0 + a.cos() * 40.0, 64.0 + a.sin() * 40.0, 10.0, 13, 42);
+        let streak = ((a * 5.0 + 1.3).sin() * (a * 3.0).cos()).max(0.0).powi(6);
+        let edge = 24.0 + 12.0 * rim + 22.0 * streak;
+        let blob = ((edge - r) / 3.0).clamp(0.0, 1.0);
+        let spatter = drops.iter().map(|&(dx, dy, rad)| ((rad - ((px - dx).powi(2) + (py - dy).powi(2)).sqrt()) / 1.2).clamp(0.0, 1.0)).fold(0.0, f32::max);
+        let alpha = blob.max(spatter);
+        // Darker and thicker in the middle, brighter where thin.
+        let shade = 0.55 + 0.45 * (r / edge).min(1.0) + 0.1 * noise(x as f32, y as f32, 8.0, 16, 43);
+        [0.42 * shade, 0.02, 0.03, alpha]
+    })
+}
+

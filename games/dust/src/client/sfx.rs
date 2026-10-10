@@ -50,11 +50,8 @@ pub fn gunshot(weapon: Weapon) -> Vec<u8> {
         Weapon::Ak47 => shot(&mut rng, 0.4, 0.4, 95.0, 1.3).clip(0.55).mix(click(&mut rng, 0.04), 0.06, 0.35),
         // Silenced rifle: the classic tshk.
         Weapon::M4a1 => shot(&mut rng, 0.16, 0.18, 180.0, 0.5).mix(click(&mut rng, 0.035), 0.03, 0.55),
-        // Huge crack and boom rolling off, then the bolt worked back and forth.
-        Weapon::Awp => shot(&mut rng, 1.1, 0.45, 60.0, 1.2)
-            .echo(0.22, 0.4, 3)
-            .mix(click(&mut rng, 0.05), 0.75, 0.5)
-            .mix(click(&mut rng, 0.05), 0.95, 0.5),
+        // The real thing, from the soundboard: trimmed to the shot and its tail, 70% level, faded out.
+        Weapon::Awp => return AWP.to_vec(),
     };
     let peak = match weapon {
         Weapon::Usp | Weapon::M4a1 => 0.4,
@@ -135,6 +132,7 @@ fn tone(secs: f32, hz: f32, decay: f32) -> Samples {
 }
 
 /// Announcer lines, voiced with ElevenLabs ("Adam") and embedded so the game stays one binary.
+const AWP: &[u8] = include_bytes!("../../assets/sfx/awp.wav");
 pub const VOICE_T_WIN: &[u8] = include_bytes!("../../assets/voice/t_win.wav");
 pub const VOICE_CT_WIN: &[u8] = include_bytes!("../../assets/voice/ct_win.wav");
 pub const VOICE_PLANTED: &[u8] = include_bytes!("../../assets/voice/planted.wav");

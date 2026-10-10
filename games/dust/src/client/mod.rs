@@ -1,6 +1,7 @@
 //! The dust client: everything the player sees and hears, sent to the host as commands. CS 1.6 style HUD, soldier
 //! models animated from interpolated players, first-person weapons, tracers, impacts, blood, the bomb and its beeps.
 
+mod blood;
 mod hud;
 mod model;
 mod scene;
@@ -160,6 +161,7 @@ pub struct DustClient {
     grenades: HashMap<u32, u32>,
     /// Bullet holes, oldest first, so only the most recent stay.
     decals: VecDeque<u32>,
+    blood: blood::Blood,
     live_fx: Vec<Fx>,
     me: Option<u32>,
     /// Our predicted player.
@@ -234,6 +236,7 @@ impl Default for DustClient {
             rigs: HashMap::new(),
             grenades: HashMap::new(),
             decals: VecDeque::new(),
+            blood: blood::Blood::default(),
             live_fx: Vec::new(),
             me: None,
             pred: PlayerState::default(),
@@ -304,6 +307,7 @@ impl ClientGame for DustClient {
             grenade_material: s.material(Material { color: Color::srgb(0.18, 0.24, 0.12), roughness: 0.7, ..Default::default() }),
         };
         self.build_hud();
+        self.blood.init(&mut self.scene);
         std::mem::take(&mut self.scene.out)
     }
 
@@ -363,6 +367,7 @@ impl ClientGame for DustClient {
             }
             self.died_at = None;
             self.explosion = None;
+            self.blood.clear(&mut self.scene);
         }
         if let Bomb::Exploded(pos) = round.bomb {
             if !matches!(prev.map(|r| r.bomb), Some(Bomb::Exploded(_))) {
@@ -480,6 +485,7 @@ impl ClientGame for DustClient {
         self.bomb_beep();
         self.spawn_fx();
         self.update_fx(f.dt);
+        self.blood.update(&mut self.scene, self.time);
         self.update_hud();
         let lines = self.tracers.iter().map(|&(a, b, ttl, life, color)| (a, b, color.with_alpha(color.0[3] * ttl / life))).collect();
         for t in &mut self.tracers {
@@ -568,9 +574,16 @@ impl DustClient {
         if Some(h.victim) == self.me {
             self.sound(self.sounds.hurt, 0.8);
             self.hurt_at = Some(self.time);
+            self.blood.screen(&mut self.scene, self.time, h.damage);
         } else if let Some(v) = players.iter().find(|p| p.id == h.victim) {
-            let at = v.state.pos + Vec3::Y * if h.headshot { 1.65 } else { 1.1 };
-            self.fx.push(FxKind::Blood(at));
+            // Where they're drawn, not where the snapshot has them, so the blood comes out of the model.
+            let feet = self.rigs.get(&h.victim).and_then(|r| r.last_pos).unwrap_or(v.state.pos);
+            let tall = height(v.state.duck);
+            let wound = feet + Vec3::Y * if h.headshot { tall - 0.15 } else { tall * 0.6 };
+            let shooter = if Some(h.attacker) == self.me { Some(self.pred.pos) } else { players.iter().find(|p| p.id == h.attacker).map(|p| p.state.pos) };
+            let dir = (feet - shooter.unwrap_or(feet - Vec3::X)).with_y(0.0).normalize_or(Vec3::X);
+            self.fx.push(FxKind::Blood(wound));
+            self.blood.hit(&mut self.scene, self.time, wound, feet, dir, h.damage, h.headshot, h.killed);
         }
         if h.killed {
             let side = |id: u32| (self.name(id), self.teams.get(&id).copied());
@@ -906,7 +919,7 @@ impl DustClient {
                     }
                 }
                 FxKind::Blood(at) => {
-                    let blood = fading(&mut self.scene, at, Color::srgba(0.6, 0.02, 0.02, 0.85), 0.08, 0.3, 3.5);
+                    let blood = fading(&mut self.scene, at, Color::srgba(0.6, 0.02, 0.02, 0.9), 0.14, 0.45, 5.0);
                     self.live_fx.push(blood);
                 }
             }

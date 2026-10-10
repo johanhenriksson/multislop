@@ -545,7 +545,6 @@ pub fn trace_world_normal(o: Vec3, d: Vec3) -> (f32, Vec3) {
     if floor < best { (floor, Vec3::Y) } else { (best, normal) }
 }
 
-/// Ray vs vertical capsule standing at `feet`. Returns the hit distance.
 /// Where a ray enters a player's capsule `height` tall standing at `feet`.
 pub fn trace_capsule(o: Vec3, d: Vec3, feet: Vec3, height: f32) -> Option<f32> {
     let a = feet + Vec3::Y * RADIUS;
