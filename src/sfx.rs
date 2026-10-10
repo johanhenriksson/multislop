@@ -34,7 +34,8 @@ pub fn death() -> Vec<u8> {
 pub fn gunshot(weapon: Weapon) -> Vec<u8> {
     let mut rng = 0xC0FF_EE11u32 ^ weapon as u32;
     let mut s = match weapon {
-        Weapon::Knife => return knife(),
+        // A swing for both: the knife slashes, the grenade is thrown.
+        Weapon::Knife | Weapon::He => return knife(),
         // Light, high, short pop with a little slide ping.
         Weapon::Glock => shot(&mut rng, 0.18, 0.6, 240.0, 0.7)
             .mix(tone(0.04, 2600.0, 60.0), 0.0, 0.15)

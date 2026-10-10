@@ -1,6 +1,7 @@
 //! Weapon stats (CS 1.6 values converted to meters and seconds), the buy menu and the economy rules.
 
 use crate::shared::Team;
+use sdk::ability::{Ability, Accuracy, Cost, Delivery, Payload, Trigger};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
@@ -14,6 +15,7 @@ pub enum Weapon {
     Ak47,
     M4a1,
     Awp,
+    He,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -22,175 +24,149 @@ pub enum Slot {
     #[default]
     Secondary,
     Knife,
+    Grenade,
 }
 
+/// A weapon: what using it does (`ability`) plus what this game needs around it.
 pub struct Spec {
     pub name: &'static str,
     pub price: u32,
     /// Only this team can buy it.
     pub team: Option<Team>,
     pub slot: Slot,
-    pub damage: f32,
-    /// Seconds between shots.
-    pub cycle: f32,
-    pub auto: bool,
-    pub mag: u8,
-    pub reserve: u16,
-    pub reload: f32,
-    /// Spread cone half-angle when standing still, radians.
-    pub spread: f32,
-    /// Extra spread at full running speed.
-    pub move_spread: f32,
-    /// View kick per shot, radians.
-    pub recoil: f32,
-    /// Damage multiplier per 12.7 m (500 units) travelled.
-    pub range_mod: f32,
-    /// Fraction of damage that gets through armor.
-    pub armor_pen: f32,
     pub kill_reward: u32,
-    pub range: f32,
     /// Movement speed multiplier while this weapon is in hand.
     pub speed: f32,
+    pub ability: Ability,
 }
 
-const fn gun(name: &'static str, price: u32, team: Option<Team>, slot: Slot) -> Spec {
-    Spec {
-        name,
-        price,
-        team,
-        slot,
-        damage: 0.0,
-        cycle: 0.1,
-        auto: false,
-        mag: 0,
-        reserve: 0,
-        reload: 2.5,
-        spread: 0.01,
-        move_spread: 0.04,
-        recoil: 0.01,
-        range_mod: 0.9,
-        armor_pen: 0.5,
-        kill_reward: 300,
-        range: 200.0,
-        speed: 1.0,
+const ACCURACY: Accuracy = Accuracy { spread: 0.01, moving: 0.04, airborne: 0.12, kick: 0.01 };
+
+const fn gun(name: &'static str, price: u32, team: Option<Team>, slot: Slot, ability: Ability) -> Spec {
+    Spec { name, price, team, slot, kill_reward: 300, speed: 1.0, ability }
+}
+
+/// A hitscan gun firing `damage`, with `range_mod` the damage kept per 12.7 m and `pen` the part that gets through armor.
+#[allow(clippy::too_many_arguments)]
+const fn hitscan(auto: bool, cycle: f32, (mag, reserve, reload): (u8, u16, f32), accuracy: Accuracy, damage: f32, range_mod: f32, pen: f32) -> Ability {
+    Ability {
+        trigger: if auto { Trigger::Auto } else { Trigger::Semi },
+        cost: Cost::Ammo { mag, reserve, reload },
+        cycle,
+        accuracy,
+        delivery: Delivery::Hitscan { range: 200.0, falloff: range_mod },
+        payload: Payload::Damage { amount: damage, armor_pen: pen },
     }
 }
 
 const KNIFE: Spec = Spec {
-    damage: 35.0,
-    cycle: 0.4,
-    auto: true,
-    spread: 0.0,
-    move_spread: 0.0,
-    recoil: 0.0,
-    range_mod: 1.0,
-    armor_pen: 0.85,
     kill_reward: 1500,
-    range: 1.8,
     speed: 1.08,
-    ..gun("Knife", 0, None, Slot::Knife)
+    ..gun(
+        "Knife",
+        0,
+        None,
+        Slot::Knife,
+        Ability {
+            trigger: Trigger::Auto,
+            cost: Cost::Free,
+            cycle: 0.4,
+            accuracy: Accuracy { spread: 0.0, moving: 0.0, kick: 0.0, ..ACCURACY },
+            delivery: Delivery::Melee { reach: 1.8 },
+            payload: Payload::Damage { amount: 35.0, armor_pen: 0.85 },
+        },
+    )
 };
-const GLOCK: Spec = Spec {
-    damage: 25.0,
-    cycle: 0.15,
-    mag: 20,
-    reserve: 120,
-    reload: 2.2,
-    spread: 0.012,
-    move_spread: 0.03,
-    recoil: 0.012,
-    range_mod: 0.75,
-    ..gun("Glock-18", 400, Some(Team::T), Slot::Secondary)
-};
-const USP: Spec = Spec {
-    damage: 34.0,
-    cycle: 0.15,
-    mag: 12,
-    reserve: 100,
-    reload: 2.7,
-    spread: 0.01,
-    move_spread: 0.03,
-    recoil: 0.015,
-    range_mod: 0.79,
-    ..gun("USP", 500, Some(Team::Ct), Slot::Secondary)
-};
-const DEAGLE: Spec = Spec {
-    damage: 54.0,
-    cycle: 0.225,
-    mag: 7,
-    reserve: 35,
-    reload: 2.2,
-    spread: 0.008,
-    move_spread: 0.06,
-    recoil: 0.045,
-    range_mod: 0.81,
-    armor_pen: 0.75,
-    ..gun("Desert Eagle", 650, None, Slot::Secondary)
-};
+const GLOCK: Spec = gun(
+    "Glock-18",
+    400,
+    Some(Team::T),
+    Slot::Secondary,
+    hitscan(false, 0.15, (20, 120, 2.2), Accuracy { spread: 0.012, moving: 0.03, kick: 0.012, ..ACCURACY }, 25.0, 0.75, 0.5),
+);
+const USP: Spec = gun(
+    "USP",
+    500,
+    Some(Team::Ct),
+    Slot::Secondary,
+    hitscan(false, 0.15, (12, 100, 2.7), Accuracy { spread: 0.01, moving: 0.03, kick: 0.015, ..ACCURACY }, 34.0, 0.79, 0.5),
+);
+const DEAGLE: Spec = gun(
+    "Desert Eagle",
+    650,
+    None,
+    Slot::Secondary,
+    hitscan(false, 0.225, (7, 35, 2.2), Accuracy { spread: 0.008, moving: 0.06, kick: 0.045, ..ACCURACY }, 54.0, 0.81, 0.75),
+);
 const MP5: Spec = Spec {
-    damage: 26.0,
-    cycle: 0.075,
-    auto: true,
-    mag: 30,
-    reserve: 120,
-    reload: 2.6,
-    spread: 0.012,
-    move_spread: 0.02,
-    recoil: 0.006,
-    range_mod: 0.84,
-    armor_pen: 0.6,
     kill_reward: 600,
-    ..gun("MP5", 1500, None, Slot::Primary)
+    ..gun(
+        "MP5",
+        1500,
+        None,
+        Slot::Primary,
+        hitscan(true, 0.075, (30, 120, 2.6), Accuracy { spread: 0.012, moving: 0.02, kick: 0.006, ..ACCURACY }, 26.0, 0.84, 0.6),
+    )
 };
 const AK47: Spec = Spec {
-    damage: 36.0,
-    cycle: 0.0955,
-    auto: true,
-    mag: 30,
-    reserve: 90,
-    reload: 2.4,
-    spread: 0.006,
-    move_spread: 0.06,
-    recoil: 0.012,
-    range_mod: 0.98,
-    armor_pen: 0.775,
     speed: 0.88,
-    ..gun("AK-47", 2500, Some(Team::T), Slot::Primary)
+    ..gun(
+        "AK-47",
+        2500,
+        Some(Team::T),
+        Slot::Primary,
+        hitscan(true, 0.0955, (30, 90, 2.4), Accuracy { spread: 0.006, moving: 0.06, kick: 0.012, ..ACCURACY }, 36.0, 0.98, 0.775),
+    )
 };
 const M4A1: Spec = Spec {
-    damage: 33.0,
-    cycle: 0.0875,
-    auto: true,
-    mag: 30,
-    reserve: 90,
-    reload: 3.0,
-    spread: 0.005,
-    move_spread: 0.05,
-    recoil: 0.01,
-    range_mod: 0.97,
-    armor_pen: 0.7,
     speed: 0.92,
-    ..gun("M4A1", 3100, Some(Team::Ct), Slot::Primary)
+    ..gun(
+        "M4A1",
+        3100,
+        Some(Team::Ct),
+        Slot::Primary,
+        hitscan(true, 0.0875, (30, 90, 3.0), Accuracy { spread: 0.005, moving: 0.05, kick: 0.01, ..ACCURACY }, 33.0, 0.97, 0.7),
+    )
 };
 const AWP: Spec = Spec {
-    damage: 115.0,
-    cycle: 1.45,
-    mag: 10,
-    reserve: 30,
-    reload: 3.0,
-    // Unscoped; scoped is AWP_SCOPED_SPREAD.
-    spread: 0.06,
-    move_spread: 0.1,
-    recoil: 0.03,
-    range_mod: 0.99,
-    armor_pen: 0.97,
     kill_reward: 100,
     speed: 0.84,
-    ..gun("AWP", 4750, None, Slot::Primary)
+    // Unscoped spread; scoped is AWP_SCOPED_SPREAD.
+    ..gun(
+        "AWP",
+        4750,
+        None,
+        Slot::Primary,
+        hitscan(false, 1.45, (10, 30, 3.0), Accuracy { spread: 0.06, moving: 0.1, kick: 0.03, ..ACCURACY }, 115.0, 0.99, 0.97),
+    )
 };
+/// Hold fire to wind up, release to throw; harder the longer it was held. CS 1.6 HE damage and radius.
+const HE: Spec = gun(
+    "HE Grenade",
+    300,
+    None,
+    Slot::Grenade,
+    Ability {
+        trigger: Trigger::Charge { full: 0.6 },
+        cost: Cost::Ammo { mag: 1, reserve: 0, reload: 0.0 },
+        cycle: 0.5,
+        accuracy: Accuracy { spread: 0.0, moving: 0.0, airborne: 0.0, kick: 0.0 },
+        delivery: Delivery::Projectile { speed: 17.0, gravity: 20.3, bounce: 0.45, fuse: 1.5 },
+        payload: Payload::Explode { damage: 98.0, radius: 8.9, armor_pen: 0.5 },
+    },
+);
 
-pub const ALL_WEAPONS: [Weapon; 8] =
-    [Weapon::Knife, Weapon::Glock, Weapon::Usp, Weapon::Deagle, Weapon::Mp5, Weapon::Ak47, Weapon::M4a1, Weapon::Awp];
+pub const ALL_WEAPONS: [Weapon; 9] = [
+    Weapon::Knife,
+    Weapon::Glock,
+    Weapon::Usp,
+    Weapon::Deagle,
+    Weapon::Mp5,
+    Weapon::Ak47,
+    Weapon::M4a1,
+    Weapon::Awp,
+    Weapon::He,
+];
 
 pub const AWP_SCOPED_SPREAD: f32 = 0.0005;
 /// Moving while scoped in is slower still.
@@ -209,7 +185,12 @@ impl Weapon {
             Weapon::Ak47 => &AK47,
             Weapon::M4a1 => &M4A1,
             Weapon::Awp => &AWP,
+            Weapon::He => &HE,
         }
+    }
+
+    pub fn ability(self) -> &'static Ability {
+        &self.spec().ability
     }
 
     pub fn default_pistol(team: Team) -> Weapon {
@@ -240,9 +221,10 @@ pub enum Buy {
 }
 
 /// The buy menu, numbered from 1. The rifle entry depends on the team.
-pub fn buy_menu(team: Team) -> [Buy; 5] {
+pub fn buy_menu(team: Team) -> [Buy; 6] {
     let rifle = if team == Team::T { Weapon::Ak47 } else { Weapon::M4a1 };
-    [Buy::Weapon(Weapon::Deagle), Buy::Weapon(Weapon::Mp5), Buy::Weapon(rifle), Buy::Weapon(Weapon::Awp), Buy::Armor]
+    let guns = [Weapon::Deagle, Weapon::Mp5, rifle, Weapon::Awp].map(Buy::Weapon);
+    [guns[0], guns[1], guns[2], guns[3], Buy::Armor, Buy::Weapon(Weapon::He)]
 }
 
 impl Buy {

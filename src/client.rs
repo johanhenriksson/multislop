@@ -98,7 +98,9 @@ struct Game {
     next_beep: f64,
     last_beep: f64,
     /// Where and when (clock) the bomb went off, for the flash.
-    explosion: Option<(Vec3, f64)>,
+    explosion: Option<(Vec3, f64, f32)>,
+    /// Grenades in flight, interpolated: (entity id, position).
+    grenades: Vec<(u32, Vec3)>,
     /// The teammate we watch while dead: id, interpolated eye position and view.
     spectate: Option<(u32, Vec3, f32, f32)>,
     /// The player under the crosshair, if any.
@@ -359,7 +361,7 @@ pub fn run(server: SocketAddr, lag_ms: u64, jitter_ms: u64, interp_ms: u64) {
                 grab_cursor,
                 look,
                 controls,
-                (render_remotes, render_self, viewmodel, render_bomb, draw_tracers, bomb_beep, play_sounds, spawn_fx, update_fx),
+                (render_remotes, render_grenades, render_self, viewmodel, render_bomb, draw_tracers, bomb_beep, play_sounds, spawn_fx, update_fx),
                 (hud, scoreboard, ammo_hud, buy_menu_hud, kill_feed, death_fade, hurt_flash, crosshair, scope, score_panel, announce, chat, radio_menu, target_id),
             )
                 .chain(),
@@ -627,6 +629,7 @@ fn setup(
             row(2),
             row(3),
             row(4),
+            row(5),
             (Text::new("B / Esc  close"), TextColor(Color::srgb(0.55, 0.55, 0.55)), TextFont { font_size: FontSize::Px(13.0), ..default() }),
         ],
     ));
@@ -645,7 +648,7 @@ fn controls(keys: Res<ButtonInput<KeyCode>>, mouse: Res<ButtonInput<MouseButton>
     if !can_buy || keys.just_pressed(KeyCode::Escape) {
         g.menu = false;
     }
-    let digits = [KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4, KeyCode::Digit5];
+    let digits = [KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4, KeyCode::Digit5, KeyCode::Digit6];
     if keys.just_pressed(KeyCode::KeyZ) && g.hp > 0 {
         (g.radio_menu, g.menu) = (!g.radio_menu, false);
     }
@@ -657,12 +660,12 @@ fn controls(keys: Res<ButtonInput<KeyCode>>, mouse: Res<ButtonInput<MouseButton>
             (g.want_radio, g.radio_menu) = (n as u8 + 1, false);
         } else if g.menu {
             (g.want_buy, g.menu) = (n as u8 + 1, false);
-        } else if n < 3 {
+        } else if n < 4 {
             g.want_slot = n as u8 + 1;
         }
     }
     if keys.just_pressed(KeyCode::KeyQ) {
-        g.want_slot = 4;
+        g.want_slot = 5;
     }
     if keys.just_pressed(KeyCode::KeyR) {
         g.want_reload = true;
@@ -670,7 +673,7 @@ fn controls(keys: Res<ButtonInput<KeyCode>>, mouse: Res<ButtonInput<MouseButton>
     if mouse.just_pressed(MouseButton::Right) && g.pred.weapon() == Weapon::Awp {
         g.zoom = !g.zoom;
     }
-    if g.pred.weapon() != Weapon::Awp || g.pred.reloading > 0 {
+    if g.pred.weapon() != Weapon::Awp || g.pred.hands.reloading > 0 {
         g.zoom = false;
     }
 }
@@ -738,21 +741,25 @@ fn net_tick(
         ..default()
     };
 
-    let was_reloading = g.pred.reloading > 0;
+    let was_reloading = g.pred.hands.reloading > 0;
     let events = g.netcode.input(encode(&inp), &mut predict);
     sync_pred(&mut g);
     if g.netcode.me.is_some() && g.hp > 0 {
         let pred = g.pred;
-        if let Some((weapon, d)) = events.and_then(|e| decode::<Option<(Weapon, Vec3)>>(&e)).flatten() {
-            let o = eye(&pred);
+        let fired = events.and_then(|e| decode::<Option<Fired>>(&e)).flatten();
+        if let Some(Fired { weapon, .. }) = fired {
             g.sounds.push((Sound::Gun(weapon), 0.6));
             g.kick = 1.0;
+        }
+        // Thrown things show up as entities from the server; shots are drawn right away.
+        if let Some(Fired { weapon, dir: d, .. }) = fired.filter(|f| f.weapon.ability().range() > 0.0) {
+            let o = eye(&pred);
             let (t, normal) = trace_world_normal(o, d);
             add_tracer(&mut g, weapon, muzzle(o, d, weapon), o + d * t);
             if weapon != Weapon::Knife {
                 g.fx.push(FxKind::Muzzle(muzzle(o, d, weapon)));
             }
-            if t < weapon.spec().range.min(RANGE - 1.0) {
+            if t < weapon.ability().range().min(RANGE - 1.0) {
                 g.fx.push(FxKind::Impact(o + d * t, normal));
                 g.sounds.push((Sound::Impact, 0.25));
             }
@@ -760,7 +767,7 @@ fn net_tick(
                 g.zoom = false;
             }
         }
-        if pred.reloading > 0 && !was_reloading {
+        if pred.hands.reloading > 0 && !was_reloading {
             g.sounds.push((Sound::Reload, 0.5));
         }
         // Footsteps when running; walking (Shift) is silent.
@@ -800,6 +807,11 @@ fn on_snapshot(g: &mut Game, snap: Snapshot) {
         if g.names.get(&p.id) != Some(&p.name) {
             g.names.insert(p.id, p.name.clone());
         }
+    }
+    for (pos, radius) in events.iter().filter_map(|e| if let GameEvent::Explosion { pos, radius } = *e { Some((pos, radius)) } else { None }) {
+        g.explosion = Some((pos, clock(), radius));
+        let volume = 1.0 / (1.0 + pos.distance(g.pred.pos) / 30.0);
+        g.sounds.push((Sound::Explosion, volume));
     }
     for r in events.iter().filter_map(|e| if let GameEvent::Radio(r) = e { Some(r) } else { None }) {
         g.sounds.push((Sound::Radio(r.call), 0.75));
@@ -865,7 +877,7 @@ fn on_snapshot(g: &mut Game, snap: Snapshot) {
     }
     if let Bomb::Exploded(pos) = round.bomb {
         if !matches!(prev.map(|r| r.bomb), Some(Bomb::Exploded(_))) {
-            g.explosion = Some((pos, clock()));
+            g.explosion = Some((pos, clock(), BOMB_RADIUS));
             let volume = 1.0 / (1.0 + pos.distance(g.pred.pos) / 30.0);
             g.sounds.push((Sound::Explosion, volume));
         }
@@ -942,6 +954,11 @@ fn render_remotes(
     };
     let (mut spectate, mut carrier_pos) = (None, None);
     let mut seen = HashMap::new();
+    g.grenades = views
+        .iter()
+        .filter(|v| matches!(decode(&v.entity.data), Some(EntityData::Grenade(_))))
+        .map(|v| (v.entity.id, v.entity.pos))
+        .collect();
     for v in &views {
         let Some(p) = NetPlayer::from_entity(&v.entity) else { continue };
         let (pos, yaw, pitch) = (p.state.pos, p.state.yaw, p.state.pitch);
@@ -1111,6 +1128,30 @@ fn spectating(g: &Game) -> bool {
     g.netcode.me.is_some() && g.hp <= 0 && g.died_at.is_none_or(|t| t.elapsed().as_secs_f32() > 1.6)
 }
 
+#[derive(Component)]
+struct GrenadeModel(u32);
+
+fn render_grenades(
+    mut commands: Commands,
+    mut q: Query<(Entity, &GrenadeModel, &mut Transform)>,
+    g: Res<Game>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut mats: ResMut<Assets<StandardMaterial>>,
+) {
+    let mut left: HashMap<u32, Vec3> = g.grenades.iter().copied().collect();
+    for (e, model, mut t) in &mut q {
+        match left.remove(&model.0) {
+            Some(pos) => t.translation = pos,
+            None => commands.entity(e).despawn(),
+        }
+    }
+    for (id, pos) in left {
+        let mesh = meshes.add(Sphere::new(0.07));
+        let mat = mats.add(StandardMaterial { base_color: Color::srgb(0.18, 0.24, 0.12), perceptual_roughness: 0.7, ..default() });
+        commands.spawn((GrenadeModel(id), Mesh3d(mesh), MeshMaterial3d(mat), Transform::from_translation(pos)));
+    }
+}
+
 fn render_bomb(
     mut bomb: Single<(&mut Transform, &mut Visibility), With<BombModel>>,
     led: Single<(&BombLed, &mut PointLight)>,
@@ -1135,11 +1176,11 @@ fn render_bomb(
     };
     **vis = if at.is_some() { Visibility::Inherited } else { Visibility::Hidden };
     t.translation = at.unwrap_or_default();
-    if let Some((pos, start)) = g.explosion {
+    if let Some((pos, start, radius)) = g.explosion {
         let age = (clock() - start) as f32;
         if age < 1.0 {
             let color = Color::srgba(1.0, 0.6, 0.1, 1.0 - age);
-            gizmos.sphere(Isometry3d::from_translation(pos), BOMB_RADIUS * age.sqrt(), color);
+            gizmos.sphere(Isometry3d::from_translation(pos), radius * age.sqrt(), color);
         }
     }
 }
@@ -1231,10 +1272,10 @@ fn crosshair_line(dir: Vec2) -> impl Bundle {
 /// CS-style dynamic crosshair: the four lines spread with movement, jumping and recoil, like the real spread.
 /// Grayed out while reloading or drawing, so a held trigger firing late doesn't read as lag. Hidden when scoped.
 fn crosshair(mut q: Query<(&Crosshair, &mut Node, &mut BackgroundColor, &mut Visibility)>, g: Res<Game>) {
-    let busy = g.pred.reloading > 0 || g.pred.fire_cd as f32 > g.pred.weapon().spec().cycle * TICK_HZ as f32;
+    let busy = g.pred.hands.reloading > 0 || g.pred.hands.cooldown as f32 > g.pred.weapon().ability().cycle * TICK_HZ as f32;
     let speed = (g.pred.vel.with_y(0.0).length() / 6.35).min(1.0);
     let air = if g.pred.on_ground { 0.0 } else { 1.0 };
-    let gap = 4.0 + 18.0 * speed + 14.0 * air + 3.0 * g.pred.recoil.min(6.0);
+    let gap = 4.0 + 18.0 * speed + 14.0 * air + 3.0 * g.pred.hands.bloom.min(6.0);
     for (line, mut node, mut color, mut vis) in &mut q {
         // Lines are 9 px long and 2 px thick; offset each from the center by the gap.
         let at = line.0 * (gap + 4.5);
@@ -1290,7 +1331,7 @@ fn viewmodel(
         (anim.held, anim.drawn_at) = (Some(held), clock());
     }
     let draw = (1.0 - ((clock() - anim.drawn_at) as f32 / DRAW_SECS).min(1.0)).powi(2);
-    let reload = g.pred.reloading as f32 / (held.spec().reload * TICK_HZ as f32).max(1.0);
+    let reload = g.pred.hands.reloading as f32 / (held.ability().reload_secs() * TICK_HZ as f32).max(1.0);
     let dip = (reload * std::f32::consts::PI).sin();
 
     let speed = if g.pred.on_ground { (g.pred.vel.with_y(0.0).length() / 6.35).min(1.0) } else { 0.0 };

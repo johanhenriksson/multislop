@@ -6,6 +6,7 @@ use crate::map::MAP;
 use crate::shared::*;
 use crate::weapons::*;
 use glam::Vec3;
+use sdk::ability::{Delivery, Payload, step_projectile};
 use sdk::{Entity, Frame, History, ServerGame, log};
 use std::collections::BTreeMap;
 
@@ -86,6 +87,7 @@ pub struct Dust {
     shots: Vec<Shot>,
     hits: Vec<Hit>,
     radio: Vec<RadioCall>,
+    grenades: Vec<Grenade>,
 }
 
 impl Dust {
@@ -99,6 +101,7 @@ impl Dust {
             shots: Vec::new(),
             hits: Vec::new(),
             radio: Vec::new(),
+            grenades: Vec::new(),
         }
     }
 }
@@ -140,15 +143,30 @@ impl ServerGame for Dust {
 
     fn tick(&mut self) -> Frame {
         balance_bots(&mut self.m, &mut self.players, &mut self.next_id);
-        run_inputs(&self.m, &mut self.players, &self.history, self.tick, &mut self.shots, &mut self.hits, &mut self.radio);
+        let mut throws = Vec::new();
+        run_inputs(&self.m, &mut self.players, &self.history, self.tick, &mut self.shots, &mut self.hits, &mut self.radio, &mut throws);
+        for mut g in throws {
+            (g.id, self.next_id) = (self.next_id, self.next_id + 1);
+            self.grenades.push(g);
+        }
+        let mut booms = Vec::new();
+        update_grenades(&mut self.grenades, &mut self.players, self.tick, &mut self.hits, &mut booms);
         self.tick += 1;
         update_match(&mut self.m, &mut self.players, self.tick);
-        let entities = entities(&self.players);
+        let mut entities = entities(&self.players);
         self.history.record(self.tick, &entities);
+        entities.extend(self.grenades.iter().map(|g| Entity {
+            id: g.id,
+            pos: g.pos,
+            vel: g.vel,
+            data: encode(&EntityData::Grenade(g.weapon)),
+            ..Default::default()
+        }));
 
         let everyone = |e: Event| sdk::Event { to: None, data: encode(&e) };
         let mut events: Vec<sdk::Event> = self.shots.drain(..).map(|s| everyone(Event::Shot(s))).collect();
         events.extend(self.hits.drain(..).map(|h| everyone(Event::Hit(h))));
+        events.extend(booms.into_iter().map(|(pos, radius)| everyone(Event::Explosion { pos, radius })));
         for r in self.radio.drain(..) {
             let Some(team) = self.players.get(&r.from).map(|c| c.team) else { continue };
             let to = self.players.values().filter(|c| c.team == team).map(|c| c.id).collect();
@@ -189,6 +207,7 @@ fn run_inputs(
     shots: &mut Vec<Shot>,
     hits: &mut Vec<Hit>,
     radio: &mut Vec<RadioCall>,
+    throws: &mut Vec<Grenade>,
 ) {
     let seen: Vec<Seen> =
         players.values().map(|c| Seen { id: c.id, team: c.team, pos: c.state.pos, alive: c.hp > 0 }).collect();
@@ -226,12 +245,16 @@ fn run_inputs(
                     c.radio_quiet_until = tick + ticks(2.0);
                 }
             }
-            if let Some((weapon, dir)) = step_player(&mut c.state, &inp) {
-                let (shooter, from) = (c.id, eye(&c.state));
-                let (to, hit) = fire(players, history, tick, shooter, weapon, (from, dir), inp.view_tick);
-                shots.push(Shot { shooter, weapon, from, to });
-                hits.extend(hit);
+            let Some(Fired { weapon, dir, strength }) = step_player(&mut c.state, &inp) else { continue };
+            let (shooter, from) = (c.id, eye(&c.state));
+            if let Delivery::Projectile { speed, fuse, .. } = weapon.ability().delivery {
+                let vel = dir * speed * strength + c.state.vel;
+                throws.push(Grenade { id: 0, owner: shooter, weapon, pos: from, vel, fuse: tick + ticks(fuse) });
+                continue;
             }
+            let (to, hit) = fire(players, history, tick, shooter, weapon, (from, dir), inp.view_tick);
+            shots.push(Shot { shooter, weapon, from, to });
+            hits.extend(hit);
         }
     }
 }
@@ -317,12 +340,16 @@ fn start_round(m: &mut Match, players: &mut Players, tick: u32) {
     let mut counts = [0, 0];
     for c in by_id {
         let n = &mut counts[c.team as usize];
-        let kept = (c.hp > 0 && m.round.number > 1).then_some((c.state.primary, c.state.secondary));
+        let s = &c.state;
+        let kept = (c.hp > 0 && m.round.number > 1).then_some((s.primary, s.secondary, s.grenade, s.ammo[2]));
         c.state = spawn_state(c.team, *n);
         c.teleport = c.teleport.wrapping_add(1);
         match kept {
             // Survivors keep their guns, with ammo topped up.
-            Some((primary, secondary)) => c.state.loadout(primary, secondary),
+            Some((primary, secondary, grenade, count)) => {
+                c.state.loadout(primary, secondary);
+                (c.state.grenade, c.state.ammo[2]) = (grenade, count);
+            }
             None => c.armor = 0,
         }
         if m.round.number == 1 {
@@ -471,8 +498,8 @@ fn player_mut(players: &mut Players, id: u32) -> &mut Player {
     players.values_mut().find(|c| c.id == id).unwrap()
 }
 
-/// Lag-compensated hitscan: rewinds everyone else to where the shooter saw them and applies damage by hit zone,
-/// distance and armor. Returns where the shot ended and the damage dealt, if any.
+/// Lag-compensated hitscan (and melee, a short one): rewinds everyone else to where the shooter saw them and applies
+/// damage by hit zone, distance and armor. Returns where the shot ended and the damage dealt, if any.
 fn fire(
     players: &mut Players,
     history: &History,
@@ -482,9 +509,9 @@ fn fire(
     (o, d): (Vec3, Vec3),
     view_tick: f32,
 ) -> (Vec3, Option<Hit>) {
-    let spec = weapon.spec();
+    let ability = weapon.ability();
     let view_tick = view_tick.clamp(tick as f32 - MAX_REWIND_TICKS, tick as f32);
-    let wall = trace_world(o, d).min(spec.range);
+    let wall = trace_world(o, d).min(ability.range());
     let mut best: Option<(u32, f32, Vec3)> = None;
     let team = players.values().find(|c| c.id == shooter).map(|c| c.team);
     for c in players.values() {
@@ -505,10 +532,21 @@ fn fire(
     let height = (o + d * t).y - feet.y;
     let (headshot, legs) = (height > HEAD_HEIGHT, height < LEGS_HEIGHT);
     let zone = if headshot { 4.0 } else if legs { 0.75 } else { 1.0 };
-    let mut damage = spec.damage * spec.range_mod.powf(t / 12.7) * zone;
+    let falloff = match ability.delivery {
+        Delivery::Hitscan { falloff, .. } => falloff.powf(t / 12.7),
+        _ => 1.0,
+    };
+    let Payload::Damage { amount, armor_pen } = ability.payload else { return (o + d * t, None) };
+    let hit = hurt(players, shooter, victim, weapon, amount * falloff * zone, armor_pen, (headshot, legs));
+    (o + d * t, Some(hit))
+}
+
+/// Applies `damage` (before armor) to `victim`, crediting `attacker` with the kill.
+fn hurt(players: &mut Players, attacker: u32, victim: u32, weapon: Weapon, damage: f32, armor_pen: f32, (headshot, legs): (bool, bool)) -> Hit {
     let v = player_mut(players, victim);
+    let mut damage = damage;
     if v.armor > 0 && !legs {
-        let through = damage * spec.armor_pen;
+        let through = damage * armor_pen;
         v.armor = v.armor.saturating_sub(((damage - through) * 0.5) as u8);
         damage = through;
     }
@@ -518,12 +556,54 @@ fn fire(
     if killed {
         v.hp = 0;
         v.deaths += 1;
-        let killer = player_mut(players, shooter);
-        killer.kills += 1;
-        killer.money = (killer.money + spec.kill_reward).min(MAX_MONEY);
+        if let Some(killer) = players.get_mut(&attacker) {
+            killer.kills += 1;
+            killer.money = (killer.money + weapon.spec().kill_reward).min(MAX_MONEY);
+        }
     }
-    let hit = Hit { attacker: shooter, victim, weapon, damage: damage.min(255) as u8, headshot, killed };
-    (o + d * t, Some(hit))
+    Hit { attacker, victim, weapon, damage: damage.min(255) as u8, headshot, killed }
+}
+
+/// A thrown grenade on its way.
+struct Grenade {
+    id: u32,
+    owner: u32,
+    weapon: Weapon,
+    pos: Vec3,
+    vel: Vec3,
+    /// Goes off at this tick.
+    fuse: u32,
+}
+
+/// Moves grenades, and sets off those whose fuse has burnt: damage to enemies in the open within the radius.
+/// `booms` gets (where, radius) of each explosion.
+fn update_grenades(grenades: &mut Vec<Grenade>, players: &mut Players, tick: u32, hits: &mut Vec<Hit>, booms: &mut Vec<(Vec3, f32)>) {
+    for g in grenades.iter_mut() {
+        if let Delivery::Projectile { gravity, bounce, .. } = g.weapon.ability().delivery {
+            step_projectile(&mut g.pos, &mut g.vel, gravity, bounce, trace_world_normal);
+        }
+    }
+    let (live, done): (Vec<Grenade>, Vec<Grenade>) = std::mem::take(grenades).into_iter().partition(|g| tick < g.fuse);
+    *grenades = live;
+    for g in done {
+        let Payload::Explode { damage, radius, armor_pen } = g.weapon.ability().payload else { continue };
+        booms.push((g.pos, radius));
+        let team = players.get(&g.owner).map(|c| c.team);
+        let center = g.pos + Vec3::Y * 0.1;
+        let targets: Vec<(u32, f32)> = players
+            .values()
+            .filter(|c| c.hp > 0 && Some(c.team) != team)
+            .filter_map(|c| {
+                let body = c.state.pos + Vec3::Y * 0.9;
+                let dist = center.distance(body);
+                let open = trace_world(center, (body - center).normalize_or_zero()) >= dist;
+                (dist < radius && open).then_some((c.id, damage * (1.0 - dist / radius)))
+            })
+            .collect();
+        for (victim, dmg) in targets {
+            hits.push(hurt(players, g.owner, victim, g.weapon, dmg, armor_pen, (false, false)));
+        }
+    }
 }
 
 /// Spends money on a buy menu item if it's buy time and the player is near their spawn.
@@ -538,6 +618,13 @@ fn try_buy(m: &Match, c: &mut Player, item: u8, tick: u32) {
         Buy::Armor if c.armor >= 100 => return,
         Buy::Armor => c.armor = 100,
         Buy::Weapon(w) if w.spec().team.is_some_and(|t| t != c.team) => return,
+        Buy::Weapon(w) if w.spec().slot == Slot::Grenade => {
+            if c.state.grenade.is_some() {
+                return;
+            }
+            c.state.grenade = Some(w);
+            c.state.ammo[2] = w.ability().full_ammo().unwrap_or((1, 0));
+        }
         Buy::Weapon(w) if w.spec().slot == Slot::Primary => {
             let secondary = c.state.secondary;
             let ammo = c.state.ammo[1];
@@ -680,7 +767,7 @@ mod tests {
         // FPS16_ROUNDS plays a longer match, for tuning bots without the noise of 10 rounds.
         let rounds = std::env::var("FPS16_ROUNDS").ok().and_then(|r| r.parse().ok()).unwrap_or(10);
         while m.round.number <= rounds && tick < ticks(rounds as f32 * 3.0 * 60.0) {
-            run_inputs(&m, &mut players, &history, tick, &mut shots, &mut hits, &mut radio);
+            run_inputs(&m, &mut players, &history, tick, &mut shots, &mut hits, &mut radio, &mut vec![]);
             tick += 1;
             update_match(&mut m, &mut players, tick);
             history.record(tick, &entities(&players));
@@ -781,6 +868,32 @@ mod tests {
         assert_eq!(player_mut(&mut players, 2).money, START_MONEY + WIN_REWARD);
         end_round(&mut m, &mut players, tick, Team::Ct, "test");
         assert_eq!(player_mut(&mut players, 1).money, 5000 + 2 * LOSS_REWARD + LOSS_BONUS, "loss streak bonus");
+    }
+
+    /// Player 1 winds up an HE grenade and lobs it at player 2, 4 m east in the open T spawn yard.
+    #[test]
+    fn he_grenade_hurts_enemies_nearby() {
+        let (m, mut players, mut tick) = live();
+        let start = MAP.spawns(Team::T)[0];
+        let t = player_mut(&mut players, 1);
+        (t.state.pos, t.state.grenade, t.state.ammo[2]) = (start, Some(Weapon::He), (1, 0));
+        player_mut(&mut players, 2).state.pos = start + Vec3::X * 4.0;
+        let aim = Input { yaw: -std::f32::consts::FRAC_PI_2, pitch: -0.3, ..Default::default() };
+        let script = std::iter::once(Input { slot: 4, ..aim })
+            .chain(std::iter::repeat_n(aim, ticks(DRAW_SECS + 0.1) as usize))
+            .chain(std::iter::repeat_n(Input { fire: true, ..aim }, 10))
+            .chain(std::iter::repeat_n(aim, ticks(2.0) as usize));
+        let (history, mut grenades, mut hits, mut booms) = (History::new(0), vec![], vec![], vec![]);
+        for inp in script {
+            player_mut(&mut players, 1).inputs.push(inp);
+            run_inputs(&m, &mut players, &history, tick, &mut vec![], &mut hits, &mut vec![], &mut grenades);
+            update_grenades(&mut grenades, &mut players, tick, &mut hits, &mut booms);
+            tick += 1;
+        }
+        assert_eq!(booms.len(), 1, "one explosion");
+        assert!(hits.iter().any(|h| h.victim == 2 && h.weapon == Weapon::He && h.damage > 20), "{hits:?}");
+        let t = player_mut(&mut players, 1);
+        assert_eq!((t.state.grenade, t.state.slot), (None, Slot::Secondary), "back to the pistol");
     }
 
     #[test]

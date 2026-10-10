@@ -4,6 +4,8 @@
 //! The wasm ABI is a single shared byte buffer: the host asks for `fps16_buf(len)`, writes its argument there and
 //! calls the export with the length; exports that return bytes leave them in the buffer and return `ptr << 32 | len`.
 
+pub mod ability;
+
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;

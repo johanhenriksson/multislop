@@ -24,8 +24,11 @@ Deadline: playable before 00:00. One weapon, one simple map.
 
 ## Weapons and economy (`src/weapons.rs`, CS 1.6 stats)
 - Knife (always), Glock (T) / USP (CT) free, Deagle $650, MP5 $1500, AK-47 (T) $2500 / M4A1 (CT) $3100, AWP $4750
-  (right-click scope), Kevlar+Helmet $1000. Buy with B then 1-5 during freeze + 20 s, within 15 m of your spawn.
-- Slots: 1 primary, 2 pistol, 3 knife, Q last; R reload (auto when empty), draw delay on switch, semi-auto needs a
+  (right-click scope), Kevlar+Helmet $1000, HE grenade $300. Buy with B then 1-6 during freeze + 20 s, within 15 m
+  of your spawn.
+- HE grenade: hold fire to wind up (harder throw the longer, up to 0.6 s), release to throw; it bounces and goes off
+  after 1.5 s, up to 98 damage to enemies in the open within 8.9 m. Survivors keep it.
+- Slots: 1 primary, 2 pistol, 3 knife, 4 grenade, Q last; R reload (auto when empty), draw delay on switch, semi-auto needs a
   click per shot. Mag + reserve ammo, refilled at round start.
 - 100 HP. Damage by zone (head x4, legs x0.75), falls off with distance, armor absorbs per weapon penetration.
 - Recoil kicks the view (bullets follow it, so pull down); spread grows with movement, air and recoil. Spread is
@@ -81,6 +84,9 @@ Deadline: playable before 00:00. One weapon, one simple map.
   through one shared byte buffer, with `log` as the only import. A game's world is `Entity`s (id, pos, vel, yaw,
   pitch, a `teleport` counter, opaque data) plus an opaque state blob and audience-addressed events; each tick returns
   them as a `Frame`. `History` is the lag compensation rewind games use with the `view_tick` the host passes in.
+  `ability` describes anything a player uses as data (trigger, cost, cycle, accuracy, delivery, payload) and runs
+  the predicted part (`Hands`: cooldown, reload, bloom, charge, aim); delivery and payload are resolved by the game.
+  Each dust weapon is a `Spec` (price, team, slot, kill reward, move speed) around an `Ability`.
 - Root crate: the host. Networking (`src/net.rs` envelope, `src/server.rs` transport, input queues, link stats),
   `src/netclient.rs` (clock sync, input stamping and redundancy, prediction/reconciliation through the game's
   `predict` step, entity interpolation, net_graph stats), wasmtime loader (`src/wasm.rs`: memory cap, 1 s per call

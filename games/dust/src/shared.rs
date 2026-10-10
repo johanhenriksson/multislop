@@ -1,6 +1,7 @@
 use glam::{EulerRot, Quat, Vec3};
 use crate::map::MAP;
 use crate::weapons::{AWP_SCOPED_SPREAD, DRAW_SECS, SCOPED_SPEED, Slot, Weapon};
+use sdk::ability::Hands;
 use serde::{Deserialize, Serialize};
 
 pub use sdk::{TICK_HZ, decode, encode};
@@ -105,7 +106,7 @@ pub struct Input {
     pub fire: bool,
     /// E: plant or defuse.
     pub use_key: bool,
-    /// Weapon switch request: 0 none, 1 primary, 2 secondary, 3 knife, 4 last used.
+    /// Weapon switch request: 0 none, 1 primary, 2 secondary, 3 knife, 4 grenade, 5 last used.
     pub slot: u8,
     pub reload: bool,
     /// Shift: walk slowly and silently.
@@ -136,18 +137,13 @@ pub struct PlayerState {
     pub on_ground: bool,
     pub primary: Option<Weapon>,
     pub secondary: Weapon,
+    pub grenade: Option<Weapon>,
     pub slot: Slot,
     pub last_slot: Slot,
-    /// (magazine, reserve) for primary and secondary.
-    pub ammo: [(u8, u16); 2],
-    /// Ticks until the current weapon can fire again (also covers drawing it).
-    pub fire_cd: u16,
-    /// Ticks left reloading, 0 when not.
-    pub reloading: u16,
-    /// Grows per shot and recovers over time; drives view kick and spread.
-    pub recoil: f32,
-    /// Fire was held last tick: semi-automatic weapons need a fresh press per shot.
-    pub trigger: bool,
+    /// (magazine, reserve) for primary, secondary and grenade (the count, no reserve).
+    pub ammo: [(u8, u16); 3],
+    /// Cooldown, reload, bloom and trigger state of the weapon in hand.
+    pub hands: Hands,
     /// Freeze time: can look around but not move or shoot. Part of the state so prediction agrees with the server.
     pub frozen: bool,
 }
@@ -174,6 +170,8 @@ pub struct NetPlayer {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum EntityData {
     Player(NetPlayer),
+    /// A thrown grenade.
+    Grenade(Weapon),
 }
 
 impl NetPlayer {
@@ -184,7 +182,7 @@ impl NetPlayer {
     }
 
     pub fn from_entity(e: &Entity) -> Option<NetPlayer> {
-        let EntityData::Player(mut p) = decode(&e.data)?;
+        let Some(EntityData::Player(mut p)) = decode(&e.data) else { return None };
         p.id = e.id;
         (p.state.pos, p.state.vel, p.state.yaw, p.state.pitch) = (e.pos, e.vel, e.yaw, e.pitch);
         Some(p)
@@ -199,9 +197,10 @@ pub enum Event {
     Hit(Hit),
     /// Sent to the caller's team only.
     Radio(RadioCall),
+    Explosion { pos: Vec3, radius: f32 },
 }
 
-/// Client-side prediction of our own player: one input on top of `me`. Returns the shot it fired, if any, encoded.
+/// Client-side prediction of our own player: one input on top of `me`. Returns the `Option<Fired>`, encoded.
 pub fn predict(me: &mut Entity, input: &[u8], seq: u32) -> Vec<u8> {
     let mut shot = None;
     if let (Some(mut p), Some(inp)) = (NetPlayer::from_entity(me), decode::<Input>(input)) {
@@ -281,6 +280,16 @@ impl PlayerState {
             Slot::Primary => self.primary.unwrap_or(self.secondary),
             Slot::Secondary => self.secondary,
             Slot::Knife => Weapon::Knife,
+            Slot::Grenade => self.grenade.unwrap_or(self.secondary),
+        }
+    }
+
+    /// Something is in this slot.
+    pub fn has(&self, slot: Slot) -> bool {
+        match slot {
+            Slot::Primary => self.primary.is_some(),
+            Slot::Grenade => self.grenade.is_some(),
+            Slot::Secondary | Slot::Knife => true,
         }
     }
 
@@ -289,6 +298,7 @@ impl PlayerState {
         match self.slot {
             Slot::Primary => Some(&mut self.ammo[0]),
             Slot::Secondary => Some(&mut self.ammo[1]),
+            Slot::Grenade => Some(&mut self.ammo[2]),
             Slot::Knife => None,
         }
     }
@@ -297,105 +307,67 @@ impl PlayerState {
         self.clone().ammo_mut().copied()
     }
 
-    /// A fresh loadout: just the team pistol, full ammo.
+    /// Fresh guns with full ammo. Grenades are kept.
     pub fn loadout(&mut self, primary: Option<Weapon>, secondary: Weapon) {
         (self.primary, self.secondary) = (primary, secondary);
-        self.ammo = [primary.map_or((0, 0), |w| (w.spec().mag, w.spec().reserve)), (secondary.spec().mag, secondary.spec().reserve)];
+        let full = |w: Weapon| w.ability().full_ammo().unwrap_or((0, 0));
+        (self.ammo[0], self.ammo[1]) = (primary.map_or((0, 0), full), full(secondary));
         self.slot = if primary.is_some() { Slot::Primary } else { Slot::Secondary };
-        (self.fire_cd, self.reloading, self.recoil) = (0, 0, 0.0);
+        self.hands = Hands::default();
     }
-}
-
-fn ticks(secs: f32) -> u16 {
-    (secs * TICK_HZ as f32).round() as u16
 }
 
 /// View kick from recoil as (yaw, pitch) offsets. Bullets follow it, and the camera shows it, so the crosshair stays
 /// where the next bullet goes and you have to pull down to hold a spray on target.
 pub fn punch(s: &PlayerState) -> (f32, f32) {
-    let kick = s.weapon().spec().recoil;
-    let up = s.recoil.min(10.0) * kick;
-    let side = (s.recoil * 0.9).sin() * kick * 0.6 * (s.recoil / 3.0).min(1.0);
-    (side, up)
+    s.hands.punch(s.weapon().ability())
 }
 
-/// Deterministic per-shot random in the unit disk, so the client's predicted bullets match the server's.
-fn spread_offset(seq: u32) -> (f32, f32) {
-    let mut x = seq.wrapping_mul(0x9E37_79B9) ^ 0x85EB_CA6B;
-    let mut next = || {
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
-        x as f32 / u32::MAX as f32
-    };
-    let (r, a) = (next().sqrt(), next() * std::f32::consts::TAU);
-    (r * a.cos(), r * a.sin())
+/// A use that went off this tick: which weapon, which way, and how hard (thrown ones).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct Fired {
+    pub weapon: Weapon,
+    pub dir: Vec3,
+    pub strength: f32,
 }
 
-/// Switching, reloading and firing. Returns the weapon and bullet direction when a shot goes off.
-fn weapon_tick(s: &mut PlayerState, inp: &Input) -> Option<(Weapon, Vec3)> {
+/// Switching, reloading and firing. Returns the use that went off, if any.
+fn weapon_tick(s: &mut PlayerState, inp: &Input) -> Option<Fired> {
     let want = match inp.slot {
         1 => Some(Slot::Primary),
         2 => Some(Slot::Secondary),
         3 => Some(Slot::Knife),
-        4 => Some(s.last_slot),
+        4 => Some(Slot::Grenade),
+        5 => Some(s.last_slot),
         _ => None,
     };
-    if let Some(slot) = want.filter(|&w| w != s.slot && (w != Slot::Primary || s.primary.is_some())) {
+    if let Some(slot) = want.filter(|&w| w != s.slot && s.has(w)) {
         (s.last_slot, s.slot) = (s.slot, slot);
-        (s.fire_cd, s.reloading) = (ticks(DRAW_SECS), 0);
+        s.hands.draw(DRAW_SECS);
     }
-    if s.slot == Slot::Primary && s.primary.is_none() {
+    if !s.has(s.slot) {
         s.slot = Slot::Secondary;
     }
     let weapon = s.weapon();
-    let spec = weapon.spec();
-    s.fire_cd = s.fire_cd.saturating_sub(1);
-    s.recoil = (s.recoil - DT * 5.0).max(0.0);
-
-    let reloading = s.reloading > 0;
-    if reloading {
-        s.reloading -= 1;
-    }
-    let (finished, frozen) = (reloading && s.reloading == 0, s.frozen);
-    let wants_reload = |(mag, reserve): (u8, u16)| reserve > 0 && mag < spec.mag && (inp.reload || (mag == 0 && inp.fire));
-    let mut start_reload = false;
-    if let Some(ammo) = s.ammo_mut() {
-        if finished {
-            let moved = (spec.mag - ammo.0).min(ammo.1.min(255) as u8);
-            *ammo = (ammo.0 + moved, ammo.1 - moved as u16);
-        } else if !reloading && !frozen && wants_reload(*ammo) {
-            start_reload = true;
-        }
-    }
-    if start_reload {
-        s.reloading = ticks(spec.reload);
-    }
-
-    let loaded = s.ammo().is_none_or(|(mag, _)| mag > 0);
-    let fires = inp.fire && !s.frozen && s.fire_cd == 0 && s.reloading == 0 && loaded && (spec.auto || !s.trigger);
-    s.trigger = inp.fire;
-    if !fires {
-        return None;
-    }
-    if let Some(ammo) = s.ammo_mut() {
-        ammo.0 -= 1;
-    }
-    s.fire_cd = ticks(spec.cycle).max(1);
-
+    let ability = weapon.ability();
+    let (mut hands, frozen) = (s.hands, s.frozen);
+    let strength = hands.tick(ability, s.ammo_mut(), inp.fire, inp.reload, frozen);
+    s.hands = hands;
+    let strength = strength?;
     let speed = s.vel.with_y(0.0).length() / MAX_SPEED;
-    let base = if weapon == Weapon::Awp && inp.zoom { AWP_SCOPED_SPREAD } else { spec.spread };
-    let air = if s.on_ground { 0.0 } else { 0.12 };
-    let cone = base + speed * spec.move_spread + air + s.recoil * spec.recoil * 0.15;
-    let (sx, sy) = spread_offset(inp.seq);
-    let (side, up) = punch(s);
-    let dir = look_rot(s.yaw + side, s.pitch + up) * Vec3::new(sx * cone, sy * cone, -1.0).normalize();
-    s.recoil += 1.0;
-    Some((weapon, dir))
+    let scope = (weapon == Weapon::Awp && inp.zoom).then_some(AWP_SCOPED_SPREAD);
+    let dir = s.hands.aim(ability, scope, speed, s.on_ground, s.yaw, s.pitch, inp.seq);
+    // Thrown the last grenade: back to what was in hand before.
+    if s.slot == Slot::Grenade && s.ammo[2].0 == 0 {
+        s.grenade = None;
+        s.slot = if s.has(s.last_slot) && s.last_slot != Slot::Grenade { s.last_slot } else { Slot::Secondary };
+        s.hands.draw(DRAW_SECS);
+    }
+    Some(Fired { weapon, dir, strength })
 }
 
-/// Advances one tick of movement and weapon handling. Returns the weapon and bullet direction if a shot was fired.
-pub fn step_player(s: &mut PlayerState, inp: &Input) -> Option<(Weapon, Vec3)> {
+/// Advances one tick of movement and weapon handling. Returns the use that went off, if any.
+pub fn step_player(s: &mut PlayerState, inp: &Input) -> Option<Fired> {
     s.yaw = inp.yaw;
     s.pitch = inp.pitch.clamp(-1.55, 1.55);
 
@@ -619,11 +591,11 @@ mod tests {
         };
         let fire = Input { fire: true, ..Default::default() };
 
-        let first = tick(&mut s, fire).expect("fires immediately").1;
+        let first = tick(&mut s, fire).expect("fires immediately").dir;
         assert!(first.angle_between(Vec3::NEG_Z) < 0.01, "first shot standing still is accurate");
         let mut shots = vec![first];
         for _ in 0..TICK_HZ as usize {
-            shots.extend(tick(&mut s, fire).map(|(_, d)| d));
+            shots.extend(tick(&mut s, fire).map(|f| f.dir));
         }
         assert!((9..=11).contains(&shots.len()), "AK fires ~10/s: {}", shots.len());
         assert!(shots.last().unwrap().y > shots[0].y + 0.05, "spray climbs");
@@ -633,7 +605,7 @@ mod tests {
             tick(&mut s, fire);
         }
         tick(&mut s, fire);
-        assert!(s.reloading > 0);
+        assert!(s.hands.reloading > 0);
         for _ in 0..(2.5 * TICK_HZ) as usize {
             tick(&mut s, Input::default());
         }

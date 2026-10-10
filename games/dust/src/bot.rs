@@ -4,6 +4,7 @@
 use crate::map::MAP;
 use crate::shared::*;
 use crate::weapons::{Slot, Weapon};
+use sdk::ability::Trigger;
 use glam::Vec3;
 
 /// Seconds between first seeing an enemy and being allowed to shoot. The main difficulty knob.
@@ -191,7 +192,8 @@ impl Bot {
             (Some(_), _) => 1,
             (None, _) => 2,
         };
-        let spec = me.weapon().spec();
+        let ability = me.weapon().ability();
+        let auto = matches!(ability.trigger, Trigger::Auto);
         if round.number != self.round {
             self.round = round.number;
             // Ts go for the site the server picked, except the odd lurker; CTs split up to cover both.
@@ -249,15 +251,15 @@ impl Bot {
             inp.pitch = me.pitch + (pitch - me.pitch).clamp(-max, max);
             let lined_up = wrap(yaw - inp.yaw).abs() < 0.02 && (pitch - inp.pitch).abs() < 0.03;
             let reacted = tick - since >= (REACTION_SECS * TICK_HZ as f32) as u32;
-            let ready = me.fire_cd == 0 && me.reloading == 0;
+            let ready = me.hands.cooldown == 0 && me.hands.reloading == 0;
             // Automatic weapons in bursts as recoil builds; semi-automatic ones need the trigger released.
-            let trigger = if spec.auto { me.recoil < 3.0 } else { !me.trigger };
+            let trigger = if auto { me.hands.bloom < 3.0 } else { !me.hands.trigger };
             // Counter-strafe: only shoot once slowed down, since moving throws shots off.
             let steady = me.vel.with_y(0.0).length() < 0.4 * 6.35 || !me.on_ground;
             inp.fire = lined_up && reacted && ready && trigger && steady;
             inp.zoom = me.weapon() == Weapon::Awp;
             if inp.fire {
-                self.aim_error = self.roll_aim_error(if spec.auto { 0.5 } else { 1.0 });
+                self.aim_error = self.roll_aim_error(if auto { 0.5 } else { 1.0 });
             }
             // Strafe side to side while lining up or waiting to fire; back off while reloading.
             if tick >= self.strafe_until {
@@ -265,7 +267,7 @@ impl Bot {
                 self.strafe_until = tick + secs(0.35 + 0.5 * self.random());
             }
             let about_to_fire = lined_up && reacted && ready && trigger;
-            if me.reloading > 0 {
+            if me.hands.reloading > 0 {
                 (inp.forward, inp.right) = (-1.0, self.strafe);
             } else if !about_to_fire && me.weapon() != Weapon::Awp {
                 inp.right = self.strafe;
@@ -274,7 +276,8 @@ impl Bot {
         }
 
         // Top up between fights.
-        inp.reload = me.ammo().is_some_and(|(mag, reserve)| reserve > 0 && mag < spec.mag / 2);
+        let half = ability.full_ammo().map_or(0, |a| a.0 / 2);
+        inp.reload = me.ammo().is_some_and(|(mag, reserve)| reserve > 0 && mag < half);
         if self.via.is_some_and(|v| v.with_y(0.0).distance(me.pos.with_y(0.0)) < 2.5) {
             self.via = None;
         }
