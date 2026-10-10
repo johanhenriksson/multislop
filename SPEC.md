@@ -90,18 +90,37 @@ Deadline: playable before 00:00. One weapon, one simple map.
   only notice enemies in a 120° field of view (callouts too), aim with a reaction delay, limited turn speed and angular aim error (~30% accuracy bot vs bot; `src/bot.rs`
   constants are the difficulty knobs).
 - The game is Counterslop, on two maps (`MAPS`, the host picks; `map::load` switches the per-thread current `MAP`).
-  Dust is traced from a top-down overview image into an ASCII grid in `src/map.rs` (2 m cells, flat): B site
-  top-left, A bottom-left, CT spawn between them, T spawn at the back on the right (as far from A as from B),
-  tunnels through the middle. A stack of tall crates
-  across mid keeps T spawn from seeing down it to the CT side (a test checks the line of sight). Sites tinted red.
-- Aztec (`games/dust/src/maps/aztec*.txt`, same format, 85x47, ported from the old pre-wasm counter-slop branch):
-  CT spawn west, A site north-west, B south-middle, T spawn east, 16 spawn spots each; the rope bridge is a raised
-  walkway along the north wall of a sunken water room, plus sunken grass pits and double doors. Bots play it with the
-  same logic (a test plays 10 rounds there).
-- Height: a second grid (`DUST2_HEIGHTS`, quarter meters, base 36) gives each cell a floor height: 2 m streets, tunnels
-  sunk to 0 with ramps (from the dark areas of the overview), B site and T spawn yard raised 1 m. The floor is
-  interpolated between cell corners; you walk up rises under 0.5 m, stay glued going down, and bullets/sight lines
-  march against the terrain.
+  Maps are ASCII grids (`games/dust/src/maps/<map>.txt`) with a height grid each (`<map>_heights.txt`, quarter
+  meters as base-62 digits 0-9a-zA-Z), in layers separated by a blank line; cell size per map (dust 1 m, aztec 2 m).
+  The base layer: `#` wall (height = its top; walls 6.5 m and up get a random 0-3 m extra for the skyline), `x`/`X`
+  low/tall crate standing on its height, `k` crate whose top is its height (standing on the lowest floor beside it),
+  `A`/`B` site floor, `T`/`C` spawn, `.` floor. Upper layers (blank = nothing): `.` (or a site/spawn letter) a floor
+  slab 0.6 m thick whose top is the height, `#` a 2 m roof block whose underside is the height. So a cell has a stack
+  of floors (`map::Floor`: a surface over a solid underside, the ground solid all the way down), with air between.
+- Dust is de_dust2, converted from the original map's geometry (an OBJ export of the CS 1.6 BSP, not in the repo) by
+  `tools/dust2_to_grid.py <Dust2.obj> [--debug dir]`: each 1 m cell is sampled 4x4 times with vertical rays; upward
+  faces with 1.85 m of air over them are floors, a flood fill from the sites (up a jump, down any drop) keeps the
+  reachable ones so roofs drop out. The lowest reachable floor is the base layer, a second one above it a slab, a
+  ceiling within 4.5 m a roof block; cells without floor become walls as tall as the faces in them (raised over
+  neighboring roofs) or crates by texture. Heights are shifted up 4 m so the lowest floor (the pit at long A) is 0.
+  Sites are flood filled around the X decals (A within 7.5 m on the platform, B within 8 m), 16 spawns per team on a
+  checkerboard in each spawn yard. `--debug` writes a top-down PNG per layer. The result, 85x89 cells, north up: B
+  top-left, A top-right, CT spawn north of mid doors with the B doors corridor west and a passage east to A that runs
+  under the bridge of short A (the stacked floor), mid down the middle with catwalk east of it, long A down the east
+  side through long doors to the pit, T spawn bottom-left with upper tunnels north to B and lower tunnels into mid.
+- Aztec (85x47, one layer, ported from the old pre-wasm counter-slop branch): CT spawn west, A site north-west, B
+  south-middle, T spawn east, 16 spawn spots each; the rope bridge is a raised walkway along the north wall of a
+  sunken water room, plus sunken grass pits and double doors. Bots play it with the same logic (a test plays 10
+  rounds there).
+- Floors and movement: a floor's surface is interpolated between its corners, each the average of the floors around
+  that corner within the map's ramp height (dust 1.05 m, aztec any), so close heights become slopes and others meet
+  at a ledge. You stand on the highest floor at most a step (0.5 m) above your feet, walk up rises under a step, stay
+  glued going down, fall off ledges, can't walk into a floor or slab between a step and head height, and bump your
+  head on slab undersides (floors only at the hull's center point; boxes as before). Bullets, sight lines, grenades
+  and dropped weapons march against the floors, so slabs block them like the ground. Bots path over nodes, one per
+  floor of each cell, linked to the highest floor in each neighboring cell at most a step or a ramp up (any drop down)
+  with headroom; `Map::nodes` are the ones the T spawn can walk to. No T spawn can see a site or the CT spawn (a test
+  checks the line of sight). Sites tinted red.
 - Round: 5 s freeze (look only, movement frozen via `PlayerState::frozen` so prediction agrees), 1:55 live, 5 s end.
 - Halftime every 10 rounds (`HALF`): teams switch sides with their scores, everyone restarts with the pistol and
   $800 and loss bonuses reset; the next freeze says "teams switched sides".
@@ -114,7 +133,8 @@ Deadline: playable before 00:00. One weapon, one simple map.
 
 ## Look (`src/textures.rs`, all generated at startup)
 - Sandstone block walls (world-mapped so courses line up) with a carved frieze band and a cap ledge; arched wooden
-  doors and shutters on walls facing open ground; sand-over-flagstone floor on a terrain mesh (darker in tunnels);
+  doors and shutters on walls facing open ground; sand-over-flagstone floor on a terrain mesh (darker under roofs and
+  slabs), stone sides on ledges and slab edges, roofs plain stone;
   wooden X-braced and green ammo crates; clouds, two rings of mountains, desert beyond the map, distance haze,
   warm hard sun. First-person weapons are held by gloved hands.
 - Aztec swaps in its own look: rough grey stone blocks with grime streaks, moss and hanging vines under a carved key
@@ -191,7 +211,7 @@ Deadline: playable before 00:00. One weapon, one simple map.
   server rewinds other players to that tick (max 400 ms back) from its position history and raycasts there.
 
 ## Out of scope (for now)
-Grenades, dropped/pickup weapons, match end, team switching, map height (ramps, stairs), anti-cheat, encryption, connection handshake/timeouts beyond the basics.
+Grenades, dropped/pickup weapons, match end, team switching, anti-cheat, encryption, connection handshake/timeouts beyond the basics.
 
 ## Instaslop (`games/arena`)
 - A second game module: instagib free-for-all on one 80 x 80 m map, "arena" (four-way symmetric: corner balconies up

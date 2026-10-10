@@ -309,7 +309,7 @@ def main():
         f.write("\n\n".join("\n".join("".join(line) for line in hs) for _, hs in layers) + "\n")
     if args.debug:
         debug_images(layers, args.debug)
-    print(f"{len(layers[0][0][0])} x {len(layers[0][0])} cells, {len(layers)} layers, grid corner at OBJ {origin}")
+    print(f"{len(layers[0][0][0])} x {len(layers[0][0])} cells, {len(layers)} layers, grid corner at OBJ ({origin[0]:.1f}, {origin[1]:.1f})")
 
 
 if __name__ == "__main__":

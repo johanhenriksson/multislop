@@ -92,6 +92,8 @@ pub struct Map {
     back: Vec<Vec<u32>>,
     /// Open floors that can be walked to from the T spawn (not, say, a ledge only a jump gets onto).
     reachable: Vec<bool>,
+    /// The middle of bomb site A and of B.
+    site_centers: [Vec3; 2],
     /// Solid boxes as (center, half extents), merged from runs of equal cells.
     pub boxes: Vec<(Vec3, Vec3)>,
     /// The map character each box is made of: `#` for walls and roofs, otherwise a crate.
@@ -127,7 +129,7 @@ impl Map {
         let rows = layers[0].clone();
         let (w, d) = (rows[0].len(), rows.len());
         let at = |grid: &Vec<Vec<u8>>, x: usize, z: usize| grid.get(z).and_then(|r| r.get(x)).copied().unwrap_or(b' ');
-        let mut map = Map { cell, rows, floors: vec![], first: vec![], links: vec![], link_first: vec![], back: vec![], reachable: vec![], boxes: vec![], kinds: vec![], t_spawns: vec![], ct_spawns: vec![] };
+        let mut map = Map { cell, rows, floors: vec![], first: vec![], links: vec![], link_first: vec![], back: vec![], reachable: vec![], site_centers: [Vec3::ZERO; 2], boxes: vec![], kinds: vec![], t_spawns: vec![], ct_spawns: vec![] };
         let base_height = |x: usize, z: usize| quarters(at(&heights[0], x, z)).unwrap_or(2.0);
 
         // Solids per layer as (kind, bottom, top), merged into boxes below, and the floors of each cell.
@@ -222,6 +224,11 @@ impl Map {
         }
         let from_spawn = map.distance_from(map.node(map.t_spawns.first().copied().unwrap_or_default()));
         map.reachable = (0..map.floors.len()).map(|n| map.floors[n].open && from_spawn[n] < u16::MAX).collect();
+        map.site_centers = b"AB".map(|site| {
+            let cells: Vec<Vec3> = map.nodes().filter(|&n| map.floors[n].tag == site).map(|n| map.node_pos(n)).collect();
+            let mid = cells.iter().sum::<Vec3>() / cells.len().max(1) as f32;
+            cells.into_iter().min_by(|a, b| a.distance(mid).total_cmp(&b.distance(mid))).unwrap_or(mid)
+        });
         map
     }
 
@@ -418,9 +425,7 @@ impl Map {
 
     /// The bomb site floor nearest the middle of the site (the middle itself may be a crate).
     pub fn site_center(&self, site: char) -> Vec3 {
-        let cells: Vec<Vec3> = self.site_cells().filter(|p| self.site_at(*p) == Some(site)).collect();
-        let mid = cells.iter().sum::<Vec3>() / cells.len().max(1) as f32;
-        cells.into_iter().min_by(|a, b| a.distance(mid).total_cmp(&b.distance(mid))).unwrap_or(mid)
+        self.site_centers[(site == 'B') as usize]
     }
 
     /// Which bomb site, if any, this floor position is on.
@@ -443,7 +448,7 @@ impl Map {
 }
 
 /// A floor's height at (fx, fz) within its cell, each 0..1.
-pub fn surface(f: &Floor, fx: f32, fz: f32) -> f32 {
+fn surface(f: &Floor, fx: f32, fz: f32) -> f32 {
     let [a, b, c, d] = f.corners;
     let top = a + (b - a) * fx;
     let bottom = d + (c - d) * fx;
