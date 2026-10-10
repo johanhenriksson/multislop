@@ -1,6 +1,6 @@
 //! What client and server both run: movement (Quake style, floaty and fast), the laser sweepers, the wire format.
 
-use crate::map::{MAP, WALL_TOP};
+use crate::map::{WALL_TOP, course};
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
@@ -176,7 +176,7 @@ pub fn step_player(s: &mut PlayerState, inp: &Input) -> Step {
     let right = Vec3::new(s.yaw.cos(), 0.0, -s.yaw.sin());
     let wish = if s.frozen { Vec3::ZERO } else { (fwd * inp.forward + right * inp.right).normalize_or_zero() };
 
-    if s.on_ground && MAP.on_pad(s.pos) && !s.frozen {
+    if s.on_ground && course().on_pad(s.pos) && !s.frozen {
         let carry = s.vel.with_y(0.0).clamp_length_max(PAD_CARRY);
         s.vel = carry + Vec3::Y * PAD_SPEED;
         s.on_ground = false;
@@ -219,7 +219,7 @@ fn overlaps(p: Vec3, c: Vec3, h: Vec3) -> bool {
 }
 
 fn blocked(p: Vec3) -> bool {
-    MAP.boxes.iter().any(|&(c, h)| overlaps(p, c, h))
+    course().boxes.iter().any(|&(c, h)| overlaps(p, c, h))
 }
 
 /// Highest floor under the hull at or below `pos`: a block top or the lava.
@@ -227,7 +227,7 @@ pub fn floor_below(pos: Vec3) -> f32 {
     let under = |&&(c, h): &&(Vec3, Vec3)| {
         (pos.x - c.x).abs() < h.x + RADIUS && (pos.z - c.z).abs() < h.z + RADIUS && c.y + h.y <= pos.y + 1e-3
     };
-    MAP.boxes.iter().filter(under).map(|&(c, h)| c.y + h.y).fold(0.0, f32::max)
+    course().boxes.iter().filter(under).map(|&(c, h)| c.y + h.y).fold(0.0, f32::max)
 }
 
 // ponytail: the hull is an AABB moved axis by axis against the blocks.
@@ -237,7 +237,7 @@ fn move_and_collide(s: &mut PlayerState) {
     for axis in [0, 2, 1] {
         let before = s.pos[axis];
         s.pos[axis] += s.vel[axis] * DT;
-        for &(c, h) in &MAP.boxes {
+        for &(c, h) in &course().boxes {
             let mut prev = s.pos;
             prev[axis] = before;
             // Only resolve overlaps this axis' move caused; a touching contact on another axis must not teleport us.
@@ -286,7 +286,7 @@ pub fn laser_dir(i: usize, time: f32) -> Vec3 {
 
 /// Whether a player standing at `feet` touches a laser bar.
 pub fn lasered(feet: Vec3, time: f32) -> bool {
-    MAP.sweepers.iter().enumerate().any(|(i, &pivot)| {
+    course().sweepers.iter().enumerate().any(|(i, &pivot)| {
         let y = pivot.y + LASER_HEIGHT;
         if feet.y > y + LASER_RADIUS || feet.y + HEIGHT < y - LASER_RADIUS {
             return false;
@@ -299,7 +299,7 @@ pub fn lasered(feet: Vec3, time: f32) -> bool {
 
 /// Inside the course: between the outer walls, above the lava, below the wall tops plus a pad's throw.
 pub fn in_bounds(p: Vec3) -> bool {
-    let (w, d) = MAP.size();
+    let (w, d) = course().size();
     p.is_finite() && p.x.abs() < w / 2.0 && p.z.abs() < d / 2.0 && p.y >= 0.0 && p.y < WALL_TOP + 10.0
 }
 
@@ -319,7 +319,7 @@ mod tests {
 
     #[test]
     fn never_leaves_the_course() {
-        for (i, sp) in MAP.spawns.iter().enumerate() {
+        for (i, sp) in course().spawns.iter().enumerate() {
             let mut s = PlayerState { pos: *sp, ..Default::default() };
             assert!(!blocked(s.pos), "spawn {i} inside a block");
             let mut x = 12345u32 + i as u32;
@@ -343,7 +343,7 @@ mod tests {
     #[test]
     fn running_off_a_ledge_drops_into_the_lava() {
         // North off the start platform, no jump: the stepping stones are too far to walk to.
-        let mut s = standing(MAP.spawns[0]);
+        let mut s = standing(course().spawns[0]);
         run(&mut s, Input { forward: 1.0, ..Default::default() }, 2.0);
         assert!(s.pos.y < LAVA, "{:?}", s.pos);
     }
@@ -351,7 +351,7 @@ mod tests {
     #[test]
     fn a_running_jump_clears_a_two_cell_gap() {
         // North off the start platform to a stepping stone three cells on, steering in the air to land on it.
-        let stone = MAP.ground(7, MAP.cell(MAP.spawns[0]).1 - 4);
+        let stone = course().ground(7, course().cell(course().spawns[0]).1 - 4);
         let mut s = standing(stone + Vec3::Z * 6.9);
         run(&mut s, Input { forward: 1.0, ..Default::default() }, 0.1);
         step_player(&mut s, &Input { forward: 1.0, jump: true, ..Default::default() });
@@ -364,7 +364,7 @@ mod tests {
 
     #[test]
     fn the_jump_pads_throw_onto_the_ledge() {
-        let mut s = standing(MAP.pads[1] + Vec3::Z * 4.0);
+        let mut s = standing(course().pads[1] + Vec3::Z * 4.0);
         while !step_player(&mut s, &Input { forward: 1.0, ..Default::default() }).launched {}
         while !s.on_ground {
             step_player(&mut s, &Input { forward: 1.0, ..Default::default() });
@@ -374,7 +374,7 @@ mod tests {
 
     #[test]
     fn laser_bars_sweep_but_can_be_jumped() {
-        let pivot = MAP.sweepers[0];
+        let pivot = course().sweepers[0];
         let at = pivot + laser_dir(0, 0.0) * 4.0;
         assert!(lasered(at, 0.0));
         assert!(!lasered(at, 1.0), "the bar moved on");
