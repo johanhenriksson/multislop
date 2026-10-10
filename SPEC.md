@@ -69,7 +69,8 @@ Deadline: playable before 00:00. One weapon, one simple map.
   voiced with ElevenLabs ("Adam") into `assets/voice/` and embedded, radio-filtered, with big centered text; "Enemy
   down" after your kills.
 - Team radio: bots call "Enemy spotted!", "Need backup!", "I'm in position.", "Sector clear.", "Cover me!" (with
-  cooldowns); the server sends calls only to the caller's team; clients play the voice and show a yellow chat line.
+  cooldowns), players with Z then 1-5 (2 s cooldown); the server sends calls only to the caller's team; clients play
+  the voice and show a yellow chat line.
 - `FPS16_SHOT=out.png [FPS16_POSE="x,y,z,yaw,pitch"]` renders off-screen, saves a screenshot and quits, for checking
   visuals without a person at the screen.
 

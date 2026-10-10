@@ -123,6 +123,9 @@ struct Game {
     zoom: bool,
     /// Buy menu open.
     menu: bool,
+    /// Radio menu (Z) open.
+    radio_menu: bool,
+    want_radio: u8,
     /// Key presses caught each frame, sent with the next input.
     want_slot: u8,
     want_buy: u8,
@@ -166,6 +169,9 @@ enum Sound {
 /// Radio chat lines, bottom left.
 #[derive(Component)]
 struct ChatText;
+
+#[derive(Component)]
+struct RadioMenu;
 
 /// Announcer lines, CS style.
 #[derive(Clone, Copy, PartialEq)]
@@ -366,7 +372,7 @@ pub fn run(server: SocketAddr, lag_ms: u64, jitter_ms: u64, interp_ms: u64) {
                 look,
                 controls,
                 (render_remotes, render_self, viewmodel, render_bomb, draw_tracers, bomb_beep, play_sounds, spawn_fx, update_fx),
-                (hud, scoreboard, ammo_hud, buy_menu_hud, kill_feed, death_fade, hurt_flash, crosshair, scope, score_panel, announce, chat),
+                (hud, scoreboard, ammo_hud, buy_menu_hud, kill_feed, death_fade, hurt_flash, crosshair, scope, score_panel, announce, chat, radio_menu),
             )
                 .chain(),
         )
@@ -541,6 +547,20 @@ fn setup(
         Node { position_type: PositionType::Absolute, top: percent(26), width: percent(100), justify_content: JustifyContent::Center, ..default() },
         children![(AnnounceText, Text::new(""), TextFont { font_size: FontSize::Px(40.0), ..default() }, TextShadow::default())],
     ));
+    let radio_lines: String = std::iter::once("RADIO".to_string())
+        .chain(Radio::MENU.iter().enumerate().map(|(i, r)| format!("{}  {}", i + 1, r.text())))
+        .collect::<Vec<_>>()
+        .join("\n");
+    commands.spawn((
+        RadioMenu,
+        Text::new(radio_lines),
+        TextFont { font_size: FontSize::Px(18.0), ..default() },
+        TextColor(Color::srgb(1.0, 0.85, 0.35)),
+        Node { position_type: PositionType::Absolute, left: px(24), top: percent(28), padding: UiRect::all(px(14)), border: UiRect::left(px(3)), ..default() },
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.75)),
+        BorderColor::all(HUD_AMBER),
+        Visibility::Hidden,
+    ));
     commands.spawn((
         ChatText,
         Text::new(""),
@@ -636,8 +656,16 @@ fn controls(keys: Res<ButtonInput<KeyCode>>, mouse: Res<ButtonInput<MouseButton>
         g.menu = false;
     }
     let digits = [KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4, KeyCode::Digit5];
+    if keys.just_pressed(KeyCode::KeyZ) && g.hp > 0 {
+        (g.radio_menu, g.menu) = (!g.radio_menu, false);
+    }
+    if keys.just_pressed(KeyCode::Escape) || g.hp <= 0 {
+        g.radio_menu = false;
+    }
     if let Some(n) = digits.iter().position(|&k| keys.just_pressed(k)) {
-        if g.menu {
+        if g.radio_menu {
+            (g.want_radio, g.radio_menu) = (n as u8 + 1, false);
+        } else if g.menu {
             (g.want_buy, g.menu) = (n as u8 + 1, false);
         } else if n < 3 {
             g.want_slot = n as u8 + 1;
@@ -723,6 +751,7 @@ fn net_tick(
         reload: std::mem::take(&mut g.want_reload),
         zoom: g.zoom,
         buy: std::mem::take(&mut g.want_buy),
+        radio: std::mem::take(&mut g.want_radio),
         view_tick: (server_tick(&g) - g.interp_ticks) as f32,
     };
 
@@ -1832,4 +1861,8 @@ fn announce(mut text: Single<&mut Text, With<AnnounceText>>, g: Res<Game>) {
 fn chat(mut text: Single<&mut Text, With<ChatText>>, mut g: ResMut<Game>) {
     g.chat.retain(|(_, at)| at.elapsed().as_secs_f32() < 7.0);
     text.0 = g.chat.iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>().join("\n");
+}
+
+fn radio_menu(mut vis: Single<&mut Visibility, With<RadioMenu>>, g: Res<Game>) {
+    **vis = if g.radio_menu || std::env::var_os("FPS16_RADIOMENU").is_some() { Visibility::Inherited } else { Visibility::Hidden };
 }

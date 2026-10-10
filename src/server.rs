@@ -22,6 +22,8 @@ struct Client {
     team: Team,
     /// Holding E as of the last simulated input.
     using: bool,
+    /// No radio from this player before this tick.
+    radio_quiet_until: u32,
     last_heard: Instant,
     /// Received inputs not yet simulated. Applied one per tick so upstream jitter doesn't make the player teleport.
     queue: VecDeque<Input>,
@@ -119,6 +121,7 @@ pub fn run(port: u16) {
                     deaths: 0,
                     team,
                     using: false,
+                    radio_quiet_until: 0,
                     last_heard: Instant::now(),
                     queue: VecDeque::new(),
                     last_queued: 0,
@@ -284,6 +287,12 @@ fn run_inputs(
             if inp.buy != 0 {
                 try_buy(game, c, inp.buy, tick);
             }
+            if let Some(&call) = Radio::MENU.get((inp.radio as usize).wrapping_sub(1)) {
+                if tick >= c.radio_quiet_until {
+                    radio.push(RadioCall { from: c.id, call });
+                    c.radio_quiet_until = tick + ticks(2.0);
+                }
+            }
             if let Some((weapon, dir)) = step_player(&mut c.state, &inp) {
                 let (shooter, from) = (c.id, eye(&c.state));
                 let (to, hit) = fire(clients, history, tick, shooter, weapon, (from, dir), inp.view_tick);
@@ -357,6 +366,7 @@ fn balance_bots(m: &mut Match, clients: &mut HashMap<SocketAddr, Client>, next_i
                 deaths: 0,
                 team,
                 using: false,
+                radio_quiet_until: 0,
                 last_heard: Instant::now(),
                 queue: VecDeque::new(),
                 last_queued: 0,
@@ -688,6 +698,7 @@ mod tests {
             deaths: 0,
             team,
             using: false,
+            radio_quiet_until: 0,
             last_heard: Instant::now(),
             queue: VecDeque::new(),
             last_queued: 0,

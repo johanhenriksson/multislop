@@ -118,6 +118,8 @@ pub struct Input {
     pub zoom: bool,
     /// Buy menu item (1-based), 0 for none. Handled by the server; inputs are applied exactly once.
     pub buy: u8,
+    /// Radio call from the Z menu (1-based into `Radio::MENU`), 0 for none.
+    pub radio: u8,
     /// Server tick the client was rendering remote players at, used for lag compensation.
     pub view_tick: f32,
 }
@@ -210,6 +212,9 @@ pub enum Radio {
 }
 
 impl Radio {
+    /// The Z radio menu, numbered from 1.
+    pub const MENU: [Radio; 5] = [Radio::CoverMe, Radio::EnemySpotted, Radio::NeedBackup, Radio::InPosition, Radio::SectorClear];
+
     pub fn text(self) -> &'static str {
         match self {
             Radio::EnemySpotted => "Enemy spotted!",
