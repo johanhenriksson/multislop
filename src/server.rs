@@ -6,6 +6,22 @@ use std::collections::{HashMap, VecDeque};
 use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
+/// Hosts a game from inside the client: a server on a thread, on the first free LAN port. Returns the port.
+pub fn host(name: String, module: Vec<u8>) -> Result<u16, String> {
+    let sock = DISCOVERY_PORTS.clone().find_map(|p| UdpSocket::bind(("0.0.0.0", p)).ok()).ok_or("no free port in 5000-5009")?;
+    let port = sock.local_addr().map_err(|e| e.to_string())?.port();
+    let (ready, loaded) = std::sync::mpsc::channel();
+    std::thread::spawn(move || match crate::wasm::WasmGame::load(&module) {
+        Ok(game) => {
+            let _ = ready.send(Ok(()));
+            run(sock, &name, Box::new(game), module);
+        }
+        Err(e) => _ = ready.send(Err(format!("can't load the game: {e}"))),
+    });
+    loaded.recv().map_err(|e| e.to_string())??;
+    Ok(port)
+}
+
 struct Client {
     /// The id the game gave this player.
     id: u32,
@@ -34,9 +50,9 @@ const STATS_EVERY: Duration = Duration::from_secs(5);
 /// Above this many queued inputs, simulate two per tick to catch up. Each queued input is a tick of added latency.
 const QUEUE_CATCH_UP: usize = INPUT_EVERY as usize + 1;
 
-/// Runs `game` as `name`; `module` is its wasm, sent to clients that don't have it yet.
-pub fn run(port: u16, name: &str, mut game: Box<dyn ServerGame>, module: Vec<u8>) {
-    let sock = UdpSocket::bind(("0.0.0.0", port)).expect("bind");
+/// Runs `game` as `name` on `sock`; `module` is its wasm, sent to clients that don't have it yet.
+pub fn run(sock: UdpSocket, name: &str, mut game: Box<dyn ServerGame>, module: Vec<u8>) {
+    let port = sock.local_addr().map_or(0, |a| a.port());
     println!("server build {BUILD} listening on :{port}");
     let mut rejected = std::collections::HashSet::new();
     let (hash, size) = (Sha256::digest(&module).into(), module.len() as u32);
@@ -76,6 +92,7 @@ pub fn run(port: u16, name: &str, mut game: Box<dyn ServerGame>, module: Vec<u8>
                 ClientMsg::Info { time, .. } if n >= INFO_QUERY_SIZE => {
                     let mut info = game.info();
                     info.map = info.map.chars().take(NAME_LEN).collect();
+                    info.game = info.game.chars().take(NAME_LEN).collect();
                     let name = name.chars().take(NAME_LEN).collect();
                     let _ = sock.send_to(&encode(&ServerMsg::Info { name, game: info, time }), addr);
                     continue;

@@ -122,8 +122,8 @@ struct FrameStats {
 }
 
 /// Joins `server` (or lets the player pick one from the LAN), running `game` if given, or else the game the server
-/// runs (downloaded if need be).
-pub fn run(server: Option<SocketAddr>, game: Option<Game>, lag_ms: u64, jitter_ms: u64, interp_ms: u64) {
+/// runs (downloaded if need be). `hostable` are module files the browser can host a LAN game with.
+pub fn run(server: Option<SocketAddr>, game: Option<Game>, hostable: Vec<std::path::PathBuf>, lag_ms: u64, jitter_ms: u64, interp_ms: u64) {
     let sock = UdpSocket::bind("0.0.0.0:0").expect("bind");
     sock.set_nonblocking(true).unwrap();
     sock.set_broadcast(true).unwrap();
@@ -162,7 +162,7 @@ pub fn run(server: Option<SocketAddr>, game: Option<Game>, lag_ms: u64, jitter_m
             incompatible: false,
             wrong_build: None,
         })
-        .init_resource::<crate::browser::Browser>()
+        .insert_resource(crate::browser::Browser::new(hostable))
         .add_systems(Startup, (setup, crate::browser::setup))
         .add_systems(PreUpdate, receive)
         .add_systems(FixedUpdate, net_tick)
@@ -199,9 +199,9 @@ fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     ));
 }
 
-/// Builds the game's world and HUD once it's loaded.
-fn start(mut client: ResMut<Client>, mut renderer: Renderer) {
-    if client.started {
+/// Builds the game's world and HUD once it's loaded and a server is picked.
+fn start(mut client: ResMut<Client>, mut renderer: Renderer, net: Res<Net>) {
+    if client.started || net.server.is_none() {
         return;
     }
     let Some(game) = &mut client.game else { return };
@@ -210,14 +210,18 @@ fn start(mut client: ResMut<Client>, mut renderer: Renderer) {
     client.started = true;
 }
 
-/// Where downloaded game modules are kept, by hash.
-fn cache_path(hash: &[u8; 32]) -> std::path::PathBuf {
-    let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+/// Where downloaded game modules are kept.
+pub fn games_dir() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    std::path::Path::new(&home).join("Library/Application Support/fps16/games").join(format!("{hex}.wasm"))
+    std::path::Path::new(&home).join("Library/Application Support/fps16/games")
 }
 
-fn sha256(bytes: &[u8]) -> [u8; 32] {
+fn cache_path(hash: &[u8; 32]) -> std::path::PathBuf {
+    let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+    games_dir().join(format!("{hex}.wasm"))
+}
+
+pub fn sha256(bytes: &[u8]) -> [u8; 32] {
     use sha2::Digest;
     sha2::Sha256::digest(bytes).into()
 }
@@ -374,6 +378,9 @@ fn frame(
     let mut pressed: Vec<Key> = KEYS.iter().filter(|(code, _)| keys.just_pressed(*code)).map(|(_, k)| *k).collect();
     pressed.extend(BUTTONS.iter().filter(|(b, _)| mouse.just_pressed(*b)).map(|(_, k)| *k));
     let input = RawInput { held: held_keys(&keys, &mouse), pressed, mouse: if captured { motion.delta } else { Vec2::ZERO }, captured };
+    if !client.started {
+        return;
+    }
     let Client { game: Some(game), netcode, .. } = &mut *client else { return };
     let f = FrameIn {
         dt: time.delta_secs(),
@@ -405,9 +412,10 @@ fn grab_cursor(
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     client: Res<Client>,
+    net: Res<Net>,
 ) {
     // Not while picking a server or loading: the mouse is for the browser then.
-    if mouse.just_pressed(MouseButton::Left) && client.started {
+    if mouse.just_pressed(MouseButton::Left) && client.started && net.server.is_some() {
         cursor.grab_mode = CursorGrabMode::Locked;
         cursor.visible = false;
     }

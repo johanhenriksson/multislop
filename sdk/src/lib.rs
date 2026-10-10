@@ -56,6 +56,8 @@ pub struct Frame {
 /// What a server browser shows about a game.
 #[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq)]
 pub struct GameInfo {
+    /// What kind of game it is, e.g. "Bomb defusal".
+    pub game: String,
     pub map: String,
     /// People playing.
     pub players: u32,

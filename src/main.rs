@@ -6,6 +6,15 @@ mod render;
 mod server;
 mod wasm;
 
+/// dust.wasm next to this program, where releases put it.
+fn beside() -> Option<std::path::PathBuf> {
+    Some(std::env::current_exe().ok()?.parent()?.join("dust.wasm"))
+}
+
+fn user() -> String {
+    std::env::var("USER").unwrap_or_else(|_| "someone".into())
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let flag = |name| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1));
@@ -18,21 +27,27 @@ fn main() {
     match args.first().map(String::as_str) {
         Some("server") => {
             let port = args.get(1).and_then(|p| p.parse().ok()).unwrap_or(5000);
-            let beside = std::env::current_exe().ok().and_then(|exe| Some(exe.parent()?.join("dust.wasm")));
-            let module = module(beside).expect("no game");
+            let module = module(beside()).expect("no game");
             let game = wasm::WasmGame::load(&module).unwrap_or_else(|e| panic!("can't load the game: {e:?}"));
-            let user = std::env::var("USER").unwrap_or_else(|_| "someone".into());
-            let name = flag("--name").cloned().unwrap_or(format!("{user}'s server"));
-            server::run(port, &name, Box::new(game), module)
+            let name = flag("--name").cloned().unwrap_or(format!("{}'s server", user()));
+            let sock = std::net::UdpSocket::bind(("0.0.0.0", port)).unwrap_or_else(|e| panic!("can't use port {port}: {e}"));
+            server::run(sock, &name, Box::new(game), module)
         }
         Some("client") => {
             // No address: pick a server from the LAN browser.
             let addr = args.get(1).filter(|a| !a.starts_with("--")).map(|a| crate::browser::resolve(a).expect("bad address"));
             let num = |name| flag(name).and_then(|v| v.parse().ok());
-            let game = module(None).map(|bytes| -> client::Game {
-                Box::new(wasm::WasmClient::load(&bytes).unwrap_or_else(|e| panic!("can't load the game: {e:?}")))
+            let local = module(None);
+            let game = local.as_ref().map(|bytes| -> client::Game {
+                Box::new(wasm::WasmClient::load(bytes).unwrap_or_else(|e| panic!("can't load the game: {e:?}")))
             });
-            client::run(addr, game, num("--lag").unwrap_or(0), num("--jitter").unwrap_or(0), num("--interp").unwrap_or(50));
+            // What "Host a LAN game" in the browser offers: --game, modules next to this program, downloaded ones.
+            let mut hostable: Vec<std::path::PathBuf> = flag("--game").map(Into::into).into_iter().collect();
+            for dir in [beside().and_then(|p| Some(p.parent()?.to_path_buf())), Some(client::games_dir())].into_iter().flatten() {
+                let wasm = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path());
+                hostable.extend(wasm.filter(|p| p.extension().is_some_and(|e| e == "wasm")));
+            }
+            client::run(addr, game, hostable, num("--lag").unwrap_or(0), num("--jitter").unwrap_or(0), num("--interp").unwrap_or(50));
         }
         _ => eprintln!(
             "usage: fps16 server [port] [--game game.wasm] [--name name] | fps16 client [host:port] [--game game.wasm] [--lag ms] [--jitter ms] [--interp ms]"

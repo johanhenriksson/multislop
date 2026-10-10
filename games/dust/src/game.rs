@@ -177,7 +177,7 @@ impl ServerGame for Dust {
 
     fn info(&mut self) -> GameInfo {
         let bots = self.players.values().filter(|c| c.bot.is_some()).count() as u32;
-        GameInfo { map: "dust".into(), players: self.players.len() as u32 - bots, bots }
+        GameInfo { game: "Bomb defusal".into(), map: "dust".into(), players: self.players.len() as u32 - bots, bots }
     }
 }
 

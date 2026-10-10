@@ -27,7 +27,7 @@ pub enum ServerMsg {
 /// Ports server browsers ask on: the default and the next few, for several servers on one machine.
 pub const DISCOVERY_PORTS: std::ops::RangeInclusive<u16> = 5000..=5009;
 /// An info query must be at least this big; names in the answer are cut to `NAME_LEN` so it's never bigger.
-pub const INFO_QUERY_SIZE: usize = 128;
+pub const INFO_QUERY_SIZE: usize = 160;
 pub const NAME_LEN: usize = 32;
 
 /// Module bytes per `ServerMsg::Chunk`, small enough for one unfragmented UDP packet.

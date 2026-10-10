@@ -1,6 +1,6 @@
 //! The LAN server browser, shown until a server is picked: asks every server port on the network who's there each
-//! second and lists the answers (name, map, players, ping). Click one, pick with the arrow keys and Enter, or type
-//! an address and press Enter.
+//! second and lists the answers (name, map, players, ping). Click one, pick with the arrow keys and Enter, type an
+//! address and press Enter, or host a LAN game from here for others to join.
 
 use crate::client::Net;
 use crate::net::*;
@@ -46,15 +46,34 @@ pub struct Browser {
     asked: f64,
     /// A clicked server, joined on the next frame.
     clicked: Option<SocketAddr>,
+    /// Module files "Host a LAN game" offers.
+    hostable: Vec<std::path::PathBuf>,
+    host_clicked: bool,
+    /// The games found in `hostable` when the host button was clicked: label and module.
+    games: Vec<(String, Vec<u8>)>,
+    /// A game picked to host, by index into `games`.
+    host_pick: Option<usize>,
     error: String,
     /// The list changed and its rows need rebuilding.
     dirty: bool,
 }
 
-impl Default for Browser {
-    fn default() -> Browser {
+impl Browser {
+    pub fn new(hostable: Vec<std::path::PathBuf>) -> Browser {
         let address = std::fs::read_to_string(last_address_path()).unwrap_or_default().trim().to_string();
-        Browser { found: BTreeMap::new(), address, selected: 0, asked: f64::MIN, clicked: None, error: String::new(), dirty: true }
+        Browser {
+            found: BTreeMap::new(),
+            address,
+            selected: 0,
+            asked: f64::MIN,
+            clicked: None,
+            hostable,
+            host_clicked: false,
+            games: Vec::new(),
+            host_pick: None,
+            error: String::new(),
+            dirty: true,
+        }
     }
 }
 
@@ -83,7 +102,7 @@ impl Browser {
     pub fn reply(&mut self, from: SocketAddr, msg: Option<ServerMsg>) {
         let (name, build, game, ping_ms) = match msg {
             Some(ServerMsg::Info { name, game, time }) => (name, None, Some(game), ((clock() - time) * 1000.0) as f32),
-            Some(ServerMsg::WrongBuild { server }) => (from.to_string(), Some(server), None, 0.0),
+            Some(ServerMsg::WrongBuild { server }) => (format!("{from}  (other version)"), Some(server), None, 0.0),
             _ => return,
         };
         let changed = self.found.get(&from).is_none_or(|f| f.name != name || f.game != game || (f.ping_ms - ping_ms).abs() > 2.0);
@@ -103,6 +122,31 @@ pub struct AddressText;
 
 #[derive(Component)]
 pub struct ErrorText;
+
+#[derive(Component)]
+pub struct HostButton;
+
+/// The games to pick from, under the host button.
+#[derive(Component)]
+pub struct HostList;
+
+/// Loads each module once (identical files only once) and asks it what it is.
+fn find_games(paths: &[std::path::PathBuf]) -> Vec<(String, Vec<u8>)> {
+    let mut seen = std::collections::HashSet::new();
+    let mut games = Vec::new();
+    for path in paths {
+        let Ok(bytes) = std::fs::read(path) else { continue };
+        if !seen.insert(crate::client::sha256(&bytes)) {
+            continue;
+        }
+        let Ok(mut game) = crate::wasm::WasmGame::load(&bytes) else { continue };
+        let info = sdk::ServerGame::info(&mut game);
+        let file: String = path.file_stem().map(|f| f.to_string_lossy().chars().take(12).collect()).unwrap_or_default();
+        let game = if info.game.is_empty() { "Unnamed game".into() } else { info.game };
+        games.push((format!("{game} on {}  ({file})", info.map), bytes));
+    }
+    games
+}
 
 pub fn setup(mut commands: Commands) {
     let text = |size: f32, color: Color| (TextFont { font_size: FontSize::Px(size), ..default() }, TextColor(color));
@@ -124,6 +168,23 @@ pub fn setup(mut commands: Commands) {
             ],
         )],
     ));
+    let amber = Color::srgb(1.0, 0.68, 0.12);
+    commands
+        .spawn((
+            HostButton,
+            Visibility::Hidden,
+            GlobalZIndex(6),
+            Node { position_type: PositionType::Absolute, right: percent(5), top: percent(10), padding: UiRect::axes(px(18), px(10)), border: UiRect::all(px(2)), ..default() },
+            BorderColor::all(amber),
+            BackgroundColor(Color::srgba(1.0, 0.68, 0.12, 0.12)),
+            children![(Text::new("Host a LAN game"), text(20.0, amber))],
+        ))
+        .observe(|_: On<PointerClick>, mut b: ResMut<Browser>| b.host_clicked = true);
+    commands.spawn((
+        HostList,
+        GlobalZIndex(6),
+        Node { position_type: PositionType::Absolute, right: percent(5), top: percent(17), flex_direction: FlexDirection::Column, row_gap: px(4), ..default() },
+    ));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -136,8 +197,12 @@ pub fn browse(
     list: Single<Entity, With<List>>,
     mut address: Single<&mut Text, (With<AddressText>, Without<ErrorText>)>,
     mut error: Single<&mut Text, With<ErrorText>>,
+    mut host_button: Single<&mut Visibility, (With<HostButton>, Without<Panel>)>,
+    host_list: Single<Entity, With<HostList>>,
 ) {
-    if net.server.is_some() {
+    let browsing = net.server.is_none();
+    **host_button = if browsing { Visibility::Inherited } else { Visibility::Hidden };
+    if !browsing {
         **panel = Visibility::Hidden;
         typed.clear();
         return;
@@ -153,6 +218,28 @@ pub fn browse(
     b.dirty |= b.found.len() != before;
 
     let mut join = b.clicked.take();
+    if std::mem::take(&mut b.host_clicked) {
+        b.games = find_games(&b.hostable);
+        b.error = if b.games.is_empty() { "no game modules found to host".into() } else { String::new() };
+        commands.entity(*host_list).despawn_children();
+        for (i, (label, _)) in b.games.iter().enumerate() {
+            commands
+                .spawn((
+                    ChildOf(*host_list),
+                    Node { padding: UiRect::axes(px(12), px(6)), ..default() },
+                    BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.08)),
+                    children![(Text::new(label.clone()), TextFont { font_size: FontSize::Px(16.0), ..default() })],
+                ))
+                .observe(move |_: On<PointerClick>, mut b: ResMut<Browser>| b.host_pick = Some(i));
+        }
+    }
+    if let Some((_, module)) = b.host_pick.take().and_then(|i| b.games.get(i).cloned()) {
+        let user = std::env::var("USER").unwrap_or_else(|_| "someone".into());
+        match crate::server::host(format!("{user}'s game"), module) {
+            Ok(port) => join = Some(SocketAddr::from(([127, 0, 0, 1], port))),
+            Err(e) => b.error = e,
+        }
+    }
     for ev in typed.read().filter(|ev| ev.state == ButtonState::Pressed) {
         match &ev.logical_key {
             Key::Character(c) if b.address.len() < 64 => b.address.extend(c.chars().filter(|c| !c.is_control())),
@@ -172,6 +259,7 @@ pub fn browse(
     }
     if let Some(addr) = join {
         net.server = Some(addr);
+        commands.entity(*host_list).despawn_children();
         return;
     }
     address.0 = format!("Address: {}_", b.address);
@@ -192,7 +280,7 @@ pub fn browse(
             Some(g) => ([f.name.clone(), g.map.clone(), format!("{} + {} bots", g.players, g.bots), format!("{:.0} ms", f.ping_ms)], Color::WHITE),
             None => {
                 let build = format!("build {}", f.build.as_deref().unwrap_or("?"));
-                ([f.name.clone(), "other version".into(), build, String::new()], Color::srgb(0.5, 0.5, 0.5))
+                ([f.name.clone(), String::new(), build, String::new()], Color::srgb(0.5, 0.5, 0.5))
             }
         };
         let background = if i == selected { Color::srgba(1.0, 0.68, 0.12, 0.25) } else { Color::srgba(1.0, 1.0, 1.0, 0.04) };

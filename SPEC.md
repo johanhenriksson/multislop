@@ -11,8 +11,7 @@ Deadline: playable before 00:00. One weapon, one simple map.
 
 ## Distribution
 - `tools/release.sh` builds `dist/fps16-mac.zip`: a universal, unsigned `fps16.app` with the binary and `dust.wasm`,
-  whose launcher self-updates each from `$FPS16_PUBLIC/<file>.sha256` + `<file>.gz`, then asks to Join (the server
-  browser) or Host a server on that Mac (which runs the `dust.wasm` beside the binary).
+  whose launcher self-updates each from `$FPS16_PUBLIC/<file>.sha256` + `<file>.gz`, then opens the server browser.
 - `tools/release.sh publish` bumps `build_number.txt` and uploads to the VPS; the sha256 files go last since they are
   the update triggers. The build number is compiled in; the server rejects clients on another build and they are told
   to restart (which updates them).
@@ -24,6 +23,10 @@ Deadline: playable before 00:00. One weapon, one simple map.
   ping. Servers on another build answer with their build and are listed grayed out. Entries vanish after 3.5 s of
   silence. Click a server, or arrow keys and Enter, or type an address (remembered in
   `~/Library/Application Support/fps16/host`) and press Enter.
+- "Host a LAN game" lists the game modules it can find (`--game`, `.wasm` files next to the binary, downloaded ones
+  in `games/`), each loaded once and named by its `GameInfo` (game and map); identical files are listed once. The
+  picked one runs as a server on a thread in the client, on the first free port of 5000-5009, named
+  "<user>'s game", and the client joins it. Others find it in their browsers; it stops when the host quits.
 
 ## Gameplay
 - Players are capsules ("rounded cylinders"): radius 0.4, height 1.8, eye at 1.6.
