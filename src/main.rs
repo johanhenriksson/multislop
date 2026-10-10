@@ -1,3 +1,4 @@
+mod browser;
 mod client;
 mod net;
 mod netclient;
@@ -20,11 +21,13 @@ fn main() {
             let beside = std::env::current_exe().ok().and_then(|exe| Some(exe.parent()?.join("dust.wasm")));
             let module = module(beside).expect("no game");
             let game = wasm::WasmGame::load(&module).unwrap_or_else(|e| panic!("can't load the game: {e:?}"));
-            server::run(port, Box::new(game), module)
+            let user = std::env::var("USER").unwrap_or_else(|_| "someone".into());
+            let name = flag("--name").cloned().unwrap_or(format!("{user}'s server"));
+            server::run(port, &name, Box::new(game), module)
         }
         Some("client") => {
-            let addr = args.get(1).map_or("127.0.0.1:5000", String::as_str);
-            let addr = std::net::ToSocketAddrs::to_socket_addrs(addr).expect("bad address").next().unwrap();
+            // No address: pick a server from the LAN browser.
+            let addr = args.get(1).filter(|a| !a.starts_with("--")).map(|a| crate::browser::resolve(a).expect("bad address"));
             let num = |name| flag(name).and_then(|v| v.parse().ok());
             let game = module(None).map(|bytes| -> client::Game {
                 Box::new(wasm::WasmClient::load(&bytes).unwrap_or_else(|e| panic!("can't load the game: {e:?}")))
@@ -32,7 +35,7 @@ fn main() {
             client::run(addr, game, num("--lag").unwrap_or(0), num("--jitter").unwrap_or(0), num("--interp").unwrap_or(50));
         }
         _ => eprintln!(
-            "usage: fps16 server [port] [--game game.wasm] | fps16 client [host:port] [--game game.wasm] [--lag ms] [--jitter ms] [--interp ms]"
+            "usage: fps16 server [port] [--game game.wasm] [--name name] | fps16 client [host:port] [--game game.wasm] [--lag ms] [--jitter ms] [--interp ms]"
         ),
     }
 }

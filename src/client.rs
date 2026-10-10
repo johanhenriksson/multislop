@@ -18,15 +18,16 @@ use std::time::{Duration, Instant};
 pub type Game = Box<dyn ClientGame + Send + Sync>;
 
 #[derive(Resource)]
-struct Net {
+pub struct Net {
     sock: UdpSocket,
-    server: SocketAddr,
+    /// The server we play on; None while browsing for one.
+    pub server: Option<SocketAddr>,
     lag: Duration,
     /// Extra random delay on packets both ways, kept in order, to mimic bursty Wi-Fi.
     jitter: Duration,
     rng: u32,
     out_q: VecDeque<(Instant, Vec<u8>)>,
-    in_q: VecDeque<(Instant, Vec<u8>)>,
+    in_q: VecDeque<(Instant, SocketAddr, Vec<u8>)>,
 }
 
 impl Net {
@@ -41,28 +42,39 @@ impl Net {
         self.rng ^= self.rng >> 17;
         self.rng ^= self.rng << 5;
         let at = Instant::now() + self.lag + self.jitter.mul_f64(self.rng as f64 / u32::MAX as f64);
-        let q = if outgoing { &self.out_q } else { &self.in_q };
-        q.back().map_or(at, |(last, _)| at.max(*last))
+        let last = if outgoing { self.out_q.back().map(|q| q.0) } else { self.in_q.back().map(|q| q.0) };
+        last.map_or(at, |last| at.max(last))
     }
 
     fn flush(&mut self) {
         while self.out_q.front().is_some_and(|(t, _)| *t <= Instant::now()) {
             let (_, data) = self.out_q.pop_front().unwrap();
-            let _ = self.sock.send_to(&data, self.server);
+            if let Some(server) = self.server {
+                let _ = self.sock.send_to(&data, server);
+            }
         }
     }
 
-    fn recv(&mut self) -> Vec<Vec<u8>> {
+    /// Packets due, with who sent them.
+    fn recv(&mut self) -> Vec<(SocketAddr, Vec<u8>)> {
         let mut buf = [0u8; 65536];
-        while let Ok(n) = self.sock.recv(&mut buf) {
+        while let Ok((n, from)) = self.sock.recv_from(&mut buf) {
             let at = self.fake_arrival(false);
-            self.in_q.push_back((at, buf[..n].to_vec()));
+            self.in_q.push_back((at, from, buf[..n].to_vec()));
         }
         let mut out = vec![];
-        while self.in_q.front().is_some_and(|(t, _)| *t <= Instant::now()) {
-            out.push(self.in_q.pop_front().unwrap().1);
+        while self.in_q.front().is_some_and(|(t, ..)| *t <= Instant::now()) {
+            let (_, from, data) = self.in_q.pop_front().unwrap();
+            out.push((from, data));
         }
         out
+    }
+
+    /// Sends to every server port on the LAN (and this machine), skipping the fake lag.
+    pub fn broadcast(&self, data: &[u8]) {
+        for port in DISCOVERY_PORTS {
+            let _ = self.sock.send_to(data, (std::net::Ipv4Addr::BROADCAST, port));
+        }
     }
 }
 
@@ -109,10 +121,12 @@ struct FrameStats {
     since: Option<Instant>,
 }
 
-/// Joins `server`, running `game` if given, or else the game the server runs (downloaded if need be).
-pub fn run(server: SocketAddr, game: Option<Game>, lag_ms: u64, jitter_ms: u64, interp_ms: u64) {
+/// Joins `server` (or lets the player pick one from the LAN), running `game` if given, or else the game the server
+/// runs (downloaded if need be).
+pub fn run(server: Option<SocketAddr>, game: Option<Game>, lag_ms: u64, jitter_ms: u64, interp_ms: u64) {
     let sock = UdpSocket::bind("0.0.0.0:0").expect("bind");
     sock.set_nonblocking(true).unwrap();
+    sock.set_broadcast(true).unwrap();
     App::new()
         .add_plugins(
             DefaultPlugins
@@ -148,10 +162,11 @@ pub fn run(server: SocketAddr, game: Option<Game>, lag_ms: u64, jitter_ms: u64, 
             incompatible: false,
             wrong_build: None,
         })
-        .add_systems(Startup, setup)
+        .init_resource::<crate::browser::Browser>()
+        .add_systems(Startup, (setup, crate::browser::setup))
         .add_systems(PreUpdate, receive)
         .add_systems(FixedUpdate, net_tick)
-        .add_systems(Update, (grab_cursor, start, frame, crate::render::anchor_ui, overlays).chain())
+        .add_systems(Update, (grab_cursor, crate::browser::browse, start, frame, crate::render::anchor_ui, overlays).chain())
         .add_systems(PostUpdate, debug_shot.run_if(|| std::env::var_os("FPS16_SHOT").is_some()))
         .run();
 }
@@ -259,12 +274,18 @@ fn on_chunk(client: &mut Client, index: u32, chunk: &[u8]) {
 }
 
 /// Every frame rather than every tick, so snapshots aren't left waiting in the socket.
-fn receive(mut net: ResMut<Net>, mut client: ResMut<Client>) {
-    for packet in net.recv() {
+fn receive(mut net: ResMut<Net>, mut client: ResMut<Client>, mut browser: ResMut<crate::browser::Browser>) {
+    for (from, packet) in net.recv() {
+        if Some(from) != net.server {
+            if net.server.is_none() {
+                browser.reply(from, decode(&packet));
+            }
+            continue;
+        }
         match decode::<ServerMsg>(&packet) {
             Some(ServerMsg::Game { hash, size, cookie }) if matches!(client.fetch, Fetch::Asking) => on_game(&mut client, hash, size, cookie),
             Some(ServerMsg::Chunk { index, data }) => on_chunk(&mut client, index, &data),
-            Some(ServerMsg::Game { .. }) => {}
+            Some(ServerMsg::Game { .. } | ServerMsg::Info { .. }) => {}
             Some(ServerMsg::Snapshot(snap)) => {
                 let Client { game: Some(game), netcode, .. } = &mut *client else { continue };
                 let Some(snap) = netcode.snapshot(snap, &mut |e, i, s| game.predict(e, i, s, false)) else { continue };
@@ -305,6 +326,9 @@ fn net_tick(
     mut ticks: Local<u32>,
 ) {
     *ticks += 1;
+    if net.server.is_none() {
+        return;
+    }
     let mut send = |msg| net.send(encode(&ClientPacket { build: BUILD.into(), msg }));
     match &mut client.fetch {
         Fetch::Asking if *ticks % 64 == 1 => send(ClientMsg::Hello { pad: vec![0; HELLO_SIZE] }),
@@ -376,8 +400,14 @@ fn frame(
     }
 }
 
-fn grab_cursor(mut cursor: Single<&mut CursorOptions, With<PrimaryWindow>>, mouse: Res<ButtonInput<MouseButton>>, keys: Res<ButtonInput<KeyCode>>) {
-    if mouse.just_pressed(MouseButton::Left) {
+fn grab_cursor(
+    mut cursor: Single<&mut CursorOptions, With<PrimaryWindow>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    client: Res<Client>,
+) {
+    // Not while picking a server or loading: the mouse is for the browser then.
+    if mouse.just_pressed(MouseButton::Left) && client.started {
         cursor.grab_mode = CursorGrabMode::Locked;
         cursor.visible = false;
     }
@@ -390,6 +420,7 @@ fn grab_cursor(mut cursor: Single<&mut CursorOptions, With<PrimaryWindow>>, mous
 
 fn overlays(
     mut client: ResMut<Client>,
+    net: Res<Net>,
     mut status: Single<&mut Text, (With<StatusText>, Without<NetGraphText>)>,
     graph: Single<(&mut Text, &mut Visibility), With<NetGraphText>>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -398,6 +429,7 @@ fn overlays(
 ) {
     let c = &mut *client;
     status.0 = match (c.incompatible, c.netcode.me, &c.wrong_build, &c.fetch) {
+        _ if net.server.is_none() => String::new(),
         (_, None, Some(server), _) => format!("SERVER IS ON BUILD {server}, YOU HAVE BUILD {BUILD} - restart the game to update"),
         (true, None, ..) => "SERVER IS A DIFFERENT VERSION - update both".into(),
         _ if c.error.is_some() => c.error.clone().unwrap_or_default(),

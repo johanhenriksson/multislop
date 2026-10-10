@@ -45,13 +45,10 @@ for f in fps16 dust.wasm; do
     gzip -c "$app/Contents/Resources/$f" > "$out/$f.gz"
 done
 
-default_host="$(ipconfig getifaddr en0 || echo 127.0.0.1):5000"
-
 cat > "$app/Contents/MacOS/fps16" <<EOF
 #!/bin/sh
 # UPDATE_BASE= disables the update check.
 : "\${UPDATE_BASE=$PUBLIC}"
-DEFAULT_HOST="$default_host"
 EOF
 cat >> "$app/Contents/MacOS/fps16" <<'EOF'
 set -eu
@@ -100,10 +97,9 @@ update dust.wasm
 
 if [ $# -gt 0 ]; then exec ./fps16 "$@"; fi
 
-last=$(cat host 2>/dev/null || echo "$DEFAULT_HOST")
-answer=$(osascript -e "display dialog \"Server address to join, or Host to run a server on this Mac.\" default answer \"$last\" buttons {\"Quit\", \"Host\", \"Join\"} default button \"Join\" cancel button \"Quit\" with title \"fps16\"") || exit 0
-button=$(printf '%s' "$answer" | sed -n 's/^button returned:\([^,]*\),.*/\1/p')
-text=${answer##*text returned:}
+# Join opens the server browser (LAN servers, or type an address).
+answer=$(osascript -e 'display dialog "Join a game, or Host one on this Mac." buttons {"Quit", "Host", "Join"} default button "Join" cancel button "Quit" with title "fps16"') || exit 0
+button=$(printf '%s' "$answer" | sed -n 's/^button returned:\(.*\)$/\1/p')
 
 if [ "$button" = "Host" ]; then
     ./fps16 server &
@@ -114,8 +110,7 @@ if [ "$button" = "Host" ]; then
     sleep 0.3
     ./fps16 client 127.0.0.1:5000
 else
-    printf '%s\n' "$text" > host
-    exec ./fps16 client "$text"
+    exec ./fps16 client
 fi
 EOF
 chmod +x "$app/Contents/MacOS/fps16"

@@ -2,7 +2,7 @@
 //! call so a broken game can't hang the server or client.
 
 use sdk::client::{ClientGame, ClientSnapshot, Command, FrameIn, FrameOut, RawInput};
-use sdk::{Entity, Frame, ServerGame, decode, encode};
+use sdk::{Entity, Frame, GameInfo, ServerGame, decode, encode};
 use std::time::Duration;
 use wasmtime::{Caller, Config, Engine, Instance, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, TypedFunc, WasmParams, WasmResults};
 
@@ -85,6 +85,7 @@ pub struct WasmGame {
     ping: TypedFunc<(u32, u32), ()>,
     input: TypedFunc<(u32, u32, f32, u32), ()>,
     tick: TypedFunc<(), u64>,
+    info: TypedFunc<(), u64>,
 }
 
 impl WasmGame {
@@ -96,6 +97,7 @@ impl WasmGame {
             ping: wasm.func("fps16_ping")?,
             input: wasm.func("fps16_input")?,
             tick: wasm.func("fps16_tick")?,
+            info: wasm.func("fps16_info")?,
             wasm,
         })
     }
@@ -122,6 +124,11 @@ impl ServerGame for WasmGame {
 
     fn tick(&mut self) -> Frame {
         let out = self.wasm.call(&self.tick, ());
+        decode(self.wasm.ret(out)).unwrap_or_default()
+    }
+
+    fn info(&mut self) -> GameInfo {
+        let out = self.wasm.call(&self.info, ());
         decode(self.wasm.ret(out)).unwrap_or_default()
     }
 }

@@ -1,6 +1,6 @@
 //! What the host sends over the wire. Game data rides inside as opaque bytes.
 
-use sdk::Entity;
+use sdk::{Entity, GameInfo};
 use serde::{Deserialize, Serialize};
 
 /// Bumped by every `tools/release.sh publish`. Server and client must match exactly.
@@ -20,7 +20,15 @@ pub enum ServerMsg {
     /// only the real sender of a hello can make the server send chunks.
     Game { hash: [u8; 32], size: u32, cookie: u64 },
     Chunk { index: u32, data: Vec<u8> },
+    /// For server browsers: who we are and what's on, with the query's `time` echoed to measure ping.
+    Info { name: String, game: GameInfo, time: f64 },
 }
+
+/// Ports server browsers ask on: the default and the next few, for several servers on one machine.
+pub const DISCOVERY_PORTS: std::ops::RangeInclusive<u16> = 5000..=5009;
+/// An info query must be at least this big; names in the answer are cut to `NAME_LEN` so it's never bigger.
+pub const INFO_QUERY_SIZE: usize = 128;
+pub const NAME_LEN: usize = 32;
 
 /// Module bytes per `ServerMsg::Chunk`, small enough for one unfragmented UDP packet.
 pub const CHUNK: usize = 1200;
@@ -42,6 +50,8 @@ pub struct ClientPacket {
 pub enum ClientMsg {
     /// Which game do you run? Padded up to `HELLO_SIZE`.
     Hello { pad: Vec<u8> },
+    /// What are you? Padded up to `INFO_QUERY_SIZE`. Server browsers broadcast this.
+    Info { time: f64, pad: Vec<u8> },
     /// Module chunks wanted, by index.
     Chunks { cookie: u64, chunks: Vec<u32> },
     Input(InputPacket),

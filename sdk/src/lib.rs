@@ -53,6 +53,15 @@ pub struct Frame {
     pub events: Vec<Event>,
 }
 
+/// What a server browser shows about a game.
+#[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq)]
+pub struct GameInfo {
+    pub map: String,
+    /// People playing.
+    pub players: u32,
+    pub bots: u32,
+}
+
 /// The server half of a game. All game data crosses as bytes the game defines; the host only moves them.
 pub trait ServerGame {
     /// A player joined; returns the id the game gave them.
@@ -65,6 +74,7 @@ pub trait ServerGame {
     fn input(&mut self, id: u32, seq: u32, view_tick: f32, input: &[u8]);
     /// Advances the game by one tick (1 / `TICK_HZ` seconds).
     fn tick(&mut self) -> Frame;
+    fn info(&mut self) -> GameInfo;
 }
 
 /// Recent entity positions, for lag compensation: rewinding others to where a shooter saw them.
@@ -198,6 +208,11 @@ macro_rules! export_server {
             #[unsafe(no_mangle)]
             extern "C" fn fps16_tick() -> u64 {
                 $crate::wasm_ret($crate::encode(&game(|g| g.tick())))
+            }
+
+            #[unsafe(no_mangle)]
+            extern "C" fn fps16_info() -> u64 {
+                $crate::wasm_ret($crate::encode(&game(|g| g.info())))
             }
         }
     };

@@ -7,7 +7,7 @@ use crate::shared::*;
 use crate::weapons::*;
 use glam::Vec3;
 use sdk::ability::{Delivery, Payload, step_projectile};
-use sdk::{Entity, Frame, History, ServerGame, log};
+use sdk::{Entity, Frame, GameInfo, History, ServerGame, log};
 use std::collections::BTreeMap;
 
 type Players = BTreeMap<u32, Player>;
@@ -173,6 +173,11 @@ impl ServerGame for Dust {
             events.push(sdk::Event { to: Some(to), data: encode(&Event::Radio(r)) });
         }
         Frame { state: encode(&net_round(&self.m, self.tick)), entities, events }
+    }
+
+    fn info(&mut self) -> GameInfo {
+        let bots = self.players.values().filter(|c| c.bot.is_some()).count() as u32;
+        GameInfo { map: "dust".into(), players: self.players.len() as u32 - bots, bots }
     }
 }
 

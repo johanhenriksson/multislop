@@ -34,8 +34,8 @@ const STATS_EVERY: Duration = Duration::from_secs(5);
 /// Above this many queued inputs, simulate two per tick to catch up. Each queued input is a tick of added latency.
 const QUEUE_CATCH_UP: usize = INPUT_EVERY as usize + 1;
 
-/// Runs `game`; `module` is its wasm, sent to clients that don't have it yet.
-pub fn run(port: u16, mut game: Box<dyn ServerGame>, module: Vec<u8>) {
+/// Runs `game` as `name`; `module` is its wasm, sent to clients that don't have it yet.
+pub fn run(port: u16, name: &str, mut game: Box<dyn ServerGame>, module: Vec<u8>) {
     let sock = UdpSocket::bind(("0.0.0.0", port)).expect("bind");
     println!("server build {BUILD} listening on :{port}");
     let mut rejected = std::collections::HashSet::new();
@@ -71,6 +71,13 @@ pub fn run(port: u16, mut game: Box<dyn ServerGame>, module: Vec<u8>) {
             let InputPacket { time, inputs, name, ping } = match msg {
                 ClientMsg::Hello { .. } if n >= HELLO_SIZE => {
                     let _ = sock.send_to(&encode(&ServerMsg::Game { hash, size, cookie }), addr);
+                    continue;
+                }
+                ClientMsg::Info { time, .. } if n >= INFO_QUERY_SIZE => {
+                    let mut info = game.info();
+                    info.map = info.map.chars().take(NAME_LEN).collect();
+                    let name = name.chars().take(NAME_LEN).collect();
+                    let _ = sock.send_to(&encode(&ServerMsg::Info { name, game: info, time }), addr);
                     continue;
                 }
                 ClientMsg::Chunks { cookie: c, chunks } if c == cookie => {

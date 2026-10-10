@@ -7,15 +7,23 @@ Deadline: playable before 00:00. One weapon, one simple map.
   in: servers run a module and clients download it from the server.
 - `cargo run --release -- server [port] [--game game.wasm]` (headless, default port 5000; the game defaults to
   `dust.wasm` next to the executable, so in development pass `--game target/wasm32-unknown-unknown/release/dust.wasm`)
-- `cargo run --release -- client <host:port> [--game game.wasm] [--lag ms] [--jitter ms] [--interp ms]` (`--game` uses a local module instead of downloading the server's, `--lag`/`--jitter` fake delay and bursty arrival to test netcode, `--interp` is the minimum remote-player buffer, default 50)
+- `cargo run --release -- client [host:port] [--game game.wasm] [--lag ms] [--jitter ms] [--interp ms]` (`--game` uses a local module instead of downloading the server's, `--lag`/`--jitter` fake delay and bursty arrival to test netcode, `--interp` is the minimum remote-player buffer, default 50)
 
 ## Distribution
 - `tools/release.sh` builds `dist/fps16-mac.zip`: a universal, unsigned `fps16.app` with the binary and `dust.wasm`,
-  whose launcher self-updates each from `$FPS16_PUBLIC/<file>.sha256` + `<file>.gz`, then asks to Join an address or
-  Host a server on that Mac (which runs the `dust.wasm` beside the binary).
+  whose launcher self-updates each from `$FPS16_PUBLIC/<file>.sha256` + `<file>.gz`, then asks to Join (the server
+  browser) or Host a server on that Mac (which runs the `dust.wasm` beside the binary).
 - `tools/release.sh publish` bumps `build_number.txt` and uploads to the VPS; the sha256 files go last since they are
   the update triggers. The build number is compiled in; the server rejects clients on another build and they are told
   to restart (which updates them).
+
+## Server browser
+- `fps16 client` without an address opens the LAN browser: every second it broadcasts an info query (padded to 128
+  bytes, so answers are never larger) to ports 5000-5009; servers answer with their name (`--name`, default
+  "<user>'s server"), the game's map and player/bot counts (`ServerGame::info`), and the query time echoed for
+  ping. Servers on another build answer with their build and are listed grayed out. Entries vanish after 3.5 s of
+  silence. Click a server, or arrow keys and Enter, or type an address (remembered in
+  `~/Library/Application Support/fps16/host`) and press Enter.
 
 ## Gameplay
 - Players are capsules ("rounded cylinders"): radius 0.4, height 1.8, eye at 1.6.
