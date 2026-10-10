@@ -14,17 +14,16 @@ use std::collections::{HashMap, VecDeque};
 const MOUSE_SENS: f32 = 0.002;
 const FOV: f32 = 1.6;
 
-/// Runner colors, picked by id.
-const COLORS: [Color; 8] = [
-    Color::srgb(1.0, 0.2, 0.15),
-    Color::srgb(0.2, 0.5, 1.0),
-    Color::srgb(0.2, 1.0, 0.3),
-    Color::srgb(1.0, 0.85, 0.1),
-    Color::srgb(1.0, 0.25, 0.9),
-    Color::srgb(0.1, 0.95, 1.0),
-    Color::srgb(1.0, 0.5, 0.05),
-    Color::srgb(0.65, 0.4, 1.0),
-];
+pub fn rgb([r, g, b]: [u8; 3]) -> Color {
+    Color::srgb(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0)
+}
+
+/// A player color for text: dark ones lifted towards white so they read on dark backgrounds.
+pub fn readable(c: [u8; 3]) -> Color {
+    let [r, g, b, _] = rgb(c).0;
+    let lift = (0.5 - (0.3 * r + 0.6 * g + 0.1 * b)).max(0.0) * 1.4;
+    Color::srgb(r + (1.0 - r) * lift, g + (1.0 - g) * lift, b + (1.0 - b) * lift)
+}
 
 #[derive(Default)]
 struct Sounds {
@@ -54,9 +53,9 @@ pub struct RaceClient {
     scene: Scene,
     sounds: Sounds,
     hud: hud::Hud,
-    /// Body and glowing trim materials, the trim by color index.
+    /// Body and glowing trim materials, the trim by color.
     body: u32,
-    trim: Vec<u32>,
+    trim: HashMap<[u8; 3], u32>,
     lasers: Vec<u32>,
     lava: u32,
     me: Option<u32>,
@@ -112,7 +111,7 @@ impl ClientGame for RaceClient {
         self.lasers = world::lasers(&mut self.scene);
         let s = &mut self.scene;
         self.body = s.material(Material { color: Color::srgb(0.9, 0.9, 0.92), roughness: 0.4, ..Default::default() });
-        self.trim = COLORS.iter().map(|&c| s.material(glowing(c, 2.0))).collect();
+        self.trim = HashMap::new();
         self.build_hud();
         std::mem::take(&mut self.scene.out)
     }
@@ -277,7 +276,7 @@ impl RaceClient {
         let mut seen = HashMap::new();
         for v in others {
             let Some(p) = NetPlayer::from_entity(&v.entity) else { continue };
-            seen.insert(p.id, (p.state.pos, p.state.yaw, !v.teleporting));
+            seen.insert(p.id, (p.state.pos, p.state.yaw, !v.teleporting, p.color));
         }
         let gone: Vec<u32> = self.rigs.keys().filter(|id| !seen.contains_key(id)).copied().collect();
         for id in gone {
@@ -285,9 +284,9 @@ impl RaceClient {
             self.scene.push(Command::Despawn { id: rig.root });
             self.scene.ui_despawn(rig.tag);
         }
-        for (id, (pos, yaw, shown)) in seen {
+        for (id, (pos, yaw, shown, color)) in seen {
             if !self.rigs.contains_key(&id) {
-                let rig = self.spawn_rig(id);
+                let rig = self.spawn_rig(color);
                 self.rigs.insert(id, rig);
             }
             let name = self.name(id);
@@ -314,9 +313,9 @@ impl RaceClient {
     }
 
     /// A rounded little runner in white with a glowing band, visor and limbs in its color.
-    fn spawn_rig(&mut self, id: u32) -> Rig {
-        let (body, trim) = (self.body, self.trim[id as usize % COLORS.len()]);
+    fn spawn_rig(&mut self, color: [u8; 3]) -> Rig {
         let s = &mut self.scene;
+        let (body, trim) = (self.body, *self.trim.entry(color).or_insert_with(|| s.material(glowing(rgb(color), 2.0))));
         let root = s.empty(None, Transform::default(), false);
         let torso = s.shared_mesh("torso".into(), || MeshData::Sphere { radius: 0.36, ico: None });
         s.mesh_node(Some(root), torso, body, Transform { scale: Vec3::new(1.0, 1.15, 0.8), ..Transform::at(Vec3::Y * 1.15) });
@@ -338,7 +337,7 @@ impl RaceClient {
             s.mesh_node(Some(shoulder), arm, trim, Transform::at(Vec3::Y * -0.28));
             shoulder
         });
-        let tag = s.ui(None, UiNode { text: Some(Text { shadow: true, center: true, ..Text::new("", 14.0, Color::srgba(1.0, 1.0, 1.0, 0.85)) }), hidden: true, ..Default::default() });
+        let tag = s.ui(None, UiNode { text: Some(Text { shadow: true, center: true, ..Text::new("", 14.0, readable(color)) }), hidden: true, ..Default::default() });
         Rig { root, legs, arms, tag, stride: 0.0, last_pos: Vec3::ZERO }
     }
 }

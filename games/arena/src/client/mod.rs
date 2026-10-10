@@ -14,20 +14,15 @@ use std::collections::{HashMap, VecDeque};
 const MOUSE_SENS: f32 = 0.002;
 const FOV: f32 = 1.6;
 
-/// Player colors, picked by id.
-const COLORS: [Color; 8] = [
-    Color::srgb(1.0, 0.2, 0.15),
-    Color::srgb(0.2, 0.5, 1.0),
-    Color::srgb(0.2, 1.0, 0.3),
-    Color::srgb(1.0, 0.85, 0.1),
-    Color::srgb(1.0, 0.25, 0.9),
-    Color::srgb(0.1, 0.95, 1.0),
-    Color::srgb(1.0, 0.5, 0.05),
-    Color::srgb(0.65, 0.4, 1.0),
-];
+pub fn rgb([r, g, b]: [u8; 3]) -> Color {
+    Color::srgb(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0)
+}
 
-pub fn color(id: u32) -> Color {
-    COLORS[id as usize % COLORS.len()]
+/// A player color for text: dark ones lifted towards white so they read on dark backgrounds.
+pub fn readable(c: [u8; 3]) -> Color {
+    let [r, g, b, _] = rgb(c).0;
+    let lift = (0.5 - (0.3 * r + 0.6 * g + 0.1 * b)).max(0.0) * 1.4;
+    Color::srgb(r + (1.0 - r) * lift, g + (1.0 - g) * lift, b + (1.0 - b) * lift)
 }
 
 #[derive(Default)]
@@ -71,8 +66,8 @@ struct Assets {
     gib: u32,
     puff: u32,
     armor: u32,
-    /// Player color materials, glowing, by color index.
-    glow: Vec<u32>,
+    /// Player color materials, glowing, by color.
+    glow: HashMap<[u8; 3], u32>,
     /// The viewmodel's coils, and their material as last sent.
     coils: u32,
     coils_lit: Option<u8>,
@@ -99,7 +94,8 @@ pub struct ArenaClient {
     /// Where each remote player is drawn, for gibs.
     drawn: HashMap<u32, Vec3>,
     fx: Vec<Fx>,
-    feed: VecDeque<(String, f64)>,
+    /// Killer and victim, named in their colors, and when.
+    feed: VecDeque<([(String, Color); 2], f64)>,
     /// Centered message and when it was shown.
     message: Option<(String, f64)>,
     killer: Option<u32>,
@@ -142,7 +138,7 @@ impl ClientGame for ArenaClient {
             gib: s.mesh(MeshData::Cuboid(Vec3::splat(0.16))),
             puff: s.mesh(MeshData::Sphere { radius: 1.0, ico: Some(1) }),
             armor: s.material(Material { color: Color::srgb(0.16, 0.17, 0.2), roughness: 0.4, metallic: 0.6, ..Default::default() }),
-            glow: COLORS.iter().map(|&c| s.material(glowing(c, 3.0))).collect(),
+            glow: HashMap::new(),
             coils: s.material(glowing(Color::srgb(0.3, 0.9, 1.0), 4.0)),
             coils_lit: None,
         };
@@ -260,6 +256,16 @@ impl ArenaClient {
         self.players.iter().find(|p| p.id == id).map_or_else(|| format!("player {id}"), |p| p.name.clone())
     }
 
+    fn color(&self, id: u32) -> [u8; 3] {
+        self.players.iter().find(|p| p.id == id).map_or([255; 3], |p| p.color)
+    }
+
+    /// The glowing material in a player color, made the first time it's needed.
+    fn glow(&mut self, color: [u8; 3]) -> u32 {
+        let s = &mut self.scene;
+        *self.assets.glow.entry(color).or_insert_with(|| s.material(glowing(rgb(color), 3.0)))
+    }
+
     fn on_frag(&mut self, killer: u32, victim: u32) {
         let me = self.me;
         let at = if Some(victim) == me { Some(self.pred.pos) } else { self.drawn.get(&victim).copied() };
@@ -274,7 +280,8 @@ impl ArenaClient {
         if Some(victim) == me {
             (self.killer, self.died_at) = (Some(killer), self.time);
         }
-        self.feed.push_back((format!("{} railed {}", self.name(killer), self.name(victim)), self.time));
+        let named = |id| (self.name(id), readable(self.color(id)));
+        self.feed.push_back(([named(killer), named(victim)], self.time));
         if self.feed.len() > 5 {
             self.feed.pop_front();
         }
@@ -284,7 +291,7 @@ impl ArenaClient {
     fn beam(&mut self, shooter: u32, from: Vec3, to: Vec3) {
         let (len, dir) = (from.distance(to), (to - from).normalize_or(Vec3::NEG_Z));
         let rot = Quat::from_rotation_arc(Vec3::Y, dir);
-        let [r, g, b, _] = color(shooter).0;
+        let [r, g, b, _] = rgb(self.color(shooter)).0;
         for (radius, c, life, grow) in [(0.02, Color::srgba(1.0, 1.0, 1.0, 1.0), 0.25, 1.0), (0.05, Color::srgba(r, g, b, 0.5), 1.1, 2.0)] {
             let material = Material { color: c, emissive: [r * 4.0, g * 4.0, b * 4.0], unlit: true, blend: Blend::Blend, ..Default::default() };
             let transform = Transform { pos: (from + to) / 2.0, rot, scale: Vec3::new(radius, len, radius) };
@@ -294,11 +301,10 @@ impl ArenaClient {
 
     /// The victim bursts: chunks of armor and glowing bits fly out and bounce, with a puff in their color.
     fn gibs(&mut self, victim: u32, feet: Vec3) {
-        let c = color(victim);
-        let [r, g, b, _] = c.0;
+        let [r, g, b, _] = rgb(self.color(victim)).0;
         let puff = Material { color: Color::srgba(r, g, b, 0.6), unlit: true, blend: Blend::Blend, ..Default::default() };
         self.effect(self.assets.puff, puff, Transform::at(feet + Vec3::Y).scaled(0.4), None, 0.5, Vec3::splat(4.0));
-        let glow = self.assets.glow[victim as usize % COLORS.len()];
+        let glow = self.glow(self.color(victim));
         for i in 0..14 {
             let (a, up, out) = (self.random() * std::f32::consts::TAU, 4.0 + self.random() * 6.0, 2.0 + self.random() * 5.0);
             let vel = Vec3::new(a.cos() * out, up, a.sin() * out);
@@ -397,7 +403,7 @@ impl ArenaClient {
             let Some(p) = NetPlayer::from_entity(&v.entity) else { continue };
             // Alive as of the newest snapshot too, so someone just fragged doesn't linger until interpolation catches up.
             let alive = p.alive && !v.teleporting && self.players.iter().any(|q| q.id == p.id && q.alive);
-            seen.insert(p.id, (p.state.pos, p.state.yaw, p.state.pitch, alive));
+            seen.insert(p.id, (p.state.pos, p.state.yaw, p.state.pitch, alive, p.color));
         }
         let gone: Vec<u32> = self.rigs.keys().filter(|id| !seen.contains_key(id)).copied().collect();
         for id in gone {
@@ -405,9 +411,9 @@ impl ArenaClient {
             self.scene.push(Command::Despawn { id: rig.root });
         }
         self.drawn = seen.iter().map(|(&id, v)| (id, v.0)).collect();
-        for (id, (pos, yaw, pitch, alive)) in seen {
+        for (id, (pos, yaw, pitch, alive, color)) in seen {
             if !self.rigs.contains_key(&id) {
-                let rig = self.spawn_rig(id);
+                let rig = self.spawn_rig(color);
                 self.rigs.insert(id, rig);
             }
             let rig = self.rigs.get_mut(&id).unwrap();
@@ -425,14 +431,14 @@ impl ArenaClient {
     }
 
     /// An armored figure with a glowing visor and trim in the player's color, holding a railgun.
-    fn spawn_rig(&mut self, id: u32) -> Rig {
-        let (armor, glow) = (self.assets.armor, self.assets.glow[id as usize % COLORS.len()]);
+    fn spawn_rig(&mut self, color: [u8; 3]) -> Rig {
+        let (armor, glow) = (self.assets.armor, self.glow(color));
         let s = &mut self.scene;
         let root = s.empty(None, Transform::default(), false);
         let torso = s.cuboid(Vec3::new(0.56, 0.62, 0.32));
         s.mesh_node(Some(root), torso, armor, Transform::at(Vec3::Y * 1.12));
-        let stripe = s.cuboid(Vec3::new(0.58, 0.08, 0.34));
-        s.mesh_node(Some(root), stripe, glow, Transform::at(Vec3::Y * 1.2));
+        let stripe = s.cuboid(Vec3::new(0.58, 0.2, 0.34));
+        s.mesh_node(Some(root), stripe, glow, Transform::at(Vec3::Y * 1.18));
         let head = s.shared_mesh("head".into(), || MeshData::Sphere { radius: 0.19, ico: None });
         s.mesh_node(Some(root), head, armor, Transform::at(Vec3::Y * 1.62));
         let visor = s.cuboid(Vec3::new(0.3, 0.07, 0.1));

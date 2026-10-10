@@ -89,8 +89,8 @@ pub struct InputMsg {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct InputPacket {
-    /// Player name: the logged-in user on the client's machine.
-    pub name: String,
+    /// Who's playing, as set up on their machine.
+    pub who: sdk::Profile,
     /// The client's measured round trip, shown on everyone's scoreboard.
     pub ping: u16,
     /// Client clock when sent, echoed back in snapshots to measure the network round trip.
@@ -282,7 +282,7 @@ mod tests {
     #[test]
     fn deltas_rebuild_snapshots_and_save_most_of_the_bytes() {
         let mut game = dust::game::Dust::new();
-        game.connect("tester");
+        game.connect(&"tester".into());
         let mut snaps = Vec::new();
         for tick in 1..=(30.0 * sdk::TICK_HZ) as u32 {
             let frame = game.tick();

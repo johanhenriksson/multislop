@@ -95,13 +95,13 @@ impl NetClient {
     }
 
     /// The packet to send this tick, if it's a sending tick, for the server's `game`.
-    pub fn packet(&self, name: String, game: u8) -> Option<InputPacket> {
+    pub fn packet(&self, who: sdk::Profile, game: u8) -> Option<InputPacket> {
         if self.seq % INPUT_EVERY != 0 {
             return None;
         }
         let inputs = self.pending.iter().skip(self.pending.len().saturating_sub(REDUNDANCY)).cloned().collect();
         let ping = self.ping_ms.round() as u16;
-        Some(InputPacket { name, ping, time: clock(), inputs, snapshot: self.latest_tick, game })
+        Some(InputPacket { who, ping, time: clock(), inputs, snapshot: self.latest_tick, game })
     }
 
     /// A buffered snapshot, to rebuild a delta against.

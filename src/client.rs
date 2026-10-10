@@ -185,7 +185,7 @@ pub fn run(server: Option<SocketAddr>, local: Option<Vec<u8>>, hostable: Vec<std
             DefaultPlugins
                 .set(WindowPlugin {
                     primary_window: Some(Window {
-                        title: format!("fps16 build {BUILD}"),
+                        title: format!("Multislop build {BUILD}"),
                         present_mode: PresentMode::AutoNoVsync,
                         // Screenshot runs render off-screen: no window popping up or taking the keyboard.
                         visible: std::env::var_os("FPS16_SHOT").is_none(),
@@ -210,10 +210,11 @@ pub fn run(server: Option<SocketAddr>, local: Option<Vec<u8>>, hostable: Vec<std
         .init_resource::<Clicked>()
         .insert_resource(Client::new(local, interp_ms))
         .insert_resource(crate::browser::Browser::new(hostable))
+        .insert_resource(Me::load())
         .add_systems(Startup, (setup, crate::browser::setup))
         .add_systems(PreUpdate, receive)
         .add_systems(FixedUpdate, net_tick)
-        .add_systems(Update, (grab_cursor, watchdog, crate::browser::browse, start, frame, crate::render::anchor_ui, overlays).chain())
+        .add_systems(Update, (grab_cursor, watchdog, crate::browser::browse, crate::browser::animate, start, frame, crate::render::anchor_ui, overlays).chain())
         .add_systems(PostUpdate, debug_shot.run_if(|| std::env::var_os("FPS16_SHOT").is_some()))
         .run();
 }
@@ -514,6 +515,7 @@ fn captured(cursor: &CursorOptions) -> bool {
 }
 
 fn net_tick(
+    me: Res<Me>,
     mut net: ResMut<Net>,
     mut client: ResMut<Client>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -547,7 +549,7 @@ fn net_tick(
             let Client { game: Some(game), netcode, generation, .. } = &mut *client else { return };
             let input = game.input(&raw);
             netcode.input(input, &mut |e, i, s| game.predict(e, i, s, true));
-            if let Some(packet) = netcode.packet(player_name(), *generation) {
+            if let Some(packet) = netcode.packet(me.0.clone(), *generation) {
                 send(ClientMsg::Input(packet));
             }
         }
@@ -669,11 +671,36 @@ fn overlays(
     }
 }
 
-/// The logged-in macOS user (also set for apps launched from Finder).
-fn player_name() -> String {
-    static NAME: std::sync::LazyLock<String> =
-        std::sync::LazyLock::new(|| std::env::var("USER").or_else(|_| std::env::var("LOGNAME")).unwrap_or_else(|_| "player".into()));
-    NAME.clone()
+/// Who we are in every game: the logged-in macOS user (also set for apps launched from Finder), in the color kept in
+/// the data folder, a random one from the palette the first time.
+#[derive(Resource)]
+pub struct Me(pub sdk::Profile);
+
+impl Me {
+    fn color_path() -> std::path::PathBuf {
+        data_dir().join("color")
+    }
+
+    pub fn load() -> Me {
+        let name = std::env::var("USER").or_else(|_| std::env::var("LOGNAME")).unwrap_or_else(|_| "player".into());
+        let saved = std::fs::read_to_string(Me::color_path()).ok().and_then(|hex| {
+            let n = u32::from_str_radix(hex.trim(), 16).ok()?;
+            Some([(n >> 16) as u8, (n >> 8) as u8, n as u8])
+        });
+        let color = saved.unwrap_or_else(|| {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+            let color = sdk::PALETTE[now.subsec_nanos() as usize % sdk::PALETTE.len()];
+            Me::save(color);
+            color
+        });
+        Me(sdk::Profile { name, color })
+    }
+
+    pub fn save(color: [u8; 3]) {
+        let [r, g, b] = color;
+        let _ = std::fs::create_dir_all(data_dir());
+        let _ = std::fs::write(Me::color_path(), format!("{r:02x}{g:02x}{b:02x}\n"));
+    }
 }
 
 /// For checking visuals without a person at the screen: `FPS16_SHOT=out.png` saves one screenshot after

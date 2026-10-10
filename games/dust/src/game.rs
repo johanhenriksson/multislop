@@ -125,9 +125,9 @@ impl Dust {
 }
 
 impl ServerGame for Dust {
-    fn connect(&mut self, name: &str) -> u32 {
+    fn connect(&mut self, who: &sdk::Profile) -> u32 {
         let team = smaller_team(&self.players);
-        let name = clean_name(name);
+        let name = clean_name(&who.name);
         let id = self.next_id;
         self.next_id += 1;
         log(&format!("{name} (player {id}) joined as {}", team.name()));

@@ -72,10 +72,54 @@ pub struct GameInfo {
     pub bots: u32,
 }
 
+/// Who a player is, the same in every game: the name and color they picked on their machine. Games show the color on
+/// the player's model, nametag and so on, so people are recognisable from one game to the next.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Profile {
+    pub name: String,
+    /// sRGB, one of `PALETTE` unless someone hand-edited it.
+    pub color: [u8; 3],
+}
+
+/// Player colors: bright, and far enough apart to tell at a glance.
+pub const PALETTE: [[u8; 3]; 16] = [
+    [255, 59, 48],
+    [255, 149, 0],
+    [255, 214, 10],
+    [166, 255, 0],
+    [48, 209, 88],
+    [0, 255, 170],
+    [0, 214, 255],
+    [10, 132, 255],
+    [94, 92, 230],
+    [191, 90, 242],
+    [255, 55, 200],
+    [255, 105, 140],
+    [255, 255, 255],
+    [255, 190, 140],
+    [150, 200, 255],
+    [200, 160, 40],
+];
+
+impl Profile {
+    pub fn color(&self) -> client::Color {
+        let [r, g, b] = self.color.map(|c| c as f32 / 255.0);
+        client::Color::srgb(r, g, b)
+    }
+}
+
+/// A name with a palette color picked from it, the same every time: for bots, and tests.
+impl From<&str> for Profile {
+    fn from(name: &str) -> Profile {
+        let hash = name.bytes().fold(2166136261u32, |h, b| (h ^ b as u32).wrapping_mul(16777619));
+        Profile { name: name.into(), color: PALETTE[hash as usize % PALETTE.len()] }
+    }
+}
+
 /// The server half of a game. All game data crosses as bytes the game defines; the host only moves them.
 pub trait ServerGame {
     /// A player joined; returns the id the game gave them.
-    fn connect(&mut self, name: &str) -> u32;
+    fn connect(&mut self, who: &Profile) -> u32;
     fn disconnect(&mut self, id: u32);
     /// The player's network round trip in ms, as their client measures it.
     fn ping(&mut self, id: u32, ms: u16);
@@ -201,8 +245,8 @@ macro_rules! export_server {
 
             #[unsafe(no_mangle)]
             extern "C" fn fps16_connect(len: usize) -> u32 {
-                let name = $crate::wasm_arg(len, |b| String::from_utf8_lossy(b).into_owned());
-                game(|g| g.connect(&name))
+                let who = $crate::wasm_arg(len, |b| $crate::decode(b)).unwrap_or_else(|| "?".into());
+                game(|g| g.connect(&who))
             }
 
             #[unsafe(no_mangle)]

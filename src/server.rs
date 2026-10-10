@@ -116,7 +116,7 @@ pub fn run(sock: UdpSocket, name: &str, mut games: Vec<(Box<dyn ServerGame>, Vec
                 continue;
             };
             let cookie = cookies.hash_one(addr);
-            let InputPacket { time, inputs, name, ping, snapshot, .. } = match msg {
+            let InputPacket { time, inputs, who, ping, snapshot, .. } = match msg {
                 ClientMsg::Hello { .. } if n >= HELLO_SIZE => {
                     let _ = sock.send_to(&encode(&ServerMsg::Game { hash, size, cookie, game: generation }), addr);
                     continue;
@@ -145,7 +145,7 @@ pub fn run(sock: UdpSocket, name: &str, mut games: Vec<(Box<dyn ServerGame>, Vec
                 _ => continue,
             };
             let c = clients.entry(addr).or_insert_with(|| {
-                let id = game.connect(&name);
+                let id = game.connect(&who);
                 println!("player {id} connected from {addr}");
                 Client {
                     id,
@@ -280,7 +280,7 @@ mod tests {
     struct Quick(&'static str, u32);
 
     impl ServerGame for Quick {
-        fn connect(&mut self, _: &str) -> u32 {
+        fn connect(&mut self, _: &sdk::Profile) -> u32 {
             1
         }
         fn disconnect(&mut self, _: u32) {}
@@ -317,7 +317,7 @@ mod tests {
             if let Some(game) = generation {
                 seq += 1;
                 let inputs = vec![InputMsg { seq, view_tick: 0.0, data: vec![] }];
-                send(ClientMsg::Input(InputPacket { name: "me".into(), ping: 0, time: 0.0, snapshot: 0, inputs, game }));
+                send(ClientMsg::Input(InputPacket { who: "me".into(), ping: 0, time: 0.0, snapshot: 0, inputs, game }));
             }
             let Ok(n) = me.recv(&mut buf) else { continue };
             match decode::<ServerMsg>(&buf[..n]) {

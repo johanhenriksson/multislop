@@ -2,13 +2,14 @@
 //! second and lists the answers (name, map, players, ping). Click one, pick with the arrow keys and Enter, type an
 //! address and press Enter, or host a LAN game from here for others to join.
 
-use crate::client::Net;
+use crate::client::{Me, Net};
 use crate::net::*;
 use crate::netclient::clock;
 use bevy::input::ButtonState;
 use bevy::input::keyboard::{Key, KeyboardInput};
-use bevy::picking::events::PointerClick;
+use bevy::picking::events::{PointerClick, PointerOut, PointerOver};
 use bevy::prelude::*;
+use bevy::text::{LetterSpacing, LineHeight};
 use sdk::{GameInfo, encode};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -102,19 +103,6 @@ fn step_bots(bots: Option<u32>, up: bool) -> Option<u32> {
     }
 }
 
-/// Column widths in pixels: name, map, players, ping.
-const COLUMNS: [f32; 4] = [330.0, 130.0, 170.0, 80.0];
-
-/// A row of cells in the column widths.
-fn row(commands: &mut Commands, parent: Entity, cells: [String; 4], size: f32, color: Color) -> Entity {
-    let row = commands.spawn((ChildOf(parent), Node { padding: UiRect::axes(px(10), px(6)), ..default() })).id();
-    for (cell, width) in cells.into_iter().zip(COLUMNS) {
-        let font = TextFont { font_size: FontSize::Px(size), ..default() };
-        commands.spawn((ChildOf(row), Node { width: px(width), overflow: Overflow::clip(), ..default() }, Text::new(cell), font, TextColor(color)));
-    }
-    row
-}
-
 impl Browser {
     /// Why we're back here (a lost connection, say).
     pub fn show_error(&mut self, why: String) {
@@ -141,6 +129,83 @@ impl Browser {
     }
 }
 
+
+const INK: Color = Color::srgb(0.94, 0.94, 0.98);
+const DIM: Color = Color::srgba(0.85, 0.85, 0.95, 0.5);
+const FAINT: Color = Color::srgba(0.85, 0.85, 0.95, 0.28);
+const CARD: Color = Color::srgba(1.0, 1.0, 1.0, 0.045);
+const CARD_HOT: Color = Color::srgba(1.0, 1.0, 1.0, 0.1);
+const LINE: Color = Color::srgba(1.0, 1.0, 1.0, 0.09);
+const HOT_PINK: Color = Color::srgb(1.0, 0.24, 0.5);
+const HOT_ORANGE: Color = Color::srgb(1.0, 0.6, 0.12);
+const BAD: Color = Color::srgb(1.0, 0.35, 0.4);
+
+fn ui_font(size: f32, weight: FontWeight) -> TextFont {
+    TextFont { font: FontSource::families("Avenir Next, Helvetica Neue, sans-serif"), font_size: FontSize::Px(size), weight, ..default() }
+}
+
+/// The big type: condensed, heavy, slanted.
+fn display_font(size: f32) -> TextFont {
+    TextFont {
+        font: FontSource::families("Futura, Avenir Next, sans-serif"),
+        font_size: FontSize::Px(size),
+        weight: FontWeight::EXTRA_BOLD,
+        width: FontWidth::CONDENSED,
+        style: FontStyle::Italic,
+        ..default()
+    }
+}
+
+/// Small spaced-out capitals over a section.
+fn label(text: &str) -> impl Bundle {
+    (Text::new(text), ui_font(12.0, FontWeight::BOLD), LetterSpacing::Px(4.0), TextColor(DIM), Pickable::IGNORE)
+}
+
+fn accent(me: &Me) -> Color {
+    let [r, g, b] = me.0.color;
+    Color::srgb_u8(r, g, b)
+}
+
+/// Lights up under the pointer: `hot` instead of `base`, and a little bigger when `grow`.
+#[derive(Component, Clone, Copy)]
+struct Hover {
+    base: Color,
+    hot: Color,
+    grow: bool,
+}
+
+fn hoverable(mut e: EntityCommands, base: Color, hot: Color, grow: bool) -> EntityCommands {
+    e.insert((Hover { base, hot, grow }, BackgroundColor(base), UiTransform::IDENTITY));
+    e.observe(|ev: On<PointerOver>, mut q: Query<(&Hover, &mut BackgroundColor, &mut UiTransform)>| {
+        if let Ok((h, mut bg, mut t)) = q.get_mut(ev.event_target()) {
+            bg.0 = h.hot;
+            t.scale = Vec2::splat(if h.grow { 1.04 } else { 1.0 });
+        }
+    });
+    e.observe(|ev: On<PointerOut>, mut q: Query<(&Hover, &mut BackgroundColor, &mut UiTransform)>| {
+        if let Ok((h, mut bg, mut t)) = q.get_mut(ev.event_target()) {
+            (bg.0, t.scale) = (h.base, Vec2::ONE);
+        }
+    });
+    e
+}
+
+/// Server list columns after the name, in pixels: game and map, players, ping.
+const COLUMNS: [f32; 3] = [220.0, 150.0, 70.0];
+
+/// A server list row: the name takes what's left. `mark` puts a bar of that color down the left.
+fn row(commands: &mut Commands, parent: Entity, cells: [(String, Color); 4], size: f32, mark: Option<Color>) -> Entity {
+    let border = UiRect::left(px(if mark.is_some() { 4 } else { 0 }));
+    let node = Node { padding: UiRect::axes(px(16), px(12)), border, align_items: AlignItems::Center, border_radius: BorderRadius::all(px(12)), ..default() };
+    let row = commands.spawn((ChildOf(parent), node, BorderColor::all(mark.unwrap_or(Color::NONE)))).id();
+    for (i, (cell, color)) in cells.into_iter().enumerate() {
+        let (width, weight) = if i == 0 { (Val::Auto, FontWeight::SEMIBOLD) } else { (px(COLUMNS[i - 1]), FontWeight::MEDIUM) };
+        let node = Node { width, flex_grow: if i == 0 { 1.0 } else { 0.0 }, overflow: Overflow::clip(), ..default() };
+        commands.spawn((ChildOf(row), node, Text::new(cell), ui_font(size, weight), TextColor(color), Pickable::IGNORE));
+    }
+    row
+}
+
 #[derive(Component)]
 pub struct Panel;
 
@@ -153,12 +218,42 @@ pub struct AddressText;
 #[derive(Component)]
 pub struct ErrorText;
 
-#[derive(Component)]
-pub struct HostButton;
-
 /// The games to pick from, under the host button.
 #[derive(Component)]
 pub struct HostList;
+
+/// Lit in the player's color.
+#[derive(Component)]
+pub struct Title;
+
+#[derive(Component)]
+pub struct NameText;
+
+#[derive(Component)]
+pub struct NameDot;
+
+#[derive(Component)]
+pub struct Swatches;
+
+#[derive(Component)]
+pub struct StatusDot;
+
+/// A soft glow drifting around the background; the first is in the player's color.
+#[derive(Component)]
+pub struct Orb(usize);
+
+/// Glows: color, where (percent of the screen), size in pixels.
+const ORBS: [(Color, f32, f32, f32); 4] = [
+    (Color::WHITE, -8.0, -15.0, 900.0),
+    (HOT_PINK, 55.0, 45.0, 1000.0),
+    (Color::srgb(0.2, 0.5, 1.0), 70.0, -30.0, 800.0),
+    (HOT_ORANGE, 5.0, 60.0, 700.0),
+];
+
+fn glow(color: Color, strength: f32) -> BackgroundGradient {
+    let stops = vec![ColorStop::auto(color.with_alpha(strength)), ColorStop::auto(color.with_alpha(strength * 0.3)), ColorStop::auto(color.with_alpha(0.0))];
+    RadialGradient::new(UiPosition::CENTER, RadialGradientShape::ClosestSide, stops).into()
+}
 
 /// Something "Host a LAN game" can start: a game module and one of its maps.
 #[derive(Clone)]
@@ -202,66 +297,190 @@ fn scan(paths: Vec<std::path::PathBuf>) -> Arc<Mutex<Option<Vec<Game>>>> {
     slot
 }
 
-pub fn setup(mut commands: Commands) {
-    let text = |size: f32, color: Color| (TextFont { font_size: FontSize::Px(size), ..default() }, TextColor(color));
-    let gray = Color::srgb(0.6, 0.6, 0.6);
+pub fn setup(mut commands: Commands, me: Res<Me>) {
+    let you = accent(&me);
+    let full = Node { position_type: PositionType::Absolute, width: percent(100), height: percent(100), overflow: Overflow::clip(), ..default() };
+    let backdrop = LinearGradient::degrees(160.0, vec![
+        ColorStop::auto(Color::srgb(0.09, 0.03, 0.16)),
+        ColorStop::auto(Color::srgb(0.02, 0.02, 0.05)),
+        ColorStop::auto(Color::srgb(0.0, 0.06, 0.09)),
+    ]);
+    let panel = commands.spawn((Panel, Visibility::Hidden, GlobalZIndex(5), full.clone(), BackgroundColor(Color::BLACK), BackgroundGradient::from(backdrop))).id();
+    for (i, (color, x, y, size)) in ORBS.into_iter().enumerate() {
+        let color = if i == 0 { you } else { color };
+        let node = Node { position_type: PositionType::Absolute, left: percent(x), top: percent(y), width: px(size), height: px(size), ..default() };
+        commands.spawn((ChildOf(panel), Orb(i), node, glow(color, 0.22), UiTransform::IDENTITY, Pickable::IGNORE));
+    }
+    // A slash of light behind the title.
+    let slash = Node { position_type: PositionType::Absolute, left: percent(-10), top: percent(8), width: percent(70), height: px(220), ..default() };
+    let stops = vec![ColorStop::auto(Color::NONE), ColorStop::auto(Color::srgba(1.0, 1.0, 1.0, 0.035)), ColorStop::auto(Color::NONE)];
+    commands.spawn((ChildOf(panel), slash, BackgroundGradient::from(LinearGradient::to_right(stops)), UiTransform::from_rotation(Rot2::degrees(-8.0)), Pickable::IGNORE));
+
+    let content = Node { width: percent(100), height: percent(100), padding: UiRect::axes(percent(6), percent(7)), column_gap: px(56), ..default() };
+    let content = commands.spawn((ChildOf(panel), content)).id();
+
+    let left = commands.spawn((ChildOf(content), Node { flex_direction: FlexDirection::Column, row_gap: px(22), width: px(440), flex_shrink: 0.0, ..default() })).id();
     commands.spawn((
-        Panel,
-        Visibility::Hidden,
-        GlobalZIndex(5),
-        BackgroundColor(Color::srgb(0.08, 0.08, 0.1)),
-        Node { position_type: PositionType::Absolute, width: percent(100), height: percent(100), justify_content: JustifyContent::Center, ..default() },
-        children![(
-            Node { flex_direction: FlexDirection::Column, row_gap: px(14), margin: UiRect::top(percent(10)), width: px(760), ..default() },
-            children![
-                (Text::new("Servers on your network"), text(30.0, Color::srgb(1.0, 0.68, 0.12))),
-                (List, Node { flex_direction: FlexDirection::Column, row_gap: px(4), min_height: px(200), ..default() }),
-                (AddressText, Text::new(""), text(20.0, Color::WHITE)),
-                (ErrorText, Text::new(""), text(16.0, Color::srgb(1.0, 0.4, 0.3))),
-                (Text::new("Click a server, or pick one with the arrow keys and press Enter. Or type an address and press Enter."), text(14.0, gray)),
-            ],
-        )],
+        ChildOf(left),
+        Node { flex_direction: FlexDirection::Column, ..default() },
+        children![
+            (Title, Text::new("MULTISLOP"), display_font(88.0), LineHeight::RelativeToFont(0.95), TextColor(INK), TextShadow { offset: Vec2::new(6.0, 6.0), color: you }),
+            (Text::new("LAN GAMES, MADE OF SLOP"), ui_font(13.0, FontWeight::BOLD), LetterSpacing::Px(6.0), TextColor(DIM)),
+        ],
     ));
-    let amber = Color::srgb(1.0, 0.68, 0.12);
-    commands
-        .spawn((
-            HostButton,
-            Visibility::Hidden,
-            GlobalZIndex(6),
-            Node { position_type: PositionType::Absolute, right: percent(5), top: percent(10), padding: UiRect::axes(px(18), px(10)), border: UiRect::all(px(2)), ..default() },
-            BorderColor::all(amber),
-            BackgroundColor(Color::srgba(1.0, 0.68, 0.12, 0.12)),
-            children![(Text::new("Host a LAN game"), text(20.0, amber))],
-        ))
-        .observe(|_: On<PointerClick>, mut b: ResMut<Browser>| b.host_clicked = true);
+    let card = Node {
+        flex_direction: FlexDirection::Column,
+        row_gap: px(14),
+        padding: UiRect::all(px(20)),
+        border: UiRect::all(px(1)),
+        border_radius: BorderRadius::all(px(18)),
+        ..default()
+    };
+    let profile = commands.spawn((ChildOf(left), card.clone(), BackgroundColor(CARD), BorderColor::all(LINE))).id();
+    commands.spawn((ChildOf(profile), label("PLAYING AS")));
+    let dot = Node { width: px(22), height: px(22), border_radius: BorderRadius::MAX, ..default() };
     commands.spawn((
-        HostList,
-        GlobalZIndex(6),
-        Node { position_type: PositionType::Absolute, right: percent(5), top: percent(17), flex_direction: FlexDirection::Column, row_gap: px(4), ..default() },
+        ChildOf(profile),
+        Node { column_gap: px(14), align_items: AlignItems::Center, ..default() },
+        children![
+            (NameDot, dot, BackgroundColor(you), BoxShadow::new(you, px(0), px(0), px(2), px(14))),
+            (NameText, Text::new(me.0.name.clone()), ui_font(32.0, FontWeight::BOLD), TextColor(you)),
+        ],
     ));
+    commands.spawn((ChildOf(profile), Swatches, Node { width: px(351), flex_wrap: FlexWrap::Wrap, column_gap: px(9), row_gap: px(9), ..default() }));
+    commands.spawn((ChildOf(profile), Text::new("Your color, in every game."), ui_font(13.0, FontWeight::MEDIUM), TextColor(FAINT)));
+
+    let button = Node {
+        padding: UiRect::axes(px(24), px(16)),
+        justify_content: JustifyContent::Center,
+        border_radius: BorderRadius::all(px(16)),
+        ..default()
+    };
+    let fill = LinearGradient::to_right(vec![ColorStop::auto(HOT_PINK), ColorStop::auto(HOT_ORANGE)]);
+    let host = commands.spawn((
+        ChildOf(left),
+        button,
+        BackgroundGradient::from(fill),
+        BoxShadow::new(HOT_PINK.with_alpha(0.45), px(0), px(8), px(0), px(28)),
+        children![(Text::new("HOST A LAN GAME"), ui_font(19.0, FontWeight::BLACK), LetterSpacing::Px(3.0), TextColor(Color::WHITE), Pickable::IGNORE)],
+    ));
+    hoverable(host, Color::NONE, Color::NONE, true).observe(|_: On<PointerClick>, mut b: ResMut<Browser>| b.host_clicked = true);
+    commands.spawn((ChildOf(left), HostList, Node { flex_direction: FlexDirection::Column, row_gap: px(6), ..default() }));
+
+    let right = commands.spawn((ChildOf(content), Node { flex_direction: FlexDirection::Column, row_gap: px(18), flex_grow: 1.0, max_width: px(860), ..default() })).id();
+    let dot = Node { width: px(9), height: px(9), border_radius: BorderRadius::MAX, ..default() };
+    commands.spawn((
+        ChildOf(right),
+        Node { justify_content: JustifyContent::SpaceBetween, align_items: AlignItems::FlexEnd, margin: UiRect::top(px(28)), ..default() },
+        children![
+            (Text::new("SERVERS"), display_font(54.0), TextColor(INK)),
+            (
+                Node { column_gap: px(10), align_items: AlignItems::Center, margin: UiRect::bottom(px(12)), ..default() },
+                children![
+                    (StatusDot, dot, BackgroundColor(Color::srgb(0.2, 1.0, 0.5)), BoxShadow::new(Color::srgb(0.2, 1.0, 0.5), px(0), px(0), px(1), px(8))),
+                    (Text::new("scanning your network"), ui_font(14.0, FontWeight::MEDIUM), TextColor(DIM)),
+                ],
+            ),
+        ],
+    ));
+    commands.spawn((
+        ChildOf(right),
+        List,
+        Node { min_height: px(330), padding: UiRect::all(px(10)), row_gap: px(4), ..card },
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.25)),
+        BorderColor::all(LINE),
+        BoxShadow::new(Color::srgba(0.0, 0.0, 0.0, 0.5), px(0), px(20), px(0), px(50)),
+    ));
+    let field = Node {
+        padding: UiRect::axes(px(16), px(13)),
+        border: UiRect::all(px(1)),
+        border_radius: BorderRadius::all(px(12)),
+        flex_grow: 1.0,
+        ..default()
+    };
+    commands.spawn((
+        ChildOf(right),
+        Node { flex_direction: FlexDirection::Column, row_gap: px(8), ..default() },
+        children![
+            label("DIRECT CONNECT"),
+            (field, BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.35)), BorderColor::all(LINE), children![(AddressText, Text::new(""), ui_font(20.0, FontWeight::MEDIUM), TextColor(INK))]),
+        ],
+    ));
+    commands.spawn((ChildOf(right), ErrorText, Text::new(""), ui_font(15.0, FontWeight::SEMIBOLD), TextColor(BAD)));
+    let hint = "Click a server, or pick one with the arrow keys and press Enter. Or type an address and press Enter.";
+    commands.spawn((ChildOf(right), Text::new(hint), ui_font(13.0, FontWeight::MEDIUM), TextColor(FAINT)));
+}
+
+/// Drifts the glows, pulses the scanning light, and restyles everything in the player's color when they pick another.
+pub fn animate(
+    mut commands: Commands,
+    me: Res<Me>,
+    mut b: ResMut<Browser>,
+    mut orbs: Query<(&Orb, &mut UiTransform, &mut BackgroundGradient)>,
+    mut status: Single<&mut BackgroundColor, With<StatusDot>>,
+    mut title: Single<&mut TextShadow, With<Title>>,
+    mut name: Single<&mut TextColor, With<NameText>>,
+    mut dot: Single<(&mut BackgroundColor, &mut BoxShadow), (With<NameDot>, Without<StatusDot>)>,
+    swatches: Single<Entity, With<Swatches>>,
+) {
+    let t = clock() as f32;
+    for (orb, mut transform, _) in &mut orbs {
+        let phase = orb.0 as f32 * 1.9;
+        transform.translation = Val2::px((t * 0.13 + phase).sin() * 90.0, (t * 0.11 + phase * 1.3).cos() * 70.0);
+    }
+    status.0 = Color::srgb(0.2, 1.0, 0.5).with_alpha(0.45 + 0.55 * (t * 3.0).sin().abs());
+    if !me.is_changed() {
+        return;
+    }
+    let you = accent(&me);
+    title.color = you;
+    name.0 = you;
+    dot.0.0 = you;
+    *dot.1 = BoxShadow::new(you, px(0), px(0), px(2), px(14));
+    for (orb, _, mut gradient) in &mut orbs {
+        if orb.0 == 0 {
+            *gradient = glow(you, 0.22);
+        }
+    }
+    b.dirty = true;
+    commands.entity(*swatches).despawn_children();
+    for color in sdk::PALETTE {
+        let [r, g, bl] = color;
+        let c = Color::srgb_u8(r, g, bl);
+        let picked = color == me.0.color;
+        let node = Node { width: px(36), height: px(36), border_radius: BorderRadius::all(px(10)), ..default() };
+        let mut swatch = commands.spawn((ChildOf(*swatches), node));
+        if picked {
+            swatch.insert((Outline { width: px(3), offset: px(3), color: Color::WHITE }, BoxShadow::new(c, px(0), px(0), px(2), px(16))));
+        }
+        hoverable(swatch, c, c, true).observe(move |_: On<PointerClick>, mut me: ResMut<Me>| {
+            me.0.color = color;
+            Me::save(color);
+        });
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 pub fn browse(
     mut commands: Commands,
+    me: Res<Me>,
     mut net: ResMut<Net>,
     mut b: ResMut<Browser>,
     mut typed: MessageReader<KeyboardInput>,
     mut panel: Single<&mut Visibility, With<Panel>>,
     list: Single<Entity, With<List>>,
-    mut address: Single<&mut Text, (With<AddressText>, Without<ErrorText>)>,
+    mut address: Single<(&mut Text, &mut TextColor), (With<AddressText>, Without<ErrorText>)>,
     mut error: Single<&mut Text, With<ErrorText>>,
-    mut host_button: Single<&mut Visibility, (With<HostButton>, Without<Panel>)>,
     host_list: Single<Entity, With<HostList>>,
 ) {
     let browsing = net.server.is_none();
-    **host_button = if browsing { Visibility::Inherited } else { Visibility::Hidden };
     if !browsing {
         **panel = Visibility::Hidden;
         typed.clear();
         return;
     }
     **panel = Visibility::Inherited;
+    let you = accent(&me);
     let now = clock();
     if now - b.asked > 1.0 {
         b.asked = now;
@@ -287,35 +506,43 @@ pub fn browse(
     if b.host_open && b.shown_games != count.or(Some(usize::MAX)) {
         b.shown_games = count.or(Some(usize::MAX));
         commands.entity(*host_list).despawn_children();
-        let row = (Node { padding: UiRect::axes(px(12), px(6)), ..default() }, BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.08)));
-        let font = TextFont { font_size: FontSize::Px(16.0), ..default() };
-        let label = b.bots.map_or("Bots: game default".to_string(), |n| format!("Bots: {n}"));
-        let bots = commands.spawn((ChildOf(*host_list), Node { column_gap: px(14), align_items: AlignItems::Center, ..row.0.clone() }, row.1)).id();
-        commands.spawn((ChildOf(bots), Node { width: px(170), ..default() }, Text::new(label), font.clone()));
-        for (sign, up) in [("-", false), ("+", true)] {
-            let button = Node { padding: UiRect::axes(px(9), px(0)), border: UiRect::all(px(1)), ..default() };
-            commands
-                .spawn((ChildOf(bots), button, BorderColor::all(Color::srgb(0.6, 0.6, 0.6)), children![(Text::new(sign), font.clone())]))
+        let tile = Node { padding: UiRect::axes(px(16), px(11)), align_items: AlignItems::Center, column_gap: px(12), border_radius: BorderRadius::all(px(12)), ..default() };
+        let text = |s: String, size: f32, color: Color| (Text::new(s), ui_font(size, FontWeight::SEMIBOLD), TextColor(color), Pickable::IGNORE);
+        let options = commands.spawn((ChildOf(*host_list), Node { column_gap: px(8), ..default() })).id();
+        let label = b.bots.map_or("Bots: auto".to_string(), |n| format!("Bots: {n}"));
+        let bots = commands.spawn((ChildOf(options), tile.clone(), BackgroundColor(CARD), children![(Node { width: px(96), ..default() }, text(label, 15.0, INK))])).id();
+        for (sign, up) in [("−", false), ("+", true)] {
+            let pill = Node { width: px(28), height: px(28), justify_content: JustifyContent::Center, align_items: AlignItems::Center, border_radius: BorderRadius::MAX, ..default() };
+            hoverable(commands.spawn((ChildOf(bots), pill, children![text(sign.into(), 17.0, INK)])), CARD_HOT, you.with_alpha(0.5), true)
                 .observe(move |_: On<PointerClick>, mut b: ResMut<Browser>| (b.bots, b.shown_games) = (step_bots(b.bots, up), None));
         }
-        let label = if b.rotate { "Rotate games: on (10 rounds, 3 races or 3 matches each)" } else { "Rotate games: off" };
-        commands
-            .spawn((ChildOf(*host_list), row.clone(), children![(Text::new(label), font.clone())]))
+        let (label, base) = if b.rotate { ("Rotate: on", you.with_alpha(0.35)) } else { ("Rotate: off", CARD) };
+        hoverable(commands.spawn((ChildOf(options), tile.clone(), children![text(label.into(), 15.0, INK)])), base, CARD_HOT, false)
             .observe(|_: On<PointerClick>, mut b: ResMut<Browser>| (b.rotate, b.shown_games) = (!b.rotate, None));
+        if b.rotate {
+            commands.spawn((ChildOf(*host_list), text("Each game in turn: 10 rounds, 3 races or 3 matches.".into(), 13.0, FAINT)));
+        }
         match &games {
-            None => _ = commands.spawn((ChildOf(*host_list), row, children![(Text::new("Finding games..."), font)])),
-            Some(list) if list.is_empty() => _ = commands.spawn((ChildOf(*host_list), row, children![(Text::new("No games found to host"), font)])),
+            None => _ = commands.spawn((ChildOf(*host_list), tile, BackgroundColor(CARD), children![text("Finding games...".into(), 16.0, DIM)])),
+            Some(list) if list.is_empty() => _ = commands.spawn((ChildOf(*host_list), tile, BackgroundColor(CARD), children![text("No games found to host".into(), 16.0, DIM)])),
             Some(list) => {
+                // One tile per game, a chip per map.
+                let mut chips = None;
                 for (i, game) in list.iter().enumerate() {
-                    commands
-                        .spawn((ChildOf(*host_list), row.clone(), children![(Text::new(game.label.clone()), font.clone())]))
-                        .observe(move |_: On<PointerClick>, mut b: ResMut<Browser>| b.host_pick = Some(i));
+                    if i == 0 || list[i - 1].module != game.module {
+                        let name = game.label.split_once(" on ").map_or(&*game.label, |(n, _)| n);
+                        let row = commands.spawn((ChildOf(*host_list), Node { flex_wrap: FlexWrap::Wrap, ..tile.clone() }, BackgroundColor(CARD))).id();
+                        commands.spawn((ChildOf(row), Node { width: px(150), ..default() }, text(name.to_uppercase(), 17.0, INK)));
+                        chips = Some(row);
+                    }
+                    let chip = Node { padding: UiRect::axes(px(12), px(5)), border_radius: BorderRadius::MAX, ..default() };
+                    let chip = commands.spawn((ChildOf(chips.unwrap()), chip, children![text(game.map.clone(), 14.0, INK)]));
+                    hoverable(chip, CARD_HOT, you.with_alpha(0.6), true).observe(move |_: On<PointerClick>, mut b: ResMut<Browser>| b.host_pick = Some(i));
                 }
             }
         }
     }
     if let Some(game) = b.host_pick.take().and_then(|i| games.as_ref()?.get(i).cloned()) {
-        let user = std::env::var("USER").unwrap_or_else(|_| "someone".into());
         crate::client::store(&game.module);
         let mut modules = vec![game.module];
         // Rotating: then each other game once, in list order.
@@ -324,7 +551,7 @@ pub fn browse(
                 modules.push(other.module.clone());
             }
         }
-        match crate::server::host(format!("{user}'s game"), modules, game.map, b.bots) {
+        match crate::server::host(format!("{}'s game", me.0.name), modules, game.map, b.bots) {
             Ok(port) => join = Some(SocketAddr::from(([127, 0, 0, 1], port))),
             Err(e) => b.error = e,
         }
@@ -353,31 +580,48 @@ pub fn browse(
         commands.entity(*host_list).despawn_children();
         return;
     }
-    address.0 = format!("Address: {}_", b.address);
+    let caret = if now % 1.0 < 0.5 { "|" } else { "" };
+    let (text, color) = &mut *address;
+    (text.0, color.0) = if b.address.is_empty() { (format!("{caret}host or host:port"), FAINT) } else { (format!("{}{caret}", b.address), INK) };
     error.0 = b.error.clone();
     if !b.dirty {
         return;
     }
     b.dirty = false;
     commands.entity(*list).despawn_children();
-    let header = ["Name", "Map", "Players", "Ping"].map(String::from);
-    row(&mut commands, *list, header, 16.0, Color::srgb(0.6, 0.6, 0.6));
+    let header = ["NAME", "GAME", "PLAYERS", "PING"].map(|h| (h.to_string(), FAINT));
+    row(&mut commands, *list, header, 12.0, None);
     if b.found.is_empty() {
-        commands.spawn((ChildOf(*list), Text::new("Looking for servers..."), TextColor(Color::srgb(0.5, 0.5, 0.5)), Node { margin: UiRect::left(px(10)), ..default() }));
+        commands.spawn((
+            ChildOf(*list),
+            Node { flex_direction: FlexDirection::Column, row_gap: px(6), padding: UiRect::all(px(16)), ..default() },
+            children![
+                (Text::new("Nobody's playing yet."), ui_font(20.0, FontWeight::SEMIBOLD), TextColor(DIM)),
+                (Text::new("Host a game and it shows up here for everyone on your network."), ui_font(14.0, FontWeight::MEDIUM), TextColor(FAINT)),
+            ],
+        ));
     }
     let selected = b.selected.min(b.found.len().saturating_sub(1));
     for (i, (addr, f)) in b.sorted().into_iter().enumerate() {
-        let (cells, color) = match &f.game {
-            Some(g) => ([f.name.clone(), g.map.clone(), format!("{} + {} bots", g.players, g.bots), format!("{:.0} ms", f.ping_ms)], Color::WHITE),
-            None => {
-                let build = format!("build {}", f.build.as_deref().unwrap_or("?"));
-                ([f.name.clone(), String::new(), build, String::new()], Color::srgb(0.5, 0.5, 0.5))
+        let cells = match &f.game {
+            Some(g) => {
+                let ping = match f.ping_ms {
+                    p if p < 40.0 => Color::srgb(0.3, 1.0, 0.55),
+                    p if p < 100.0 => Color::srgb(1.0, 0.85, 0.3),
+                    _ => BAD,
+                };
+                [
+                    (f.name.clone(), INK),
+                    (format!("{} · {}", g.game, g.map), DIM),
+                    (format!("{} + {} bots", g.players, g.bots), DIM),
+                    (format!("{:.0} ms", f.ping_ms), ping),
+                ]
             }
+            None => [(f.name.clone(), FAINT), (String::new(), FAINT), (format!("build {}", f.build.as_deref().unwrap_or("?")), FAINT), (String::new(), FAINT)],
         };
-        let background = if i == selected { Color::srgba(1.0, 0.68, 0.12, 0.25) } else { Color::srgba(1.0, 1.0, 1.0, 0.04) };
-        let r = row(&mut commands, *list, cells, 18.0, color);
-        let mut r = commands.entity(r);
-        r.insert(BackgroundColor(background));
+        let r = row(&mut commands, *list, cells, 17.0, (i == selected).then_some(you));
+        let base = if i == selected { you.with_alpha(0.16) } else { Color::srgba(1.0, 1.0, 1.0, 0.025) };
+        let mut r = hoverable(commands.entity(r), base, you.with_alpha(0.26), false);
         if f.game.is_some() {
             r.observe(move |_: On<PointerClick>, mut b: ResMut<Browser>| b.clicked = Some(addr));
         }

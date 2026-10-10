@@ -35,18 +35,19 @@ struct Player {
     teleport: u8,
     bot: Option<Bot>,
     name: String,
+    color: [u8; 3],
     ping: u16,
 }
 
 impl Player {
-    fn new(id: u32, name: String, bot: Option<Bot>) -> Player {
-        let state = PlayerState::default();
-        Player { id, state, checkpoint: 0, respawn: Vec3::ZERO, finish: None, wins: 0, inputs: vec![], teleport: 0, bot, name, ping: 0 }
+    fn new(id: u32, who: sdk::Profile, bot: Option<Bot>) -> Player {
+        let (state, name, color) = (PlayerState::default(), who.name, who.color);
+        Player { id, state, checkpoint: 0, respawn: Vec3::ZERO, finish: None, wins: 0, inputs: vec![], teleport: 0, bot, name, color, ping: 0 }
     }
 
     fn net(&self) -> NetPlayer {
         let (id, state, checkpoint, finish, wins, ping) = (self.id, self.state, self.checkpoint, self.finish, self.wins, self.ping);
-        NetPlayer { id, state, checkpoint, finish, wins, bot: self.bot.is_some(), name: self.name.clone(), ping }
+        NetPlayer { id, state, checkpoint, finish, wins, bot: self.bot.is_some(), name: self.name.clone(), color: self.color, ping }
     }
 
     /// To `pos` facing north, standing still.
@@ -109,15 +110,15 @@ impl Gauntlet {
 }
 
 impl ServerGame for Gauntlet {
-    fn connect(&mut self, name: &str) -> u32 {
-        let (id, name) = (self.next_id, clean_name(name));
+    fn connect(&mut self, who: &sdk::Profile) -> u32 {
+        let (id, name) = (self.next_id, clean_name(&who.name));
         self.next_id += 1;
         // The first one in gets a fresh course rather than whatever the empty server last dealt.
         if self.players.values().all(|p| p.bot.is_some()) {
             self.new_course();
         }
         log(&format!("{name} (player {id}) joined"));
-        let mut p = Player::new(id, name, None);
+        let mut p = Player::new(id, sdk::Profile { name, ..who.clone() }, None);
         self.line_up(&mut p);
         self.players.insert(id, p);
         id
@@ -305,7 +306,7 @@ impl Gauntlet {
         for _ in bots.len()..want {
             let id = self.next_id;
             self.next_id += 1;
-            let mut p = Player::new(id, bot_name(id), Some(Bot::new(id)));
+            let mut p = Player::new(id, bot_name(id).as_str().into(), Some(Bot::new(id)));
             self.line_up(&mut p);
             log(&format!("{} joined", p.name));
             self.players.insert(id, p);
@@ -342,7 +343,7 @@ mod tests {
     #[test]
     fn frozen_on_the_line_until_go() {
         let mut game = Gauntlet::new();
-        let id = game.connect("a");
+        let id = game.connect(&"a".into());
         let start = game.players[&id].state.pos;
         game.input(id, 1, 0.0, &encode(&Input { forward: 1.0, ..Default::default() }));
         game.tick();
@@ -356,7 +357,7 @@ mod tests {
         let mut game = Gauntlet::new();
         game.set_map("gauntlet");
         game.set_bots(0);
-        let id = game.connect("a");
+        let id = game.connect(&"a".into());
         race(&mut game, COUNTDOWN_SECS + 0.1);
         let z = (0..course().depth()).rev().find(|&z| course().checkpoint(7, z) == Some(1)).unwrap();
         let cp = course().ground(7, z);
@@ -373,7 +374,7 @@ mod tests {
     fn crossing_the_line_finishes_and_everyone_in_ends_the_race() {
         let mut game = Gauntlet::new();
         game.set_bots(2);
-        let id = game.connect("a");
+        let id = game.connect(&"a".into());
         race(&mut game, COUNTDOWN_SECS + 1.0);
         game.players.get_mut(&id).unwrap().teleport(course().ground(7, 2));
         let events = race(&mut game, 0.1);
@@ -389,7 +390,7 @@ mod tests {
     fn bot_count_is_settable() {
         let mut game = Gauntlet::new();
         game.set_bots(9);
-        game.connect("a");
+        game.connect(&"a".into());
         game.tick();
         assert_eq!(game.players.values().filter(|p| p.bot.is_some()).count(), 9);
         game.set_bots(0);
@@ -401,7 +402,7 @@ mod tests {
     fn bots_finish(map: &str) {
         let mut game = Gauntlet::new();
         game.set_map(map);
-        let watcher = game.connect("observer");
+        let watcher = game.connect(&"observer".into());
         game.players.get_mut(&watcher).unwrap().state.pos = course().spawns[0] - Vec3::X * 2.0;
         let mut falls = 0;
         let events = race(&mut game, COUNTDOWN_SECS + 200.0);
@@ -437,7 +438,7 @@ mod tests {
     fn random_deals_a_new_course_every_race() {
         let mut game = Gauntlet::new();
         game.set_bots(0);
-        let id = game.connect("a");
+        let id = game.connect(&"a".into());
         let first = game.map.clone();
         assert!(first.starts_with("random-"), "{first}");
         race(&mut game, COUNTDOWN_SECS + 0.1);

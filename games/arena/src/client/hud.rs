@@ -14,12 +14,18 @@ pub struct Hud {
     frags: u32,
     rank: u32,
     clock: u32,
-    feed: u32,
+    /// Kill feed lines, and their killer, " railed ", victim texts.
+    feed: Vec<(u32, [u32; 3])>,
     message: u32,
     dead: u32,
     board: u32,
-    board_text: u32,
+    board_panel: u32,
+    /// Scoreboard lines: a swatch of the player's color and the line, in it. Made as more players show up.
+    board_rows: Vec<(u32, u32, u32)>,
 }
+
+/// Most kill feed lines.
+const FEED: usize = 5;
 
 fn node() -> UiNode {
     UiNode::default()
@@ -58,8 +64,11 @@ impl ArenaClient {
         h.rank = s.ui(Some(corner), text(18.0, TEXT));
         let top = s.ui(None, UiNode { absolute: true, top: px(12.0), width: percent(100.0), justify: Align::Center, ..node() });
         h.clock = s.ui(Some(top), centered(22.0, TEXT));
-        let feed = s.ui(None, UiNode { absolute: true, right: px(20.0), top: px(14.0), ..node() });
-        h.feed = s.ui(Some(feed), text(16.0, TEXT));
+        let feed = s.ui(None, UiNode { absolute: true, right: px(20.0), top: px(14.0), column: true, align: Align::End, gap: 2.0, ..node() });
+        for _ in 0..FEED {
+            let line = s.ui(Some(feed), UiNode { hidden: true, gap: 6.0, ..node() });
+            h.feed.push((line, [0; 3].map(|_| s.ui(Some(line), text(16.0, TEXT)))));
+        }
         let middle = s.ui(None, UiNode { absolute: true, top: percent(30.0), width: percent(100.0), justify: Align::Center, ..node() });
         h.message = s.ui(Some(middle), centered(26.0, Color::srgb(1.0, 0.85, 0.3)));
         let lower = s.ui(None, UiNode { absolute: true, top: percent(60.0), width: percent(100.0), justify: Align::Center, ..node() });
@@ -68,8 +77,9 @@ impl ArenaClient {
         let board = UiNode { hidden: true, ..screen() };
         h.board = s.ui(None, board);
         let panel = UiNode { padding: Edges::all(20.0), radius: Corners::all(6.0), background: Color::srgba(0.0, 0.0, 0.05, 0.8), ..node() };
-        let panel = s.ui(Some(h.board), panel);
-        h.board_text = s.ui(Some(panel), text(18.0, TEXT));
+        h.board_panel = s.ui(Some(h.board), UiNode { column: true, gap: 4.0, ..panel });
+        let header = s.ui(Some(h.board_panel), text(18.0, TEXT));
+        s.ui_text(header, format!("     {:<22}{:>7}{:>8}{:>9}", "Player", "Frags", "Deaths", "Ping"));
     }
 
     pub(super) fn update_hud(&mut self) {
@@ -99,8 +109,14 @@ impl ArenaClient {
         while self.feed.front().is_some_and(|(_, at)| self.time - at > 6.0) {
             self.feed.pop_front();
         }
-        let feed: Vec<&str> = self.feed.iter().map(|(line, _)| line.as_str()).collect();
-        self.scene.ui_text(self.hud.feed, feed.join("\n"));
+        for (i, &(node, [killer, railed, victim])) in self.hud.feed.iter().enumerate() {
+            let line = self.feed.get(i);
+            self.scene.ui_hidden(node, line.is_none());
+            let Some(([(k, kc), (v, vc)], _)) = line else { continue };
+            for (id, value, color) in [(killer, k.as_str(), *kc), (railed, "railed", TEXT), (victim, v.as_str(), *vc)] {
+                self.scene.ui_set(id, |n| n.text = Some(Text { value: value.into(), color, shadow: true, center: false, size: 16.0 }));
+            }
+        }
 
         let winner = self.state.and_then(|m| m.winner);
         let message = match (winner, &self.message) {
@@ -120,13 +136,22 @@ impl ArenaClient {
         let show = self.tab || winner.is_some();
         self.scene.ui_hidden(self.hud.board, !show);
         if show {
-            let mut out = format!("  {:<22}{:>7}{:>8}{:>9}\n", "Player", "Frags", "Deaths", "Ping");
-            for p in &ranked {
+            let s = &mut self.scene;
+            while self.hud.board_rows.len() < ranked.len() {
+                let row = s.ui(Some(self.hud.board_panel), UiNode { align: Align::Center, gap: 10.0, ..node() });
+                let swatch = s.ui(Some(row), UiNode { width: px(14.0), height: px(14.0), radius: Corners::all(3.0), ..node() });
+                self.hud.board_rows.push((row, swatch, s.ui(Some(row), text(18.0, TEXT))));
+            }
+            for (i, &(row, swatch, line)) in self.hud.board_rows.iter().enumerate() {
+                s.ui_hidden(row, i >= ranked.len());
+                let Some(p) = ranked.get(i) else { continue };
                 let you = if Some(p.id) == self.me { ">" } else { " " };
                 let ping = if p.bot { "BOT".into() } else { p.ping.to_string() };
-                out += &format!("{you} {:<22}{:>7}{:>8}{:>9}\n", p.name, p.frags, p.deaths, ping);
+                let value = format!("{you} {:<22}{:>7}{:>8}{:>9}", p.name, p.frags, p.deaths, ping);
+                let (color, text) = (super::rgb(p.color), super::readable(p.color));
+                s.ui_set(swatch, |n| n.background = color);
+                s.ui_set(line, |n| n.text = Some(Text { value, color: text, shadow: true, center: false, size: 18.0 }));
             }
-            self.scene.ui_text(self.hud.board_text, out);
         }
     }
 }

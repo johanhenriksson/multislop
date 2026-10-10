@@ -34,12 +34,14 @@ struct Player {
     teleport: u8,
     bot: Option<Bot>,
     name: String,
+    color: [u8; 3],
     ping: u16,
 }
 
 impl Player {
-    fn new(id: u32, name: String, bot: Option<Bot>) -> Player {
-        Player { id, state: PlayerState::default(), alive: false, died_at: 0, frags: 0, deaths: 0, inputs: vec![], teleport: 0, bot, name, ping: 0 }
+    fn new(id: u32, who: sdk::Profile, bot: Option<Bot>) -> Player {
+        let (name, color) = (who.name, who.color);
+        Player { id, state: PlayerState::default(), alive: false, died_at: 0, frags: 0, deaths: 0, inputs: vec![], teleport: 0, bot, name, color, ping: 0 }
     }
 }
 
@@ -88,11 +90,11 @@ impl Arena {
 }
 
 impl ServerGame for Arena {
-    fn connect(&mut self, name: &str) -> u32 {
-        let (id, name) = (self.next_id, clean_name(name));
+    fn connect(&mut self, who: &sdk::Profile) -> u32 {
+        let (id, name) = (self.next_id, clean_name(&who.name));
         self.next_id += 1;
         log(&format!("{name} (player {id}) joined"));
-        let mut p = Player::new(id, name, None);
+        let mut p = Player::new(id, sdk::Profile { name, ..who.clone() }, None);
         spawn(&mut p, &self.players, self.tick);
         self.players.insert(id, p);
         id
@@ -188,7 +190,7 @@ impl Arena {
 }
 
 fn net_player(p: &Player) -> (NetPlayer, u8) {
-    let n = NetPlayer { id: p.id, state: p.state, alive: p.alive, frags: p.frags, deaths: p.deaths, bot: p.bot.is_some(), name: p.name.clone(), ping: p.ping };
+    let n = NetPlayer { id: p.id, state: p.state, alive: p.alive, frags: p.frags, deaths: p.deaths, bot: p.bot.is_some(), name: p.name.clone(), color: p.color, ping: p.ping };
     (n, p.teleport)
 }
 
@@ -289,7 +291,7 @@ fn fill_bots(players: &mut Players, next_id: &mut u32, tick: u32, bots: Option<u
     for _ in bots.len()..want {
         let id = *next_id;
         *next_id += 1;
-        let mut p = Player::new(id, bot_name(id), Some(Bot::new(id)));
+        let mut p = Player::new(id, bot_name(id).as_str().into(), Some(Bot::new(id)));
         p.state.frozen = players.values().any(|p| p.state.frozen);
         spawn(&mut p, players, tick + id);
         log(&format!("{} joined", p.name));
@@ -304,7 +306,7 @@ mod tests {
     #[test]
     fn rail_frags_everyone_along_the_beam_until_a_wall() {
         let mut game = Arena::new();
-        let (a, b, c) = (game.connect("a"), game.connect("b"), game.connect("c"));
+        let (a, b, c) = (game.connect(&"a".into()), game.connect(&"b".into()), game.connect(&"c".into()));
         let start = MAP.center(20, 8);
         for (id, x) in [(a, 0.0), (b, 6.0), (c, 12.0)] {
             game.players.get_mut(&id).unwrap().state.pos = start + Vec3::X * x;
@@ -319,7 +321,7 @@ mod tests {
     #[test]
     fn dead_respawn_on_fire_after_a_second_or_on_their_own() {
         let mut game = Arena::new();
-        let id = game.connect("a");
+        let id = game.connect(&"a".into());
         game.players.get_mut(&id).unwrap().alive = false;
         game.players.get_mut(&id).unwrap().died_at = game.tick;
         let fire = Input { fire: true, ..Default::default() };
@@ -338,7 +340,7 @@ mod tests {
     #[test]
     fn bots_play_a_match() {
         let mut game = Arena::new();
-        game.connect("observer");
+        game.connect(&"observer".into());
         game.players.values_mut().for_each(|p| p.alive = false);
         game.players.values_mut().for_each(|p| p.died_at = u32::MAX / 2);
         let (mut rails, mut frags) = (0, 0);
@@ -364,7 +366,7 @@ mod tests {
     fn bot_count_is_settable() {
         let mut game = Arena::new();
         game.set_bots(12);
-        game.connect("a");
+        game.connect(&"a".into());
         game.tick();
         assert_eq!(game.players.values().filter(|p| p.bot.is_some()).count(), 12);
         game.set_bots(0);
@@ -375,7 +377,7 @@ mod tests {
     #[test]
     fn frag_limit_ends_the_match_and_the_next_starts_fresh() {
         let mut game = Arena::new();
-        let id = game.connect("a");
+        let id = game.connect(&"a".into());
         game.players.get_mut(&id).unwrap().frags = FRAG_LIMIT;
         game.tick();
         assert_eq!(game.winner, Some(id));

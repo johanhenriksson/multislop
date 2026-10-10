@@ -21,6 +21,8 @@ pub struct Rig {
     pub stride: f32,
     /// When (client clock) we saw this player die, for the fall.
     pub died_at: Option<f64>,
+    /// The team it was built for: a new model when they switch sides.
+    pub team: Team,
     /// The gun shown, as last sent.
     pub gun: Option<usize>,
 }
@@ -136,7 +138,7 @@ pub fn spawn_soldier(scene: &mut Scene, team: Team, root: Transform) -> Rig {
         })
         .collect();
     debug_assert!(0.56 / 2.0 < RADIUS);
-    Rig { root: body, legs, arms, guns, phase: 0.0, last_pos: None, stride: 0.0, died_at: None, gun: None }
+    Rig { root: body, legs, arms, guns, phase: 0.0, last_pos: None, stride: 0.0, died_at: None, gun: None, team }
 }
 
 #[derive(Clone, Copy)]

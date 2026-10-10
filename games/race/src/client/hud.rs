@@ -19,7 +19,9 @@ pub struct Hud {
     feed: u32,
     message: u32,
     board: u32,
-    board_text: u32,
+    board_panel: u32,
+    /// Standings lines: a swatch of the runner's color and the line, in it. Made as more runners show up.
+    board_rows: Vec<(u32, u32, u32)>,
 }
 
 fn node() -> UiNode {
@@ -67,8 +69,9 @@ impl RaceClient {
         let board = UiNode { hidden: true, absolute: true, width: percent(100.0), height: percent(100.0), justify: Align::Center, align: Align::Center, ..node() };
         h.board = s.ui(None, board);
         let panel = UiNode { padding: Edges::all(20.0), radius: Corners::all(6.0), background: Color::srgba(0.0, 0.0, 0.05, 0.8), ..node() };
-        let panel = s.ui(Some(h.board), panel);
-        h.board_text = s.ui(Some(panel), text(18.0, TEXT));
+        h.board_panel = s.ui(Some(h.board), UiNode { column: true, gap: 4.0, ..panel });
+        let header = s.ui(Some(h.board_panel), text(18.0, TEXT));
+        s.ui_text(header, format!("     {:<4}{:<20}{:>10}{:>6}{:>7}", "", "Runner", "Time", "Wins", "Ping"));
     }
 
     pub(super) fn update_hud(&mut self) {
@@ -115,14 +118,23 @@ impl RaceClient {
         let show = self.tab || results;
         self.scene.ui_hidden(self.hud.board, !show);
         if show {
-            let mut out = format!("  {:<4}{:<20}{:>10}{:>6}{:>7}\n", "", "Runner", "Time", "Wins", "Ping");
-            for (i, p) in ranked.iter().enumerate() {
+            let s = &mut self.scene;
+            while self.hud.board_rows.len() < ranked.len() {
+                let row = s.ui(Some(self.hud.board_panel), UiNode { align: Align::Center, gap: 10.0, ..node() });
+                let swatch = s.ui(Some(row), UiNode { width: px(14.0), height: px(14.0), radius: Corners::all(3.0), ..node() });
+                self.hud.board_rows.push((row, swatch, s.ui(Some(row), text(18.0, TEXT))));
+            }
+            for (i, &(row, swatch, line)) in self.hud.board_rows.iter().enumerate() {
+                s.ui_hidden(row, i >= ranked.len());
+                let Some(p) = ranked.get(i) else { continue };
                 let you = if Some(p.id) == self.me { ">" } else { " " };
                 let time = p.finish.map_or_else(|| format!("CP {}", p.checkpoint), |(_, secs)| clock(secs));
                 let ping = if p.bot { "BOT".into() } else { p.ping.to_string() };
-                out += &format!("{you} {:<4}{:<20}{:>10}{:>6}{:>7}\n", ordinal(i as u8 + 1), p.name, time, p.wins, ping);
+                let value = format!("{you} {:<4}{:<20}{:>10}{:>6}{:>7}", ordinal(i as u8 + 1), p.name, time, p.wins, ping);
+                let (color, text) = (super::rgb(p.color), super::readable(p.color));
+                s.ui_set(swatch, |n| n.background = color);
+                s.ui_set(line, |n| n.text = Some(Text { value, color: text, shadow: true, center: false, size: 18.0 }));
             }
-            self.scene.ui_text(self.hud.board_text, out);
         }
     }
 }

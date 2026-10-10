@@ -135,8 +135,8 @@ impl WasmGame {
 }
 
 impl ServerGame for WasmGame {
-    fn connect(&mut self, name: &str) -> u32 {
-        let len = self.wasm.arg(name.as_bytes());
+    fn connect(&mut self, who: &sdk::Profile) -> u32 {
+        let len = self.wasm.arg(&encode(who));
         self.wasm.call(&self.connect, len)
     }
 
@@ -243,7 +243,7 @@ mod tests {
         let games: [&mut dyn ServerGame; 2] = [&mut wasm, &mut native];
         let mut last = Vec::new();
         for g in games {
-            let id = g.connect("tester");
+            let id = g.connect(&"tester".into());
             g.ping(id, 30);
             let mut frame = Frame::default();
             for _ in 0..(60.0 * sdk::TICK_HZ) as u32 {

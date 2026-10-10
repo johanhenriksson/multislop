@@ -85,6 +85,8 @@ pub struct NetPlayer {
     pub wins: u32,
     pub bot: bool,
     pub name: String,
+    /// sRGB, from their `sdk::Profile`.
+    pub color: [u8; 3],
     /// Round trip as the client measures it, for the scoreboard. 0 for bots.
     pub ping: u16,
 }

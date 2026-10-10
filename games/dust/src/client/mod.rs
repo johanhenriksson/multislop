@@ -771,7 +771,7 @@ impl DustClient {
         // We're looking out of their eyes, so their own model would only block the view.
         let watched = spectate.filter(|_| self.spectating()).map(|s| s.0);
 
-        let gone: Vec<u32> = self.rigs.keys().filter(|id| !seen.contains_key(id)).copied().collect();
+        let gone: Vec<u32> = self.rigs.iter().filter(|(id, r)| seen.get(id).is_none_or(|v| v.6 != r.team)).map(|(id, _)| *id).collect();
         for id in gone {
             let rig = self.rigs.remove(&id).unwrap();
             self.scene.push(Command::Despawn { id: rig.root });

@@ -25,6 +25,11 @@ Deadline: playable before 00:00. One weapon, one simple map.
   ping. Servers on another build answer with their build and are listed grayed out. Entries vanish after 3.5 s of
   silence. Click a server, or arrow keys and Enter, or type an address (remembered in
   `~/Library/Application Support/fps16/host`) and press Enter.
+- The menu is titled Multislop (so is the window). It shows who you're playing as: the logged-in user (`$USER`) and
+  a color from the 16 of `sdk::PALETTE`, picked at random on first run and changed by clicking a swatch, kept in
+  `~/Library/Application Support/fps16/color` (hex). Name and color travel as an `sdk::Profile` in every input
+  packet and reach the game through `ServerGame::connect`, so a player keeps their color from game to game; Instaslop
+  and Raceslop show it on the player's model, names and effects (Counterslop keeps team looks). Bots get a palette color picked from their name (`Profile::from`).
 - Back to the browser, with the reason shown, when the server goes quiet for 5 s in a game, never answers for 10 s,
   or runs another build; the game's scene, HUD, sounds and environment are torn down and the mouse is freed.
 - "Host a LAN game" lists every map of the game modules it can find (`--game`, `.wasm` files next to the binary,

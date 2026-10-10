@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bevy = { version = "0.20", features = ["serialize", "wav"] }
+bevy = { version = "0.20", features = ["serialize", "wav", "system_font_discovery"] }
 postcard = { version = "1.1.3", features = ["use-std"] }
 sdk = { path = "sdk" }
 sha2 = "0.10"
