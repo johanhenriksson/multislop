@@ -1,5 +1,5 @@
-//! The HUD: a Rocket League style score bug with the clock, health and armor, the gun in hand with its load and
-//! reserve, the crosshair or the AWP's scope, a marker over the ball, the kill feed, big centered messages (kickoff count, goals, the winner), the
+//! The HUD: a Rocket League style score bug with the clock, health and armor, the weapon in hand with its load and
+//! reserve, the crosshair (ringed when a rocket would lock onto the ball) or the AWP's scope, a marker over the ball, the kill feed, big centered messages (kickoff count, goals, the winner), the
 //! respawn count and the scoreboard (Tab, and at the end of a match).
 
 use super::{BallClient, ORANGE, BLUE, team_text};
@@ -14,6 +14,7 @@ const HEALTH: Color = Color::srgb(0.4, 1.0, 0.5);
 const ARMOR: Color = Color::srgb(1.0, 0.8, 0.25);
 const LOW: Color = Color::srgb(1.0, 0.3, 0.25);
 const ROCKET_LIT: Color = Color::srgb(1.0, 0.75, 0.35);
+const LOCK: Color = Color::srgb(1.0, 0.25, 0.2);
 
 /// HUD node ids.
 #[derive(Default)]
@@ -26,6 +27,7 @@ pub struct Hud {
     /// One per round in the biggest magazine (the AWP's 5).
     pips: [u32; 5],
     crosshair: u32,
+    lock: u32,
     scope: u32,
     reserve: u32,
     reload: u32,
@@ -116,6 +118,24 @@ impl BallClient {
         for t in [tick(-1.0, -1.0, 2.0, 2.0), tick(-13.0, -1.0, 7.0, 2.0), tick(6.0, -1.0, 7.0, 2.0), tick(-1.0, -13.0, 2.0, 7.0), tick(-1.0, 6.0, 2.0, 7.0)] {
             s.ui(Some(anchor), t);
         }
+        // Lock-on: a red ring around it and LOCK under it.
+        h.lock = s.ui(Some(anchor), UiNode { hidden: true, ..node() });
+        let ring = UiNode {
+            absolute: true,
+            left: px(-22.0),
+            top: px(-22.0),
+            width: px(44.0),
+            height: px(44.0),
+            border: Edges::all(3.0),
+            border_color: LOCK,
+            radius: Corners::all(1e4),
+            outline: Some((1.0, Color::srgba(0.0, 0.0, 0.0, 0.5))),
+            ..node()
+        };
+        s.ui(Some(h.lock), ring);
+        let label = UiNode { absolute: true, left: px(-40.0), top: px(26.0), width: px(80.0), ..centered(15.0, LOCK) };
+        let label = s.ui(Some(h.lock), label);
+        s.ui_text(label, "LOCK");
 
         // Dust's scope: a round lens whose huge black outline blacks out the rest of the screen, with thin crosshair
         // lines through it.
@@ -225,26 +245,30 @@ impl BallClient {
             (t.value, t.color) = (if alive { hp.to_string() } else { "0".into() }, low(hp, 25));
         });
         s.ui_text(h.armor, armor.to_string());
-        let (gun, (loaded, reserve)) = (self.pred.gun, self.pred.loaded());
-        let mag = gun.ability().full_ammo().unwrap().0;
+        let (gun, (loaded, reserve)) = (self.pred.gun, self.pred.ammo);
+        let mag = gun.ability().full_ammo().map_or(0, |a| a.0);
         for (i, &pip) in h.pips.iter().enumerate() {
             s.ui_set(pip, |n| (n.background, n.hidden) = (if (i as u8) < loaded && alive { ROCKET_LIT } else { DIM }, i as u8 >= mag));
         }
         let scoped = self.zoom && alive;
         s.ui_hidden(h.scope, !scoped);
         s.ui_hidden(h.crosshair, scoped);
+        s.ui_hidden(h.lock, !self.locked);
+        let knife = gun == Gun::Knife;
         s.ui_set(h.reserve, |n| {
             let t = n.text.as_mut().unwrap();
-            (t.value, t.color) = (reserve.to_string(), if reserve == 0 { LOW } else { TEXT });
+            (t.value, t.color) = (if knife { "-".into() } else { reserve.to_string() }, if reserve == 0 && !knife { LOW } else { TEXT });
         });
         let reloading = self.pred.hands.reloading > 0;
-        let reload = match () {
+        let reload = match gun {
             _ if !alive => "",
+            Gun::Knife if self.pred.primary.is_none() => "3  KNIFE   (no primary: walk over one)",
+            Gun::Knife => "3  KNIFE",
             _ if reloading => "RELOADING",
             _ if loaded == 0 && reserve == 0 => "OUT OF AMMO",
             _ if loaded == 0 => "R TO RELOAD",
-            _ if gun == Gun::Awp => "2  AWP",
-            _ => "1  LAUNCHER",
+            Gun::Awp => "1  AWP",
+            Gun::Launcher => "1  LAUNCHER",
         };
         s.ui_text(h.reload, reload);
 

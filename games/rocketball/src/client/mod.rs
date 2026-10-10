@@ -1,5 +1,6 @@
 //! The Rocketball client: a floodlit night stadium, the ball glowing in the color of the last team to touch it, players
-//! and rockets in their team colors, a launcher or a scoped AWP in hand, goal celebrations and the HUD.
+//! and rockets in their team colors, a launcher, a scoped AWP or the knife in hand, weapons and ammo lying about, goal
+//! celebrations and the HUD.
 
 mod hud;
 mod model;
@@ -75,6 +76,8 @@ struct Sounds {
     pad: u32,
     jump: u32,
     respawn: u32,
+    knife: u32,
+    lock: u32,
 }
 
 /// Something short-lived: a puff that grows and fades, a light that dims, or confetti that tumbles down.
@@ -163,12 +166,17 @@ pub struct BallClient {
     died_at: f64,
     hurt_at: f64,
     tab: bool,
-    /// The gun wanted in hand (1, 2, Q), and scoped in (right mouse).
-    gun: Gun,
-    last_gun: Gun,
+    /// The knife wanted in hand rather than the primary (3, 1, Q), scoped in (right mouse), and G pressed since the
+    /// last input.
+    knife: bool,
     zoom: bool,
-    /// First-person launcher and AWP, by `Gun as usize`.
-    viewmodels: [u32; 2],
+    want_drop: bool,
+    /// The crosshair is on the ball: a rocket fired now locks on.
+    locked: bool,
+    /// First-person launcher, AWP and knife, by `Gun as usize`.
+    viewmodels: [u32; 3],
+    /// Weapons and ammo packs on the ground, by entity id.
+    loot: HashMap<u32, u32>,
     /// Viewmodel kick, 1 right after firing and decaying to 0, the run bob's phase, and the sway behind turning
     /// with the view we last turned to.
     kick: f32,
@@ -221,6 +229,8 @@ impl ClientGame for BallClient {
             pad: sound(sfx::pad()),
             jump: sound(sfx::jump()),
             respawn: sound(sfx::respawn()),
+            knife: sound(sfx::knife()),
+            lock: sound(sfx::lock()),
         };
         self.pickups = world::build(&mut self.scene).pickups;
         let s = &mut self.scene;
@@ -235,7 +245,7 @@ impl ClientGame for BallClient {
             rocket_tail: s.mesh(MeshData::Sphere { radius: 0.11, ico: Some(1) }),
             tracer: s.material(Material { color: Color::srgba(1.0, 0.9, 0.5, 0.5), unlit: true, blend: Blend::Blend, ..Default::default() }),
         };
-        self.viewmodels = [Gun::Launcher, Gun::Awp].map(|g| model::spawn_gun(&mut self.scene, CAMERA, g, Transform::at(viewmodel(g)), true));
+        self.viewmodels = [Gun::Launcher, Gun::Awp, Gun::Knife].map(|g| model::spawn_gun(&mut self.scene, CAMERA, g, Transform::at(viewmodel(g)), true));
         self.spawn_ball();
         self.build_hud();
         std::mem::take(&mut self.scene.out)
@@ -255,14 +265,18 @@ impl ClientGame for BallClient {
             self.on_phase(before, phase);
         }
         let Some(me) = self.players.iter().find(|p| p.id == you) else { return };
-        let (alive, hp, armor, team, pos, yaw) = (me.alive, me.hp, me.armor, me.team, me.state.pos, me.state.yaw);
+        let (alive, hp, armor, team, pos, yaw, armed) = (me.alive, me.hp, me.armor, me.team, me.state.pos, me.state.yaw, me.state.primary.is_some());
         if alive && !self.alive {
-            // Respawned: face the way the server spawned us.
-            (self.yaw, self.pitch) = (yaw, 0.0);
+            // Respawned: face the way the server spawned us, the launcher in hand.
+            (self.yaw, self.pitch, self.knife) = (yaw, 0.0, false);
             self.sound(self.sounds.respawn, 0.5);
         } else if alive && hp < self.hp {
             self.hurt_at = self.time;
             self.sound(self.sounds.hurt, 0.7);
+        }
+        // Picked a gun up.
+        if alive && self.alive && armed && self.pred.primary.is_none() {
+            self.sound(self.sounds.clack, 0.7);
         }
         if matches!(now, Some(Phase::Kickoff { .. })) && !matches!(before, Some(Phase::Kickoff { .. })) {
             // Lined up for kickoff: face the center spot, as the server turned us.
@@ -281,7 +295,8 @@ impl ClientGame for BallClient {
             jump: raw.held(Key::Space) || raw.held(Key::Backspace),
             fire: raw.captured && raw.held(Key::MouseLeft),
             reload: raw.held(Key::R),
-            gun: self.gun,
+            knife: self.knife,
+            drop: std::mem::take(&mut self.want_drop),
             zoom: self.zoom,
             ..Default::default()
         };
@@ -299,9 +314,15 @@ impl ClientGame for BallClient {
             return;
         }
         if let Some(d) = step.fired {
-            let at = muzzle(eye(&self.pred), d, self.pred.gun);
-            self.muzzle_flash(at);
-            let sound = if self.pred.gun == Gun::Awp { self.sounds.awp } else { self.sounds.launch };
+            let gun = self.pred.gun;
+            if gun != Gun::Knife {
+                self.muzzle_flash(muzzle(eye(&self.pred), d, gun));
+            }
+            let sound = match gun {
+                Gun::Launcher => self.sounds.launch,
+                Gun::Awp => self.sounds.awp,
+                Gun::Knife => self.sounds.knife,
+            };
             self.sound(sound, 0.8);
             self.kick = 1.0;
         }
@@ -332,6 +353,11 @@ impl ClientGame for BallClient {
         }
         self.render_world(&f.others, f.dt);
         self.render_pickups();
+        let locked = self.alive && self.pred.gun == Gun::Launcher && lock_on(eye(&self.pred), look_rot(self.yaw, self.pitch) * Vec3::NEG_Z, self.ball.pos);
+        if locked && !self.locked {
+            self.sound(self.sounds.lock, 0.4);
+        }
+        self.locked = locked;
         self.render_viewmodel(f.dt);
         self.update_fx(f.dt);
         self.update_hud();
@@ -357,19 +383,20 @@ fn muzzle(o: Vec3, d: Vec3, gun: Gun) -> Vec3 {
 }
 
 impl BallClient {
-    /// Gun keys (1 launcher, 2 AWP, Q the other one), the scope (right mouse, AWP only, off while reloading or dead)
-    /// and the scoreboard.
+    /// Weapon keys (1 the primary, 3 the knife, Q the other one), G to drop the primary, the scope (right mouse, AWP
+    /// only, off while reloading or dead) and the scoreboard.
     fn controls(&mut self, raw: &RawInput) {
-        let want = match () {
-            _ if raw.pressed(Key::Digit1) => Some(Gun::Launcher),
-            _ if raw.pressed(Key::Digit2) => Some(Gun::Awp),
-            _ if raw.pressed(Key::Q) => Some(self.last_gun),
-            _ => None,
+        let knife = match () {
+            _ if raw.pressed(Key::Digit1) => false,
+            _ if raw.pressed(Key::Digit3) => true,
+            _ if raw.pressed(Key::Q) => !self.knife,
+            _ => self.knife,
         };
-        if let Some(gun) = want.filter(|&g| g != self.gun) {
-            (self.last_gun, self.gun, self.zoom) = (self.gun, gun, false);
+        if knife != self.knife {
+            (self.knife, self.zoom) = (knife, false);
         }
-        if raw.pressed(Key::MouseRight) && self.gun == Gun::Awp {
+        self.want_drop |= raw.pressed(Key::G);
+        if raw.pressed(Key::MouseRight) && self.pred.gun == Gun::Awp {
             self.zoom = !self.zoom;
         }
         if self.pred.gun != Gun::Awp || self.pred.hands.reloading > 0 || !self.alive {
@@ -406,6 +433,8 @@ impl BallClient {
                 self.sound_at(self.sounds.launch, 0.8, from);
             }
             Event::Launch { .. } => {}
+            Event::Slash { shooter, from } if shooter != you => self.sound_at(self.sounds.knife, 0.6, from),
+            Event::Slash { .. } => {}
             Event::Shot { shooter, from, to } => {
                 let from = if shooter == you { muzzle(eye(&self.pred), (to - from).normalize_or_zero(), Gun::Awp) } else { from };
                 self.tracer(from, to);
@@ -507,10 +536,10 @@ impl BallClient {
         self.ball = Ball { node, material, base, shell_material, lights, rot: Quat::IDENTITY, ..Default::default() };
     }
 
-    /// Players, the ball and rockets, all from the interpolated entities.
+    /// Players, the ball, rockets and loot, all from the interpolated entities.
     fn render_world(&mut self, others: &[Interpolated], dt: f32) {
         let mut seen = HashMap::new();
-        let mut rockets = HashMap::new();
+        let (mut rockets, mut loot) = (HashMap::new(), HashMap::new());
         let mut ball = None;
         for v in others {
             let e = &v.entity;
@@ -522,7 +551,10 @@ impl BallClient {
                 }
                 Some(Thing::Ball) => ball = Some((e.pos, e.vel)),
                 Some(Thing::Rocket(r)) => {
-                    rockets.insert(e.id, (e.pos, e.vel, r.team));
+                    rockets.insert(e.id, (e.pos, e.vel, r));
+                }
+                Some(Thing::Loot(l)) => {
+                    loot.insert(e.id, (e.pos, e.yaw, l));
                 }
                 None => {}
             }
@@ -532,6 +564,7 @@ impl BallClient {
             self.render_ball(pos, vel);
         }
         self.render_rockets(rockets);
+        self.render_loot(loot);
     }
 
     fn render_players(&mut self, seen: HashMap<u32, (Vec3, f32, f32, Team, Gun, bool)>, dt: f32) {
@@ -608,8 +641,8 @@ impl BallClient {
     }
 
     /// Rockets: an olive body along their flight with a glowing tail and light in the shooter's team color, leaving
-    /// puffs of smoke behind.
-    fn render_rockets(&mut self, mut now: HashMap<u32, (Vec3, Vec3, Team)>) {
+    /// puffs of smoke behind, in the team color when locked onto the ball.
+    fn render_rockets(&mut self, mut now: HashMap<u32, (Vec3, Vec3, NetRocket)>) {
         let gone: Vec<u32> = self.rockets.keys().filter(|id| !now.contains_key(id)).copied().collect();
         for id in gone {
             let (node, _) = self.rockets.remove(&id).unwrap();
@@ -619,20 +652,21 @@ impl BallClient {
         let eye = eye(&self.pred);
         let mut smoke = vec![];
         for (&id, (node, last)) in &mut self.rockets {
-            let Some((pos, vel, _)) = now.remove(&id) else { continue };
+            let Some((pos, vel, r)) = now.remove(&id) else { continue };
             self.scene.out.push(Command::set_transform(*node, pose(pos, vel)));
             // Not in our face as it leaves.
             if pos.distance(*last) > SMOKE_EVERY && pos.distance(eye) > 2.5 {
                 *last = pos;
-                smoke.push(pos - vel.normalize_or_zero() * 0.4);
+                smoke.push((pos - vel.normalize_or_zero() * 0.4, r));
             }
         }
-        for at in smoke {
+        for (at, r) in smoke {
             if self.fx.len() < MAX_FX {
-                self.fading(at, Color::srgba(0.75, 0.73, 0.7, 0.5), 0.12, 0.9, 3.0);
+                let c = if r.homing { team_rgb(r.team) } else { [0.75, 0.73, 0.7] };
+                self.fading(at, Color::srgba(c[0], c[1], c[2], 0.5), 0.12, 0.9, 3.0);
             }
         }
-        for (id, (pos, vel, team)) in now {
+        for (id, (pos, vel, NetRocket { team, .. })) in now {
             let s = &mut self.scene;
             let body = s.shared_material("rocket".into(), || Material { color: Color::srgb(0.25, 0.27, 0.22), emissive: [0.4, 0.3, 0.1], ..Default::default() });
             let c = team_rgb(team);
@@ -642,6 +676,40 @@ impl BallClient {
             let light = NodeKind::PointLight { color: rgb(c), intensity: 120_000.0, range: 8.0 };
             s.spawn(Some(node), light, Transform::at(Vec3::Y * -0.5), true);
             self.rockets.insert(id, (node, pos));
+        }
+    }
+
+    /// Weapons and ammo packs on the ground turn slowly where they lie; AWPs glow so they're found in the dark.
+    fn render_loot(&mut self, mut now: HashMap<u32, (Vec3, f32, Loot)>) {
+        let gone: Vec<u32> = self.loot.keys().filter(|id| !now.contains_key(id)).copied().collect();
+        for id in gone {
+            let node = self.loot.remove(&id).unwrap();
+            self.scene.push(Command::Despawn { id: node });
+        }
+        let t = self.time as f32;
+        let pose = |pos: Vec3, yaw: f32| Transform::at(pos + Vec3::Y * 0.3).rotated(Quat::from_rotation_y(yaw + t * 0.8));
+        for (&id, &node) in &self.loot {
+            if let Some((pos, yaw, _)) = now.remove(&id) {
+                self.scene.out.push(Command::set_transform(node, pose(pos, yaw)));
+            }
+        }
+        for (id, (pos, yaw, loot)) in now {
+            let holder = self.scene.empty(None, pose(pos, yaw), true);
+            match loot {
+                Loot::Gun(gun, _) => {
+                    let model = model::spawn_gun(&mut self.scene, holder, gun, Transform::default().scaled(1.3), false);
+                    self.scene.push(Command::set_visible(model, true));
+                    if gun == Gun::Awp {
+                        let light = NodeKind::PointLight { color: Color::srgb(1.0, 0.85, 0.5), intensity: 60_000.0, range: 4.0 };
+                        self.scene.spawn(Some(holder), light, Transform::at(Vec3::Y * 0.6), true);
+                    }
+                }
+                Loot::Rockets(_) => {
+                    let crate_ = self.scene.empty(Some(holder), Transform::at(Vec3::Y * 0.1).scaled(0.6), true);
+                    world::item_model(&mut self.scene, crate_, Item::Rockets);
+                }
+            }
+            self.loot.insert(id, holder);
         }
     }
 
@@ -666,8 +734,8 @@ impl BallClient {
         self.pickups_up = up;
     }
 
-    /// Our gun, moving like dust's: bobs while running, sways behind turns, kicks on firing, dips while reloading.
-    /// Hidden when scoped.
+    /// Our gun, moving like dust's: bobs while running, sways behind turns, kicks on firing (the knife slashes), dips
+    /// while reloading. Hidden when scoped.
     fn render_viewmodel(&mut self, dt: f32) {
         let look = Vec2::new(self.yaw, self.pitch);
         let turn = (look - self.last_look) / dt.max(1e-3);
@@ -679,10 +747,11 @@ impl BallClient {
         self.bob += dt * 10.0 * speed;
         let bob = Vec3::new(self.bob.sin() * 0.012, -(self.bob * 2.0).sin().abs() * 0.01, 0.0) * speed;
         let gun = self.pred.gun;
-        let reload = self.pred.hands.reloading as f32 / (gun.ability().reload_secs() * TICK_HZ as f32);
+        let reload = self.pred.hands.reloading as f32 / (gun.ability().reload_secs() * TICK_HZ as f32).max(1.0);
         let dip = (reload * std::f32::consts::PI).sin();
         let at = viewmodel(gun) + bob + Vec3::new(self.sway.x, self.sway.y - 0.15 * dip, 0.05 * self.kick);
-        let rot = Quat::from_rotation_x(-0.6 * dip + 0.12 * self.kick);
+        let slash = if gun == Gun::Knife { self.kick } else { 0.0 };
+        let rot = Quat::from_rotation_x(-0.6 * dip + 0.12 * self.kick) * Quat::from_rotation_y(1.2 * slash);
         let shown = self.alive && self.me.is_some() && !self.zoom;
         for (i, &id) in self.viewmodels.iter().enumerate() {
             let visible = Some(shown && i == gun as usize);

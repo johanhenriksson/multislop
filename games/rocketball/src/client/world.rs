@@ -609,7 +609,7 @@ pub fn item_color(item: Item) -> [f32; 3] {
 
 /// What hovers over the pad: health a white box with red crosses (mega a big one), armor a vest-shaped plate
 /// (yellow light, red heavy), rockets an olive crate of warheads.
-fn item_model(scene: &mut Scene, root: u32, item: Item) {
+pub fn item_model(scene: &mut Scene, root: u32, item: Item) {
     let part = |scene: &mut Scene, size: [f32; 3], at: [f32; 3], m: Material| {
         let mesh = scene.cuboid(Vec3::from(size));
         let material = scene.shared_material(format!("item {:?}", m.color.0), || m);

@@ -1,8 +1,8 @@
-//! What client and server both run: movement (the arena's: Quake style, fast and floaty), the rocket launcher and the
-//! AWP, the ball's physics and the wire format.
+//! What client and server both run: movement (the arena's: Quake style, fast and floaty), the rocket launcher, the AWP
+//! and the knife, rocket lock-on, the ball's physics and the wire format.
 
 use crate::map::{MAP, WALL_TOP};
-use glam::Vec3;
+use glam::{Quat, Vec3};
 use sdk::ability::{Ability, Accuracy, Cost, Delivery, Hands, Payload, Trigger};
 use serde::{Deserialize, Serialize};
 
@@ -62,8 +62,15 @@ pub const ROCKET: Ability = Ability {
     payload: Payload::Explode { damage: BLAST_DAMAGE, radius: BLAST_RADIUS, armor_pen: 1.0 - ARMOR_TAKES },
 };
 
+/// A rocket fired with the ball this close to the crosshair (radians, about 5.5°), in sight and in range, locks on.
+pub const LOCK_CONE: f32 = 0.096;
+pub const LOCK_RANGE: f32 = 50.0;
+/// A locked rocket turns towards the ball at up to this many radians a second (a 25 m turning circle), and loses the
+/// lock if the ball gets behind it.
+pub const HOMING_TURN: f32 = 1.6;
+
 /// Dust's AWP, for picking off attackers from the back: one body shot kills without armor. Unscoped spread; scoped
-/// is `AWP_SCOPED_SPREAD`.
+/// is `AWP_SCOPED_SPREAD`. Two lie at the center spot; you need to have dropped your launcher to take one.
 pub const AWP: Ability = Ability {
     trigger: Trigger::Semi,
     cost: Cost::Ammo { mag: 5, reserve: SPAWN_ROUNDS, reload: 3.0 },
@@ -81,17 +88,32 @@ pub const SPAWN_ROUNDS: u16 = 10;
 pub const MAX_ROUNDS: u16 = 20;
 /// An AWP round into the ball sends it on at this speed, along the shot.
 pub const SHOT_PUSH: f32 = 10.0;
-/// Seconds to take out the other gun.
+/// Dust's knife: cheap, sure damage up close, double from behind. Everyone has one.
+pub const KNIFE: Ability = Ability {
+    trigger: Trigger::Auto,
+    cost: Cost::Free,
+    cycle: 0.4,
+    accuracy: Accuracy { spread: 0.0, moving: 0.0, airborne: 0.0, kick: 0.0 },
+    delivery: Delivery::Melee { reach: 1.8 },
+    payload: Payload::Damage { amount: 35.0, armor_pen: 1.0 - ARMOR_TAKES },
+};
+/// A stab from behind (along the way the victim faces, within 60°) does this times the damage.
+pub const BACKSTAB: f32 = 2.0;
+pub const BACKSTAB_COS: f32 = 0.5;
+/// A slash into the ball sends it on at this speed, along the slash.
+pub const KNIFE_POKE: f32 = 5.0;
+/// Seconds to take out another weapon.
 pub const DRAW_SECS: f32 = 0.6;
 /// How far back AWP shots are lag compensated.
 pub const MAX_REWIND_TICKS: f32 = (0.4 * TICK_HZ) as f32;
 
-/// What a player holds. Everyone carries both: the launcher to play the ball, the AWP to guard from the back.
+/// What a player holds: one primary, the launcher to play the ball or the AWP to guard from the back, and the knife.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Gun {
     #[default]
     Launcher,
     Awp,
+    Knife,
 }
 
 impl Gun {
@@ -99,8 +121,18 @@ impl Gun {
         match self {
             Gun::Launcher => &ROCKET,
             Gun::Awp => &AWP,
+            Gun::Knife => &KNIFE,
         }
     }
+}
+
+/// Something lying on the pitch, taken by walking over it.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+pub enum Loot {
+    /// A launcher or AWP with its (loaded, reserve), for anyone without a primary.
+    Gun(Gun, (u8, u16)),
+    /// An ammo pack of rockets, for anyone with a launcher and room in their reserve.
+    Rockets(u16),
 }
 
 pub const BALL_RADIUS: f32 = 1.2;
@@ -127,9 +159,10 @@ const BLAST_LIFT: f32 = 0.25;
 const TOUCH_GAIN: f32 = 1.5;
 const DRIBBLE: f32 = 3.0;
 
-/// Entity ids: players count up from 1, rockets from `ROCKET_IDS`, and the ball has its own.
+/// Entity ids: players count up from 1, rockets from `ROCKET_IDS`, loot from `LOOT_IDS`, and the ball has its own.
 pub const BALL_ID: u32 = u32::MAX - 1;
 pub const ROCKET_IDS: u32 = 1 << 30;
+pub const LOOT_IDS: u32 = 1 << 29;
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Team {
@@ -163,7 +196,7 @@ pub enum Item {
     Health,
     /// +50 armor up to 100.
     Armor,
-    /// +8 rockets in reserve up to 16, and +5 AWP rounds up to 20.
+    /// With the launcher +8 rockets in reserve up to 16, with the AWP +5 rounds up to 20.
     Rockets,
     /// +100 HP up to 200.
     Mega,
@@ -183,12 +216,13 @@ impl Item {
         })
     }
 
-    /// Seconds until it's back once taken.
-    pub fn respawn_secs(self) -> f32 {
+    /// Seconds until it's back once taken, with `players` in the match. Rockets come back faster the more players
+    /// there are to share them: 15 s at 8, scaled by 8 / players within 0.4-1.5 times.
+    pub fn respawn_secs(self, players: usize) -> f32 {
         match self {
             Item::Health => 20.0,
             Item::Armor => 25.0,
-            Item::Rockets => 15.0,
+            Item::Rockets => 15.0 * (8.0 / players as f32).clamp(0.4, 1.5),
             Item::Mega | Item::HeavyArmor => 35.0,
         }
     }
@@ -211,8 +245,10 @@ pub struct Input {
     /// Held: fires a rocket every cycle, or the AWP once per press.
     pub fire: bool,
     pub reload: bool,
-    /// The gun wanted in hand; a change takes `DRAW_SECS`.
-    pub gun: Gun,
+    /// The knife wanted in hand rather than the primary (held anyway without one); a change takes `DRAW_SECS`.
+    pub knife: bool,
+    /// G: drop the primary in hand.
+    pub drop: bool,
     /// Scoped in (AWP).
     pub zoom: bool,
 }
@@ -231,29 +267,29 @@ pub struct PlayerState {
     pub pitch: f32,
     pub on_ground: bool,
     pub hands: Hands,
+    /// In hand.
     pub gun: Gun,
-    /// Rockets (loaded, reserve).
+    /// The launcher or the AWP, if not dropped, and its (loaded, reserve).
+    pub primary: Option<Gun>,
     pub ammo: (u8, u16),
-    /// AWP rounds (loaded, reserve).
-    pub rounds: (u8, u16),
     /// Kickoff countdown, goal and end screens: look around, nothing else. Part of the state so prediction agrees
     /// with the server.
     pub frozen: bool,
 }
 
 impl PlayerState {
-    /// Standing at `pos` facing `yaw` with a fresh load.
+    /// Standing at `pos` facing `yaw` with the launcher in hand, freshly loaded, and the knife.
     pub fn spawn(pos: Vec3, yaw: f32, frozen: bool) -> PlayerState {
-        let (ammo, rounds) = ((ROCKET.full_ammo().unwrap().0, SPAWN_RESERVE), AWP.full_ammo().unwrap());
-        PlayerState { pos, yaw, ammo, rounds, frozen, ..Default::default() }
+        PlayerState { pos, yaw, primary: Some(Gun::Launcher), ammo: ROCKET.full_ammo().unwrap(), frozen, ..Default::default() }
     }
 
-    /// The held gun's (loaded, reserve).
-    pub fn loaded(&self) -> (u8, u16) {
-        match self.gun {
-            Gun::Launcher => self.ammo,
-            Gun::Awp => self.rounds,
+    /// Takes a gun off the ground if there's no primary. Returns whether it did.
+    pub fn pick_up(&mut self, gun: Gun, ammo: (u8, u16)) -> bool {
+        let take = self.primary.is_none() && gun != Gun::Knife;
+        if take {
+            (self.primary, self.ammo) = (Some(gun), ammo);
         }
+        take
     }
 }
 
@@ -282,6 +318,8 @@ pub struct NetPlayer {
 pub struct NetRocket {
     pub owner: u32,
     pub team: Team,
+    /// Locked onto the ball.
+    pub homing: bool,
 }
 
 /// What an `sdk::Entity` is, in its `data`. The ball's last toucher is in `Match::last_touch`.
@@ -291,6 +329,7 @@ pub enum Thing {
     /// The ball, `BALL_ID`: pos is its center. Its `teleport` is bumped when it's put back on the center spot.
     Ball,
     Rocket(NetRocket),
+    Loot(Loot),
 }
 
 impl NetPlayer {
@@ -353,6 +392,8 @@ pub enum Event {
     Launch { shooter: u32, from: Vec3, dir: Vec3 },
     /// An AWP round from `from` that stopped at `to`.
     Shot { shooter: u32, from: Vec3, to: Vec3 },
+    /// A knife slash from `from`.
+    Slash { shooter: u32, from: Vec3 },
     /// A rocket went off; `team` is its shooter's.
     Explosion { pos: Vec3, radius: f32, team: Team },
     /// The ball was sent off at `strength` m/s, from `pos` (its center).
@@ -399,13 +440,18 @@ pub fn aim_dir(s: &PlayerState) -> Vec3 {
     look_rot(s.yaw, s.pitch) * Vec3::NEG_Z
 }
 
-/// Advances one tick of movement and the gun in hand.
+/// Advances one tick of movement and the weapon in hand. Dropping empties the primary; the server puts it on the
+/// ground.
 pub fn step_player(s: &mut PlayerState, inp: &Input) -> Step {
     s.yaw = inp.yaw;
     s.pitch = inp.pitch.clamp(-1.55, 1.55);
     let mut step = Step::default();
-    if inp.gun != s.gun {
-        s.gun = inp.gun;
+    if inp.drop && !s.frozen && s.gun != Gun::Knife {
+        (s.primary, s.ammo) = (None, (0, 0));
+    }
+    let want = if inp.knife { Gun::Knife } else { s.primary.unwrap_or(Gun::Knife) };
+    if want != s.gun {
+        s.gun = want;
         s.hands.draw(DRAW_SECS);
     }
     let scoped = s.gun == Gun::Awp && inp.zoom;
@@ -437,23 +483,41 @@ pub fn step_player(s: &mut PlayerState, inp: &Input) -> Step {
     s.vel.y -= GRAVITY * DT;
     move_and_collide(s);
 
-    let (mut hands, mut ammo) = (s.hands, s.loaded());
-    if hands.tick(s.gun.ability(), Some(&mut ammo), inp.fire, inp.reload, s.frozen).is_some() {
+    let (mut hands, mut ammo) = (s.hands, s.ammo);
+    let costs = (s.gun != Gun::Knife).then_some(&mut ammo);
+    if hands.tick(s.gun.ability(), costs, inp.fire, inp.reload, s.frozen).is_some() {
         step.fired = Some(match s.gun {
-            Gun::Launcher => aim_dir(s),
             Gun::Awp => {
                 let speed = (s.vel.with_y(0.0).length() / MAX_SPEED).min(1.0);
                 hands.aim(&AWP, scoped.then_some(AWP_SCOPED_SPREAD), speed, s.on_ground, s.yaw, s.pitch, inp.seq)
             }
+            _ => aim_dir(s),
         });
     }
     step.reloaded = s.hands.reloading == 0 && hands.reloading > 0;
-    s.hands = hands;
-    match s.gun {
-        Gun::Launcher => s.ammo = ammo,
-        Gun::Awp => s.rounds = ammo,
-    }
+    (s.hands, s.ammo) = (hands, ammo);
     step
+}
+
+/// Whether a rocket fired from `eye` along `dir` locks onto the ball at `ball`: within `LOCK_CONE` of the aim, in
+/// `LOCK_RANGE` and in sight.
+pub fn lock_on(eye: Vec3, dir: Vec3, ball: Vec3) -> bool {
+    let to = ball - eye;
+    to.length() < LOCK_RANGE && dir.angle_between(to) < LOCK_CONE && can_see(eye, ball)
+}
+
+/// One tick of a locked rocket's turn towards the ball at `ball`, at most `HOMING_TURN` per second, keeping its speed.
+/// Returns false, leaving it be, once the ball is behind it: the lock is lost.
+pub fn home(pos: Vec3, vel: &mut Vec3, ball: Vec3) -> bool {
+    let (dir, to) = (vel.normalize_or_zero(), (ball - pos).normalize_or_zero());
+    if dir.dot(to) <= 0.0 {
+        return false;
+    }
+    let axis = dir.cross(to);
+    if axis.length_squared() > 1e-12 {
+        *vel = Quat::from_axis_angle(axis.normalize(), dir.angle_between(to).min(HOMING_TURN * DT)) * *vel;
+    }
+    true
 }
 
 /// Quake acceleration: adds speed along `wish` up to `cap`, at a rate set by full run speed. In the air the cap is
@@ -736,9 +800,13 @@ mod tests {
     }
 
     #[test]
-    fn switching_to_the_awp_takes_a_draw_then_fires_once_per_press() {
+    fn an_awp_picked_up_takes_a_draw_then_fires_once_per_press() {
         let mut s = PlayerState::spawn(MAP.spawns[0][0], 0.0, false);
-        let awp = Input { gun: Gun::Awp, zoom: true, ..Default::default() };
+        assert!(!s.pick_up(Gun::Awp, AWP.full_ammo().unwrap()), "the launcher is still in hand");
+        step_player(&mut s, &Input { drop: true, ..Default::default() });
+        assert_eq!((s.primary, s.gun), (None, Gun::Knife));
+        assert!(s.pick_up(Gun::Awp, AWP.full_ammo().unwrap()));
+        let awp = Input { zoom: true, ..Default::default() };
         let fire = Input { fire: true, ..awp };
         for _ in 0..secs(DRAW_SECS) - 2 {
             step_player(&mut s, &awp);
@@ -749,7 +817,40 @@ mod tests {
         }
         let shots = (0..secs(3.0)).filter(|_| step_player(&mut s, &fire).fired.is_some()).count();
         assert_eq!(shots, 1, "held: one shot");
-        assert_eq!((s.rounds.0, s.ammo.0), (AWP.full_ammo().unwrap().0 - 1, 4));
+        assert_eq!((s.gun, s.ammo.0), (Gun::Awp, AWP.full_ammo().unwrap().0 - 1));
+    }
+
+    #[test]
+    fn the_knife_is_never_dropped_and_slashes_without_ammo() {
+        let mut s = PlayerState::spawn(MAP.spawns[0][0], 0.0, false);
+        step_player(&mut s, &Input { knife: true, ..Default::default() });
+        let knife = Input { knife: true, fire: true, drop: true, ..Default::default() };
+        let slashes = (1..secs(DRAW_SECS + 1.0)).filter(|_| step_player(&mut s, &knife).fired.is_some()).count();
+        assert_eq!((slashes, s.gun, s.primary, s.ammo), (3, Gun::Knife, Some(Gun::Launcher), (4, SPAWN_RESERVE)));
+    }
+
+    #[test]
+    fn rockets_lock_on_near_the_crosshair_and_turn_a_little_at_a_time() {
+        let (eye, ball) = (Vec3::new(0.0, EYE, 20.0), Vec3::new(0.0, BALL_RADIUS, 0.0));
+        let at = (ball - eye).normalize();
+        let off = |deg: f32| Quat::from_rotation_y(deg.to_radians()) * at;
+        assert!(lock_on(eye, at, ball) && lock_on(eye, off(5.0), ball));
+        assert!(!lock_on(eye, off(7.0), ball), "outside the cone");
+        assert!(!lock_on(eye + Vec3::Z * LOCK_RANGE, at, ball), "out of range");
+        // The 4 m pillar at x -16..-14, z -10..-8 is in the way.
+        assert!(!lock_on(Vec3::new(-15.0, EYE, -4.0), Vec3::NEG_Z, Vec3::new(-15.0, BALL_RADIUS, -14.0)), "behind cover");
+        let mut vel = Vec3::NEG_Z * ROCKET_SPEED;
+        assert!(home(Vec3::ZERO, &mut vel, Vec3::new(10.0, 0.0, -10.0)));
+        assert!((vel.length() - ROCKET_SPEED).abs() < 1e-3 && (vel.angle_between(Vec3::NEG_Z) - HOMING_TURN * DT).abs() < 1e-4, "{vel}");
+        assert!(!home(Vec3::ZERO, &mut vel, Vec3::new(0.0, 0.0, 10.0)), "no U-turns");
+    }
+
+    #[test]
+    fn rockets_come_back_faster_with_more_players() {
+        let r = |players| Item::Rockets.respawn_secs(players);
+        assert!(r(16) < r(12) && r(12) < r(8) && r(8) < r(4), "{} {} {} {}", r(16), r(12), r(8), r(4));
+        assert!((r(8) - 15.0).abs() < 1e-3 && (r(40) - 6.0).abs() < 1e-3 && (r(1) - 22.5).abs() < 1e-3);
+        assert_eq!(Item::Health.respawn_secs(16), Item::Health.respawn_secs(2), "the rest keep theirs");
     }
 
     #[test]

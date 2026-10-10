@@ -191,6 +191,20 @@ pub fn respawn() -> Vec<u8> {
     synth(0.45, |t| [523.0, 659.0, 784.0, 1046.0][((t / 0.1) as usize).min(3)], |t| 0.45 * (1.0 - t / 0.45), |p| (p * TAU).sin())
 }
 
+/// Dust's knife swish: a band of noise sweeping down.
+pub fn knife() -> Vec<u8> {
+    let (mut rng, mut low) = (0xBEEFu32, 0.0f32);
+    render(0.22, move |t| {
+        low += (noise(&mut rng) - low) * (0.5 - t * 1.8).max(0.05);
+        low * (t / 0.22 * std::f32::consts::PI).sin() * 1.6
+    })
+}
+
+/// Lock-on: two quick high chirps.
+pub fn lock() -> Vec<u8> {
+    synth(0.14, |_| 2400.0, |t| if ((t / 0.035) as u32).is_multiple_of(2) { 0.35 } else { 0.0 }, |p| (p * TAU).sin())
+}
+
 /// Samples at RATE, with a few layering helpers.
 struct Samples(Vec<f32>);
 
@@ -284,6 +298,7 @@ mod tests {
             ("launch", launch()), ("explosion", explosion()), ("thump", thump()), ("clang", clang()), ("horn", horn()),
             ("roar", roar()), ("swell", swell()), ("ambience", ambience()), ("chime", chime()), ("clank", clank()),
             ("clack", clack()), ("beep", beep(false)), ("go", beep(true)), ("whistle", whistle(1)), ("end", whistle(3)),
+            ("knife", knife()), ("lock", lock()),
         ];
         for (name, w) in &all {
             assert_eq!(&w[..4], b"RIFF", "{name}");

@@ -264,10 +264,11 @@ Grenades, dropped/pickup weapons, match end, team switching, anti-cheat, encrypt
   `dust.wasm`, so it shows up under "Host a LAN game".
 
 ## Rocketball (`games/rocketball`)
-CS meets Rocket League: two teams of four on a walled pitch with goals at both ends, a giant ball, and rocket
-launchers and AWPs. You score by moving the ball into the other goal: rockets blast it, running into it pushes it.
-Rockets kill too, so every shot is a choice between the ball and the player guarding it. The AWP makes a second way to
-play: hang back and pick off attackers from across the pitch.
+CS meets Rocket League: two teams of four on a walled pitch with goals at both ends, a giant ball, rocket launchers,
+knives and two AWPs to fight over. You score by moving the ball into the other goal: rockets blast it (and home in on
+it when fired right at it), running into it pushes it. Rockets kill too, so every shot is a choice between the ball and
+the player guarding it. The AWP makes a second way to play: give up your launcher, take one from the center and pick off
+attackers from across the pitch.
 
 ### Pitch (one map, "pitch")
 - A 2 m cell grid with heights in half meters, like the arena (`#` wall, `.` open, `S` spawn, `J` jump pad, pickups
@@ -294,8 +295,9 @@ play: hang back and pick off attackers from across the pitch.
 - Players never collide with each other or with the ball (the ball gets out of the way instead, see Ball).
 
 ### Guns
-Everyone carries both: `1` the launcher, `2` the AWP, `Q` the other one. Switching takes 0.6 s, and the gun in hand is
-kept through respawns.
+Everyone spawns with the knife and the rocket launcher in hand. One primary at a time, the launcher or an AWP: `1` the
+primary, `3` the knife, `Q` the other one (with no primary the knife is in hand anyway). Switching takes 0.6 s.
+`G` drops the primary in hand (never the knife), tossed a little forward with its ammo.
 
 #### Rocket launcher
 - A straight, 40 m/s rocket, no gravity, one every 0.8 s, 4 to a load, a 2 s reload. It goes off on touching the
@@ -307,15 +309,36 @@ kept through respawns.
   an ammo pickup (or die).
 - Shooting uses `sdk::ability` (`Hands`) in the predicted step, like dust's rocket. Rockets are server entities;
   clients draw them from snapshots. The launch sound and flash play predicted.
+- Lock-on: a rocket fired with the ball within 5.5° of the aim, in sight and within 50 m (the ball rewound to where the
+  shooter saw it, like AWP targets) homes in on it: each tick it turns towards the ball by at most 1.6 rad/s (about
+  92°/s, a 25 m turning circle at 40 m/s), keeping its speed, so it curves after a rolling ball but can still miss a
+  fast one. Once the ball is more than 90° off its heading the lock is lost and it flies straight on. Unlocked rockets
+  fly straight. Clients draw the homing path from the rocket entity in each snapshot. While the launcher is in hand and
+  the crosshair is within the cone of the ball as drawn, a red ring and "LOCK" circle the crosshair, with a chirp as it
+  locks; locked rockets trail smoke in their team's color.
 
 #### AWP
+- Two lie at the center, side by side 3 m either side of the center spot, from the kickoff of each match. Only someone
+  without a primary (who dropped their launcher) takes one, by walking over it, with 5 + 10 rounds. There are always
+  two: one dropped (or left by a dead holder) lies for 20 s, then turns up on its free spot again, and so does one whose
+  holder left.
 - Dust's: hitscan, 115 damage (one body shot kills without armor; armor takes its usual 2/3), one shot per press every
-  1.45 s, 5 to a magazine, 3 s reload. You spawn with 5 + 10 and carry at most 20 reserve; rocket pickups also give 5.
+  1.45 s, 5 to a magazine, 3 s reload. At most 20 reserve; rocket pickups give 5.
 - Right mouse toggles the scope: dust's black lens overlay, a narrow field of view, slower mouse, and pinpoint accuracy
   (unscoped it's wild, worse moving or in the air). Scoped, you run at 60% speed. The scope drops on reload or switch.
 - Hits are lag compensated (players rewound up to 0.4 s to where the shooter saw them). Teammates take half damage,
   as with rockets. A round into the ball sends it on at 10 m/s along the shot and counts as a touch.
 - A fading tracer from the muzzle to where the round stopped, and dust's recorded AWP sound.
+
+#### Knife
+- Dust's: a slash every 0.4 s while fire is held, 35 damage within 1.8 m of the eye, double (70) in the back (the
+  slash along the way the victim faces, within 60°). Lag compensated like the AWP; teammates take half.
+- Slashing the ball pokes it on at 5 m/s along the slash, a touch like any other.
+- Drawn as dust's knife with a slash swing in first person and its swish sound.
+
+#### Dropped weapons
+- Weapons on the ground keep their ammo and are taken by walking over them by anyone without a primary (not the one
+  who dropped it, for 0.6 s). They lie for 20 s and are all cleared at the next match.
 
 ### Ball
 - A sphere, radius 1.2 m, simulated on the server only and sent as an entity, so clients interpolate it like a
@@ -324,6 +347,7 @@ kept through respawns.
   rolls with light friction (about 1 m/s² while on the floor) and slight air drag, up to 45 m/s. Collision is sphere
   vs AABB by closest point, so an edge below the center sends it over a step and an edge above sends it back. Swept
   in substeps, so it never tunnels through a wall at full speed.
+- AWP rounds send it on at 10 m/s along the shot, knife slashes at 5 m/s.
 - Blasts push it: up to 22 m/s added at the center, falling off to 0 at 6 m (measured to the ball's surface, so a
   direct hit is the full push), away from the blast with an upward bias of 0.25 before normalizing. That makes a
   rocket under the ball loft it.
@@ -337,12 +361,16 @@ kept through respawns.
 ### Pickups
 Each sits on a pad on the map, and is taken by walking over it, only when it would help (full health doesn't take
 health). It comes back after its respawn time; clients learn whether each is up from the match state.
-- `h` health +25 (up to 100), 20 s. `a` light armor +50 (up to 100), 25 s. `r` rockets +8 reserve and AWP rounds
-  +5, 15 s.
+- `h` health +25 (up to 100), 20 s. `a` light armor +50 (up to 100), 25 s. `r` rockets: +8 reserve with the
+  launcher (up to 16) or +5 rounds with an AWP (up to 20), 15 s at 8 players, scaled by 8 / players in the match
+  (bots too) within 0.4-1.5 times: 6 s at 20 or more, 7.5 s at 16, 22.5 s at 5 or fewer.
 - The better ones are at midfield on the sideline platforms, where both teams fight over them: `M` mega health +100
   (up to 200, anything over 100 drains 1 HP/s), 35 s; `A` heavy armor +100 (up to 150), 35 s.
 - Armor takes 2/3 of damage until it runs out.
 - Ammo and small health sit near each team's goal and along the sidelines; light armor on the flanks of each half.
+- Ammo packs: the dead drop their launcher with what's loaded, and the rocket reserve as an ammo pack beside it. Anyone
+  with a launcher walking over it takes as many rockets as fit (the rest stay in it). Packs lie for 20 s and are
+  cleared at the next match.
 
 ### Match
 - Two teams, Orange and Blue. Humans auto-balance on joining. Bots fill each team to 4 while anyone plays (or up to the
@@ -354,23 +382,28 @@ health). It comes back after its respawn time; clients learn whether each is up 
   toucher ("X scored!"). If only the defending team touched it, it's an own goal for the scorer's side.
 - Clock: 5:00, running only during play. Most goals wins. A tie goes to golden goal overtime for up to 2 minutes,
   then it's a draw. Then 8 s of the scoreboard, and a new match. Rotation: 2 matches per turn.
-- Dying: respawn after 5 s, automatically, at a free respawn spot of your team, with 100 HP, no armor, 4 + 8 rockets
-  and 5 + 10 AWP rounds.
+- Dying: you drop your primary (and an ammo pack, see Pickups) where you fell. Respawn after 5 s, automatically, at a
+  free respawn spot of your team, with 100 HP, no armor, the knife and the launcher with 4 + 8 rockets.
   Kills score nothing on their own (they buy time), but the scoreboard counts them.
 - Scoreboard (Tab, and at the end): per team, the players with goals, kills, deaths and ping.
 
 ### Bots
 - Roles each tick by distance to the ball: the closest one attacks, the one furthest back keeps (it stays between
-  the ball and its own goal, in front of the goal, with the AWP, switching to the launcher to clear a ball within
-  20 m of its goal), and the rest support (they trail the attacker by about 12 m).
+  the ball and its own goal, in front of the goal, and comes out to clear a ball within 20 m of it), and the rest
+  support (they trail the attacker by about 12 m).
+- A keeper with the launcher goes for a free AWP within 50 m (the center ones) while the ball is in the other half, drops
+  the launcher standing on it and takes it. A bot without a primary goes for the nearest gun on the ground within 25 m.
 - Attacking: get behind the ball on the line from the enemy goal through it (3.5 m behind). Once lined up within
   about 30°, either run through it, or from 4-15 m fire a rocket at its lower half, leading its velocity, to blast it
   toward goal. They don't shoot the ball toward their own goal.
 - Fighting: an enemy in view (120° field, line of sight) within 25 m who is nearer than the ball shot draws fire at
-  their feet, leading their velocity. A keeper with the AWP scopes in and fires at the body of enemies within 70 m.
+  their feet, leading their velocity. With the AWP they scope in and fire at the body of enemies within 70 m (and
+  shoot the ball like a rocket when lined up). An enemy within 3 m gets the knife: they take it out, run at them and
+  slash at the body; so do bots out of ammo.
   Reaction delay, turn speed and aim error are the difficulty knobs, as in the
   arena.
-- They go for health under 50 HP and for ammo when out, if a pickup is up and within 25 m. They path over the grid
+- They go for health under 50 HP and for ammo when out (pickups, and ammo packs with the launcher), if one is up and
+  within 25 m. They path over the grid
   with the arena's distance field toward a target cell, recomputed when the target cell changes.
 
 ### Look
@@ -387,18 +420,20 @@ health). It comes back after its respawn time; clients learn whether each is up 
   taller, with a band of light.
 - Ball: big, white, with dark panel seams and a glow in the last toucher's team color (white at kickoff). Fast balls
   leave a fading trail. A small world-anchored marker over it tracks it through cover.
-- Players: the arena's armored figures in their team's color, carrying a rocket launcher or an AWP (dust's models). Rockets are
-  dust's, with a smoke trail and a glow in the team color. Explosions are dust's fireball, smoke and light flash.
+- Players: the arena's armored figures in their team's color, carrying a rocket launcher, an AWP or a knife (dust's
+  models). Rockets are dust's, with a smoke trail (in the team color when locked on) and a glow in the team color.
+- Loot: dropped weapons turn slowly just over the turf, AWPs with a small warm light so they're found in the dark;
+  ammo packs are a small olive crate of warheads. Explosions are dust's fireball, smoke and light flash.
 - Pickups hover and spin over a glowing pad: health a white box with a red cross (mega a big pulsing one), armor a
   vest-shaped plate (yellow light, red heavy), rockets an olive crate with warheads. A taken pickup leaves the pad dim.
 - A goal: a burst in the scoring team's color at the ball (fireball, confetti, a light flash), a horn and a roar from
   the crowd, and a huge "GOAL!" with the scorer's name.
-- Sounds: launch and explosion (dust's), a deep thump when the ball is pushed and a metallic clang when it's blasted,
+- Sounds: launch, explosion and knife swish (dust's), a lock-on chirp, a clack on taking a gun, a deep thump when the ball is pushed and a metallic clang when it's blasted,
   a goal horn, a crowd ambience loop that swells with play near a goal, pickup sounds (health chime, armor clank, ammo
   clack), countdown beeps, a whistle at kickoff and at the end.
 - HUD: a Rocket League style score bug top center (an orange score box, the clock, and a blue score box, with
-  "OVERTIME" when it applies), health and armor bottom left, the gun in hand with its load and reserve bottom right, a
-  crosshair (the scope when scoped), a kill feed top right, centered messages (kickoff countdown "3, 2, 1, GO!", goals, "Respawning in 2"),
+  "OVERTIME" when it applies), health and armor bottom left, the weapon in hand with its load and reserve bottom right
+  (`1 LAUNCHER`, `1 AWP`, `3 KNIFE`), a crosshair (the scope when scoped, ringed while a rocket would lock on), a kill feed top right, centered messages (kickoff countdown "3, 2, 1, GO!", goals, "Respawning in 2"),
   and the Tab scoreboard.
 
 - Run: `cargo build -p rocketball --release --target wasm32-unknown-unknown`, then

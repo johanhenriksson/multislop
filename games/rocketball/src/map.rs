@@ -24,6 +24,8 @@ pub const GOAL_LINE: f32 = 44.0;
 pub const GOAL_HALF_WIDTH: f32 = 8.0;
 pub const GOAL_HEIGHT: f32 = 8.0;
 pub const GOAL_DEPTH: f32 = 4.0;
+/// Where the two AWPs lie at kickoff of each match, side by side either side of the center spot.
+pub const AWP_SPOTS: [Vec3; 2] = [Vec3::new(-3.0, 0.0, 0.0), Vec3::new(3.0, 0.0, 0.0)];
 /// Depth of the crossbar, the box over each mouth from `GOAL_HEIGHT` up to the ceiling.
 const CROSSBAR: f32 = 1.0;
 

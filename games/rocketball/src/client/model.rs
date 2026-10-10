@@ -1,4 +1,4 @@
-//! The rocket launcher and AWP (dust's models) and the players carrying them (the arena's armored figures, in team
+//! The rocket launcher, AWP and knife (dust's models) and the players carrying them (the arena's armored figures, in team
 //! colors). Models face -Z with the origin at the feet; a gun's grip is at its origin.
 
 use super::{rgb, team_rgb};
@@ -66,23 +66,36 @@ fn awp() -> Vec<(Shape, Finish)> {
     ]
 }
 
-/// Gloved hands on the grip and under the barrel `support` ahead of it, forearms running back towards the bottom
-/// corners of the screen.
-fn hands(support: f32) -> Vec<(Shape, Finish)> {
-    let grip = [0.0, -0.075, 0.075];
+/// A steel blade with a black guard and handle.
+fn knife() -> Vec<(Shape, Finish)> {
     vec![
-        b([0.06, 0.07, 0.09], grip, 0.3, Glove),
-        b([0.06, 0.06, 0.3], [grip[0] + 0.03, grip[1] - 0.08, grip[2] + 0.18], 0.45, Sleeve),
-        b([0.06, 0.06, 0.1], [-0.02, -0.05, support + 0.01], -0.2, Glove),
-        b([0.06, 0.06, 0.36], [-0.11, -0.14, support + 0.2], 0.4, Sleeve),
+        b([0.012, 0.035, 0.17], [0.0, 0.0, -0.12], 0.0, Steel),
+        b([0.012, 0.022, 0.05], [0.0, 0.006, -0.225], 0.0, Steel),
+        b([0.05, 0.012, 0.015], [0.0, 0.0, -0.04], 0.0, Black),
+        b([0.025, 0.035, 0.1], [0.0, 0.0, 0.02], 0.0, Black),
     ]
 }
 
-/// Where the barrel tip is, ahead of the grip.
+/// A gloved hand on the grip, and for a two-handed gun one under the barrel `support` ahead of it, forearms running
+/// back towards the bottom corners of the screen.
+fn hands(grip: [f32; 3], support: Option<f32>) -> Vec<(Shape, Finish)> {
+    let mut parts = vec![
+        b([0.06, 0.07, 0.09], grip, 0.3, Glove),
+        b([0.06, 0.06, 0.3], [grip[0] + 0.03, grip[1] - 0.08, grip[2] + 0.18], 0.45, Sleeve),
+    ];
+    if let Some(support) = support {
+        parts.push(b([0.06, 0.06, 0.1], [-0.02, -0.05, support + 0.01], -0.2, Glove));
+        parts.push(b([0.06, 0.06, 0.36], [-0.11, -0.14, support + 0.2], 0.4, Sleeve));
+    }
+    parts
+}
+
+/// Where the barrel (or blade) tip is, ahead of the grip.
 pub fn barrel(gun: Gun) -> f32 {
     match gun {
         Gun::Launcher => 0.61,
         Gun::Awp => 0.86,
+        Gun::Knife => 0.25,
     }
 }
 
@@ -91,6 +104,7 @@ pub fn viewmodel(gun: Gun) -> Vec3 {
     match gun {
         Gun::Launcher => Vec3::new(0.23, -0.21, -0.26),
         Gun::Awp => Vec3::new(0.21, -0.21, -0.12),
+        Gun::Knife => Vec3::new(0.22, -0.22, -0.34),
     }
 }
 
@@ -98,12 +112,14 @@ pub fn viewmodel(gun: Gun) -> Vec3 {
 pub fn spawn_gun(scene: &mut Scene, parent: u32, gun: Gun, at: Transform, first_person: bool) -> u32 {
     let along_z = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
     let root = scene.empty(Some(parent), at, gun == Gun::Launcher);
-    let (mut shapes, support) = match gun {
-        Gun::Launcher => (launcher(), -0.26),
-        Gun::Awp => (awp(), -0.3),
+    let rifle = [0.0, -0.075, 0.075];
+    let (mut shapes, grip, support) = match gun {
+        Gun::Launcher => (launcher(), rifle, Some(-0.26)),
+        Gun::Awp => (awp(), rifle, Some(-0.3)),
+        Gun::Knife => (knife(), [0.0, 0.0, 0.03], None),
     };
     if first_person {
-        shapes.extend(hands(support));
+        shapes.extend(hands(grip, support));
     }
     for (shape, finish) in shapes {
         let material = scene.shared_material(format!("finish {}", finish as u8), || {
@@ -146,15 +162,15 @@ pub struct Rig {
     pub root: u32,
     pub arms: u32,
     pub legs: [u32; 2],
-    /// The launcher and the AWP, only the one in hand shown.
-    pub guns: [u32; 2],
+    /// The launcher, the AWP and the knife, by `Gun as usize`, only the one in hand shown.
+    pub guns: [u32; 3],
     pub team: Team,
     pub stride: f32,
     pub last_pos: Vec3,
 }
 
-/// An armored figure with plates in the team color, a glowing visor and stripe, a rocket launcher on the right shoulder
-/// or an AWP shouldered.
+/// An armored figure with plates in the team color, a glowing visor and stripe, a rocket launcher on the right shoulder,
+/// an AWP shouldered or a knife in hand.
 pub fn spawn_rig(scene: &mut Scene, team: Team) -> Rig {
     let armor = scene.shared_material("armor".into(), || Material { color: Color::srgb(0.13, 0.13, 0.15), roughness: 0.4, metallic: 0.6, ..Default::default() });
     let plate = scene.shared_material(format!("plate {team:?}"), || plate_material(team));
@@ -183,5 +199,6 @@ pub fn spawn_rig(scene: &mut Scene, team: Team) -> Rig {
     // On the shoulder, sticking out ahead.
     let launcher = spawn_gun(scene, arms, Gun::Launcher, Transform::at(Vec3::new(0.24, 0.0, -0.3)).scaled(1.3), false);
     let awp = spawn_gun(scene, arms, Gun::Awp, Transform::at(Vec3::new(0.2, -0.05, -0.35)).scaled(1.3), false);
-    Rig { root, arms, legs, guns: [launcher, awp], team, stride: 0.0, last_pos: Vec3::ZERO }
+    let knife = spawn_gun(scene, arms, Gun::Knife, Transform::at(Vec3::new(0.3, -0.14, -0.38)).scaled(1.3), false);
+    Rig { root, arms, legs, guns: [launcher, awp, knife], team, stride: 0.0, last_pos: Vec3::ZERO }
 }
