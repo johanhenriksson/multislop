@@ -34,7 +34,7 @@ IGNORED_MATERIALS = {"material_32", "material_33", "material_3", "material_18"}
 # OBJ coordinates (meters) of the A and B site decals, and the spawn yards as (x0, y0, x1, y1).
 SITE_X = {"A": (23.0, 49.2), "B": (-33.2, 53.8)}
 SITE_RADIUS = {"A": 7.5, "B": 8.0}
-SPAWN_AREA = {"T": (-44.0, -19.0, -24.0, -7.0), "C": (-17.5, 41.5, -6.5, 52.5)}
+SPAWN_AREA = {"T": (-18.0, -21.0, -9.0, -13.0), "C": (-17.5, 41.5, -6.5, 52.5)}
 DIGITS = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 

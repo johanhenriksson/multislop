@@ -1,8 +1,8 @@
 //! The maps, as layers of ASCII grids with a height grid each (`maps/<name>.txt` and `maps/<name>_heights.txt`, the
 //! layers separated by a blank line). Dust is de_dust2, converted from the original geometry by
 //! `tools/dust2_to_grid.py` (1 m cells): north is up, B site top-left, A top-right, CT spawn between them, T spawn
-//! bottom-left. Aztec (2 m cells, one layer): CT spawn west, A north-west, B south-middle, T spawn east, the rope
-//! bridge a raised walkway along the north wall of a sunken water room.
+//! at the bottom, as far from either site. Aztec (2 m cells, one layer): CT spawn west, A north-west, B south-middle,
+//! T spawn east, the rope bridge a raised walkway along the north wall of a sunken water room.
 //!
 //! The base layer: `#` wall (its height is the top), `X` tall crate, `x` low crate (jumpable, both standing on their
 //! cell's height), `k` crate whose top is its height, `A`/`B` bomb site floor, `T`/`C` team spawns, `.` floor.
@@ -503,6 +503,18 @@ mod tests {
             for s in m.t_spawns.iter().chain(&m.ct_spawns) {
                 assert!(field[m.node(*s)] < u16::MAX, "spawn {s} can't walk to {site}");
             }
+        }
+    }
+
+    #[test]
+    fn dust_t_spawn_is_as_far_from_either_site() {
+        let m = &*PARSED[0];
+        let [a, b] = ['A', 'B'].map(|site| m.distance_field(m.node(m.site_center(site))));
+        let between = a[m.node(m.site_center('B'))].min(b[m.node(m.site_center('A'))]);
+        for s in &m.t_spawns {
+            let (to_a, to_b) = (a[m.node(*s)], b[m.node(*s)]);
+            assert!(to_a.abs_diff(to_b) * 4 <= to_a.max(to_b), "spawn {s}: {to_a} steps to A, {to_b} to B");
+            assert!(to_a.min(to_b) >= between, "spawn {s} is closer to a site than the sites are to each other");
         }
     }
 

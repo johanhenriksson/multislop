@@ -111,7 +111,10 @@ Deadline: playable before 00:00. One weapon, one simple map.
   checkerboard in each spawn yard. `--debug` writes a top-down PNG per layer. The result, 85x89 cells, north up: B
   top-left, A top-right, CT spawn north of mid doors with the B doors corridor west and a passage east to A that runs
   under the bridge of short A (the stacked floor), mid down the middle with catwalk east of it, long A down the east
-  side through long doors to the pit, T spawn bottom-left with upper tunnels north to B and lower tunnels into mid.
+  side through long doors to the pit, T spawn at the back of the south yard, from whose west end the upper tunnels
+  go north to B, with mid straight north and outside long down the ramp east. The T spawns are placed where the walk
+  to A and to B is about as long (bot path steps 83-87 to A, 73-78 to B; a test checks they're within a quarter of
+  each other and no shorter than the walk between the sites).
 - Aztec (85x47, one layer, ported from the old pre-wasm counter-slop branch): CT spawn west, A site north-west, B
   south-middle, T spawn east, 16 spawn spots each; the rope bridge is a raised walkway along the north wall of a
   sunken water room, plus sunken grass pits and double doors. Bots play it with the same logic (a test plays 10
