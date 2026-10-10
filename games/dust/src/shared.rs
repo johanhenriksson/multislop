@@ -32,7 +32,7 @@ const STOP_SPEED: f32 = 2.54;
 const GRAVITY: f32 = 20.3;
 const JUMP_SPEED: f32 = 6.8;
 /// Highest rise you walk up without jumping (stairs, ramps, curbs), and how far down you stay glued to the floor.
-const STEP: f32 = 0.5;
+pub const STEP: f32 = 0.5;
 /// Walking (Shift) speed as a fraction of running, as in CS. Footsteps are only heard above it.
 pub const WALK_SPEED: f32 = 0.52;
 
@@ -461,7 +461,8 @@ pub fn step_player(s: &mut PlayerState, inp: &Input) -> Option<Fired> {
         s.duck = (s.duck + step).min(1.0);
     } else if s.duck > 0.0 {
         let up = (s.duck - step).max(0.0);
-        if !MAP.boxes.iter().any(|&(c, h)| overlaps(s.pos, c, h, height(up))) {
+        let headroom = !MAP.blocked(s.pos, s.pos.y + STEP, s.pos.y + height(up));
+        if headroom && !MAP.boxes.iter().any(|&(c, h)| overlaps(s.pos, c, h, height(up))) {
             s.duck = up;
         }
     }
@@ -508,7 +509,8 @@ fn overlaps(p: Vec3, c: Vec3, h: Vec3, height: f32) -> bool {
         && p.y + height > c.y - h.y + SKIN
 }
 
-// ponytail: player collides with boxes as an AABB, axis-by-axis, and stands on the height field at its center point.
+// ponytail: player collides with boxes as an AABB, axis-by-axis, but with floors (ledges, slabs) only at its center
+// point, so the edge of the hull can poke into a slab overhead or hang over a drop.
 fn move_and_collide(s: &mut PlayerState) {
     let tall = height(s.duck);
     let was_on_ground = s.on_ground;
@@ -538,10 +540,18 @@ fn move_and_collide(s: &mut PlayerState) {
             }
             s.vel[axis] = 0.0;
         }
-        // Floor rising more than a step in the way is a wall; anything less is walked up.
-        if axis != 1 && MAP.floor_at(s.pos) > s.pos.y + STEP {
+        // Floor rising more than a step in the way, or a slab at head height, is a wall; anything less is walked up.
+        if axis != 1 && MAP.blocked(s.pos, s.pos.y + STEP, s.pos.y + tall) {
             s.pos[axis] = before;
             s.vel[axis] = 0.0;
+        }
+        // Head bumps on the underside of a slab.
+        if axis == 1 && s.pos.y > before {
+            let ceiling = MAP.ceiling(s.pos, before + tall - 1e-3);
+            if s.pos.y + tall > ceiling {
+                s.pos.y = ceiling - tall;
+                s.vel.y = 0.0;
+            }
         }
     }
     let floor = MAP.floor_at(s.pos);
@@ -554,13 +564,11 @@ fn move_and_collide(s: &mut PlayerState) {
     }
 }
 
-/// Distance to where a ray first goes below the floor, by marching then bisecting. RANGE if it never does.
+/// Distance to where a ray first goes into a floor (the ground or a slab), by marching then bisecting. RANGE if it
+/// never does. Steps are shorter than a slab is thick, so a ray can't skip through one.
 fn trace_floor(o: Vec3, d: Vec3, max: f32) -> f32 {
     const STEP: f32 = 0.25;
-    let below = |t: f32| {
-        let p = o + d * t;
-        p.y < MAP.floor_at(p)
-    };
+    let below = |t: f32| MAP.solid_at(o + d * t);
     let mut t = 0.0;
     while t < max {
         let next = (t + STEP).min(max);
@@ -599,7 +607,9 @@ pub fn trace_world_normal(o: Vec3, d: Vec3) -> (f32, Vec3) {
         }
     }
     let floor = trace_floor(o, d, best);
-    if floor < best { (floor, Vec3::Y) } else { (best, normal) }
+    // ponytail: floors are hit on their top, or a slab from below; a slab's side edge also reports up.
+    let floor_normal = if d.y > 0.0 { Vec3::NEG_Y } else { Vec3::Y };
+    if floor < best { (floor, floor_normal) } else { (best, normal) }
 }
 
 /// Where a ray enters a player's capsule `height` tall standing at `feet`.
@@ -626,6 +636,14 @@ fn closest_ray_segment(o: Vec3, d: Vec3, a: Vec3, b: Vec3) -> (f32, Vec3) {
     let t = (d.dot(a + e * s - o)).max(0.0);
     s = ((o + d * t - a).dot(e) / ee).clamp(0.0, 1.0);
     (t, a + e * s)
+}
+
+/// A spot on flat open ground with a clear 30 m line east, for tests.
+#[cfg(test)]
+pub fn yard() -> Vec3 {
+    let flat = |p: Vec3| (0..30).all(|t| (MAP.floor_at(p + Vec3::X * t as f32) - p.y).abs() < 0.2);
+    let clear = |p: Vec3| [0.3, 1.0, 1.7].iter().all(|&h| trace_world(p + Vec3::Y * h, Vec3::X) >= 30.0);
+    MAP.nodes().map(|n| MAP.node_pos(n)).find(|&p| flat(p) && clear(p)).expect("an open yard")
 }
 
 #[cfg(test)]
@@ -719,8 +737,7 @@ mod tests {
     #[test]
     fn knife_runs_faster_than_rifles() {
         let run = |primary: Option<Weapon>, slot: u8| {
-            // In the open south-east yard, with room to run east.
-            let mut s = PlayerState { pos: MAP.ground(38, 44), on_ground: true, ..Default::default() };
+            let mut s = PlayerState { pos: yard(), on_ground: true, ..Default::default() };
             s.loadout(primary, Weapon::Glock);
             step_player(&mut s, &Input { slot, ..Default::default() });
             for _ in 0..TICK_HZ as usize {
@@ -734,8 +751,7 @@ mod tests {
 
     #[test]
     fn crouching_is_lower_slower_and_stands_back_up() {
-        // In the open south-east yard, with room to run east.
-        let mut s = PlayerState { pos: MAP.ground(38, 44), on_ground: true, ..Default::default() };
+        let mut s = PlayerState { pos: yard(), on_ground: true, ..Default::default() };
         s.loadout(None, Weapon::Glock);
         let crouch = Input { duck: true, right: 1.0, ..Default::default() };
         for _ in 0..(DUCK_SECS * TICK_HZ as f32) as usize + 1 {
@@ -756,37 +772,80 @@ mod tests {
         assert!(crouched < 6.35 * WALK_SPEED, "too slow for footsteps");
     }
 
-    #[test]
-    fn walks_down_into_the_tunnel() {
-        // Walk from the raised south-east yard to the lowest floor along the bots' path.
-        let cells = (0..MAP.depth()).flat_map(|z| (0..MAP.width()).map(move |x| (x, z)));
-        let low = cells.filter(|&(x, z)| MAP.walkable(x, z)).map(|(x, z)| MAP.ground(x, z)).find(|g| g.y < 0.1).expect("a tunnel");
-        let yard = MAP.ground(38, 44);
-        let mut s = PlayerState { pos: yard, on_ground: true, ..Default::default() };
+
+    /// Runs towards `goal` along the bots' distance field, checking it never sinks into a floor, until it gets there
+    /// or `secs` are up. Returns where it ended.
+    fn walk_to(from: Vec3, goal: usize, secs: f32) -> Vec3 {
+        let mut s = PlayerState { pos: from, on_ground: true, ..Default::default() };
         s.loadout(None, Weapon::Glock);
-        let field = MAP.distance_field(MAP.cell(low));
-        let mut min_y = s.pos.y;
-        for _ in 0..(60.0 * TICK_HZ) as usize {
-            let (x, z) = MAP.cell(s.pos);
-            let w = MAP.width();
-            let next = MAP.neighbors(x, z).min_by_key(|&(nx, nz)| field[nz * w + nx]);
-            let Some((nx, nz)) = next.filter(|_| field[z * w + x] > 0) else { break };
-            let dir = (MAP.center(nx, nz) - s.pos).with_y(0.0).normalize_or_zero();
+        let (mut field, mut field_goal) = (vec![], usize::MAX);
+        let target = MAP.node_pos(goal);
+        for _ in 0..(secs * TICK_HZ as f32) as usize {
+            if MAP.node(s.pos) == goal && s.pos.with_y(0.0).distance(target.with_y(0.0)) < 0.3 {
+                break;
+            }
+            let dir = crate::bot::path_dir(&mut field, &mut field_goal, s.pos, target);
             let yaw = f32::atan2(-dir.x, -dir.z);
             step_player(&mut s, &Input { yaw, forward: 1.0, ..Default::default() });
             assert!(s.pos.y >= MAP.floor_at(s.pos) - 1e-3, "never sinks into the floor");
-            min_y = min_y.min(s.pos.y);
         }
-        assert!(min_y < 0.3, "got down into the tunnel: {min_y}");
-        assert!(yard.y > 2.0, "the yard is raised");
+        s.pos
+    }
+
+    fn lowest_node() -> usize {
+        MAP.nodes().min_by(|&a, &b| MAP.node_pos(a).y.total_cmp(&MAP.node_pos(b).y)).unwrap()
+    }
+
+    #[test]
+    fn walks_down_to_the_lowest_floor() {
+        let low = lowest_node();
+        let end = walk_to(yard(), low, 60.0);
+        assert!((end.y - MAP.node_pos(low).y).abs() < 0.3, "got down to {}: {end}", MAP.node_pos(low));
+        assert!(yard().y > MAP.node_pos(low).y + 3.0, "the yard is high up");
+    }
+
+    /// A cell with a slab over a lower floor: walk to each level from the other, and stay on the level walked to.
+    #[test]
+    fn walks_under_and_over_a_stacked_floor() {
+        let cells = (0..MAP.depth()).flat_map(|z| (0..MAP.width()).map(move |x| (x, z)));
+        let (x, z) = cells.filter(|&(x, z)| MAP.floors(x, z).iter().filter(|f| f.open).count() > 1).last().expect("a slab");
+        let levels = [0, 1].map(|i| MAP.node(MAP.center(x, z).with_y(MAP.floors(x, z).iter().filter(|f| f.open).nth(i).unwrap().y)));
+        let mut at = yard();
+        for _ in 0..2 {
+            for goal in levels {
+                at = walk_to(at, goal, 60.0);
+                assert_eq!(MAP.node(at), goal, "on the right level: {at} for {}", MAP.node_pos(goal));
+            }
+        }
+        // Jumping under the slab bumps the head on it.
+        let mut s = PlayerState { pos: MAP.node_pos(levels[0]), on_ground: true, ..Default::default() };
+        let ceiling = MAP.node_pos(levels[1]).y - crate::map::SLAB;
+        let mut top = s.pos.y;
+        for _ in 0..TICK_HZ as usize {
+            step_player(&mut s, &Input { jump: true, ..Default::default() });
+            top = top.max(s.pos.y);
+        }
+        assert!(top + HEIGHT <= ceiling + 1e-3, "head stays under the slab: {top}");
     }
 
     #[test]
     fn terrain_blocks_shots() {
-        let low = (0..MAP.depth()).flat_map(|z| (0..MAP.width()).map(move |x| (x, z))).find(|&(x, z)| MAP.walkable(x, z) && MAP.ground(x, z).y < 0.1);
-        let p = MAP.ground(low.unwrap().0, low.unwrap().1);
+        let p = MAP.node_pos(lowest_node());
         let t = trace_world(p + Vec3::Y * 0.5, Vec3::NEG_Y);
         assert!((t - 0.5).abs() < 0.01, "floor below: {t}");
+    }
+
+    /// A slab stops shots from below and above, and you can shoot along under it.
+    #[test]
+    fn slabs_block_shots() {
+        let cells = (0..MAP.depth()).flat_map(|z| (0..MAP.width()).map(move |x| (x, z)));
+        let (x, z) = cells.filter(|&(x, z)| MAP.floors(x, z).iter().filter(|f| f.open).count() > 1).last().expect("a slab");
+        let open: Vec<f32> = MAP.floors(x, z).iter().filter(|f| f.open).map(|f| f.y).collect();
+        let under = MAP.center(x, z).with_y(open[0] + 1.0);
+        let up = trace_world_normal(under, Vec3::Y);
+        assert!((up.0 - (open[1] - crate::map::SLAB - under.y)).abs() < 0.2 && up.1 == Vec3::NEG_Y, "slab overhead: {up:?}");
+        let above = MAP.center(x, z).with_y(open[1] + 1.0);
+        assert!((trace_world(above, Vec3::NEG_Y) - 1.0).abs() < 0.2, "slab underfoot");
     }
 
     #[test]

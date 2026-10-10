@@ -4,7 +4,8 @@
 
 use super::scene::Scene;
 use super::textures;
-use crate::map::{self, CELL, MAP};
+use crate::map::{self, MAP};
+use crate::shared::trace_world;
 use glam::{Vec2, Vec3};
 use sdk::client::{Blend, Color, Environment, Material, MeshData, NodeKind, Transform};
 
@@ -82,8 +83,12 @@ pub fn build(scene: &mut Scene) -> Bomb {
         scene.spawn(None, NodeKind::Mesh { mesh, material, shadows: false }, t, true);
     };
 
-    let terrain = scene.mesh(terrain_mesh(aztec));
+    let (tops, edges) = terrain_mesh(aztec);
+    let terrain = scene.mesh(tops);
     scene.mesh_node(None, terrain, ground, Transform::default());
+    let ledges = scene.mesh(edges);
+    let ledge_mat = scene.material(Material { color: shades[1], ..stone_mat });
+    scene.mesh_node(None, ledges, ledge_mat, Transform::default());
     // Desert (or jungle floor) out to the mountains, just below the lowest floor so it never shows inside the map.
     let outside = if aztec { Color::srgb(0.3, 0.42, 0.2) } else { Color::WHITE };
     let desert = scene.material(Material { uv_scale: 300.0, color: outside, ..textured(ground_tex) });
@@ -94,11 +99,15 @@ pub fn build(scene: &mut Scene) -> Bomb {
         let mesh = scene.mesh(textured_box(center, half, tile, world));
         scene.mesh_node(None, mesh, material, Transform::default());
     };
-    for &(c, h) in &MAP.boxes {
-        let wall = h.y > 2.0 && c.y - h.y < 0.0;
-        if wall {
+    let cell = MAP.cell;
+    for (&(c, h), &kind) in MAP.boxes.iter().zip(&MAP.kinds) {
+        if kind == b'#' {
             let shade = stones[((c.x * 0.37 + c.z * 0.61).abs() as usize) % stones.len()];
             boxed(scene, c, h, Vec2::splat(4.0), true, shade);
+            // A roof over a passage is plain stone; walls stand on the ground.
+            if c.y - h.y > -0.5 {
+                continue;
+            }
             // The carved band just under the top, standing slightly proud of the wall.
             let top = c.y + h.y;
             let band = Vec3::new(c.x, top - 0.75, c.z);
@@ -113,13 +122,13 @@ pub fn build(scene: &mut Scene) -> Bomb {
             }
         } else {
             // Crates, a crate per meter: wooden ones, and green ammo boxes only on and next to the bomb sites so those
-            // read as sites. Tall ones are drawn as two crates stacked (same footprint, so collision is unchanged),
+            // read as sites. Tall ones are drawn as crates stacked (same footprint, so collision is unchanged),
             // alternating wood and ammo on a site like the original's crate piles.
-            let reach = Vec3::new(h.x + CELL / 2.0, 0.0, h.z + CELL / 2.0);
+            let reach = Vec3::new(h.x + cell / 2.0, 0.0, h.z + cell / 2.0);
             let around = [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0), (1.0, 1.0), (-1.0, 1.0), (1.0, -1.0), (-1.0, -1.0)];
-            let on_site = around.iter().any(|&(sx, sz)| MAP.site_at(c + reach * Vec3::new(sx, 0.0, sz)).is_some());
+            let on_site = around.iter().any(|&(sx, sz)| MAP.site_at((c + reach * Vec3::new(sx, 0.0, sz)).with_y(c.y - h.y)).is_some());
             let green = on_site && (c.x * 7.3 + c.z * 3.1).sin() > -0.4;
-            let layers = if h.y > 0.8 { 2 } else { 1 };
+            let layers = (h.y / 0.6).round().max(1.0) as usize;
             let layer = h.y / layers as f32;
             for i in 0..layers {
                 let center = Vec3::new(c.x, c.y - h.y + layer * (2 * i + 1) as f32, c.z);
@@ -134,28 +143,36 @@ pub fn build(scene: &mut Scene) -> Bomb {
     let base_tint = if aztec { Color::srgb(0.62, 0.68, 0.6) } else { Color::srgb(0.78, 0.7, 0.62) };
     let base_mat = scene.material(Material { color: base_tint, ..stone_mat });
     let base_meshes = [
-        scene.mesh(textured_box(Vec3::ZERO, Vec3::new(0.05, 0.2, CELL / 2.0), Vec2::new(4.0, 4.0), false)),
-        scene.mesh(textured_box(Vec3::ZERO, Vec3::new(CELL / 2.0, 0.2, 0.05), Vec2::new(4.0, 4.0), false)),
+        scene.mesh(textured_box(Vec3::ZERO, Vec3::new(0.05, 0.2, cell / 2.0), Vec2::new(4.0, 4.0), false)),
+        scene.mesh(textured_box(Vec3::ZERO, Vec3::new(cell / 2.0, 0.2, 0.05), Vec2::new(4.0, 4.0), false)),
     ];
     for (x, z, (dx, dz), _) in wall_faces() {
         let (nx, nz) = (x.wrapping_add_signed(dx), z.wrapping_add_signed(dz));
         let normal = Vec3::new(dx as f32, 0.0, dz as f32);
-        let at = MAP.center(x, z) + normal * (CELL / 2.0 + 0.05) + Vec3::Y * (MAP.ground(nx, nz).y + 0.2);
+        let at = MAP.center(x, z) + normal * (cell / 2.0 + 0.05) + Vec3::Y * (MAP.ground(nx, nz).y + 0.2);
         scene.mesh_node(None, base_meshes[if dx != 0 { 0 } else { 1 }], base_mat, Transform::at(at));
     }
 
-    // Arched doors at street level and shutters higher up, sprinkled on walls that face open ground.
+    // Arched doors at street level and shutters higher up, sprinkled on walls that face open ground, as many per
+    // meter of wall whatever the cell size. On small cells the wall has to go on to both sides of a door.
+    let faces: std::collections::HashSet<_> = wall_faces().map(|(x, z, d, _)| (x, z, d)).collect();
     for (x, z, (dx, dz), side) in wall_faces() {
         let (nx, nz) = (x.wrapping_add_signed(dx), z.wrapping_add_signed(dz));
-        let roll = ((x * 73 + z * 151 + side * 37) as f32 * 12.9898).sin().fract().abs();
+        let roll = ((x * 73 + z * 151 + side * 37) as f32 * 12.9898).sin().fract().abs() * 2.0 / cell;
         let (size, lift) = match roll {
             r if r < 0.04 => (Vec2::new(1.6, 2.6), 0.0),
             r if r < 0.09 => (Vec2::new(1.0, 1.6), 2.4),
             _ => continue,
         };
+        let (ax, az) = (dz.unsigned_abs(), dx.unsigned_abs());
+        let reach = ((size.x / 2.0 - cell / 2.0) / cell).ceil().max(0.0) as usize;
+        let room = (1..=reach).all(|i| faces.contains(&(x + ax * i, z + az * i, (dx, dz))) && x >= ax * i && z >= az * i && faces.contains(&(x - ax * i, z - az * i, (dx, dz))));
+        if !room {
+            continue;
+        }
         let normal = Vec3::new(dx as f32, 0.0, dz as f32);
         let floor = MAP.ground(nx, nz).y;
-        let at = MAP.center(x, z) + normal * (CELL / 2.0 + 0.03) + Vec3::Y * (floor + lift + size.y / 2.0);
+        let at = MAP.center(x, z) + normal * (cell / 2.0 + 0.03) + Vec3::Y * (floor + lift + size.y / 2.0);
         let half = if dx != 0 { Vec3::new(0.03, size.y / 2.0, size.x / 2.0) } else { Vec3::new(size.x / 2.0, size.y / 2.0, 0.03) };
         boxed(scene, at, half, size, false, door);
         // A stone frame standing out from the wall: jambs, a lintel, and a sill under windows.
@@ -199,10 +216,10 @@ pub fn build(scene: &mut Scene) -> Bomb {
     }
 
     // Bomb sites, tinted red.
-    let site_mesh = scene.mesh(MeshData::Plane(Vec2::splat(CELL)));
+    let site_mesh = scene.mesh(MeshData::Plane(Vec2::splat(cell)));
     let site_mat = scene.material(Material { color: Color::srgba(0.8, 0.15, 0.1, 0.1), blend: Blend::Blend, unlit: true, ..Default::default() });
     for p in MAP.site_cells() {
-        scene.mesh_node(None, site_mesh, site_mat, Transform::at(p.with_y(MAP.floor_at(p) + 0.03)));
+        scene.mesh_node(None, site_mesh, site_mat, Transform::at(p + Vec3::Y * 0.03));
     }
     c4(scene)
 }
@@ -247,36 +264,105 @@ fn custom(positions: Vec<[f32; 3]>, normals: Vec<[f32; 3]>, uvs: Vec<[f32; 2]>, 
     MeshData::Custom { positions, normals, uvs, colors, indices }
 }
 
-/// The floor as one mesh following the height field, sand colored and darker the lower it goes; on aztec low ground
-/// is overgrown, and the bottom of the pits is murky water.
-fn terrain_mesh(aztec: bool) -> MeshData {
+/// The floors as two meshes: their tops, sand colored, and the stone sides of ledges and slabs with the undersides of
+/// slabs. Tops are darker where something overhead shades them (lower down on aztec, which is overgrown there and
+/// has murky water at the bottom of its pits).
+fn terrain_mesh(aztec: bool) -> (MeshData, MeshData) {
     let (w, d) = MAP.size();
+    let cell = MAP.cell;
+    let corner_at = |cx: usize, cz: usize, y: f32| Vec3::new(cx as f32 * cell - w / 2.0, y, cz as f32 * cell - d / 2.0);
     let (mut pos, mut normals, mut colors, mut uvs, mut idx) = (vec![], vec![], vec![], vec![], vec![]);
+    let mut sides = Quads::default();
+    // Corner indices of each edge, the neighbor across it and that neighbor's matching corners.
+    const EDGES: [((usize, usize), (isize, isize), (usize, usize)); 4] = [((0, 1), (0, -1), (3, 2)), ((1, 2), (1, 0), (0, 3)), ((2, 3), (0, 1), (1, 0)), ((3, 0), (-1, 0), (2, 1))];
     for z in 0..MAP.depth() {
         for x in 0..MAP.width() {
-            let corner = |cx: usize, cz: usize| Vec3::new(cx as f32 * CELL - w / 2.0, MAP.corner(cx, cz), cz as f32 * CELL - d / 2.0);
-            let quad = [corner(x, z), corner(x + 1, z), corner(x + 1, z + 1), corner(x, z + 1)];
-            let normal = (quad[2] - quad[0]).cross(quad[1] - quad[3]).normalize_or(Vec3::Y);
-            let normal = if normal.y < 0.0 { -normal } else { normal };
-            let base = pos.len() as u32;
-            for (i, p) in quad.into_iter().enumerate() {
-                // Baked contact shadow: floor corners next to walls and crates are darker, like a lightmap.
-                let (cx, cz) = [(x, z), (x + 1, z), (x + 1, z + 1), (x, z + 1)][i];
-                let around = [(cx.wrapping_sub(1), cz.wrapping_sub(1)), (cx, cz.wrapping_sub(1)), (cx.wrapping_sub(1), cz), (cx, cz)];
-                let solid = around.iter().filter(|&&(ax, az)| !MAP.walkable(ax, az)).count() as f32;
-                let shade = (0.55 + 0.45 * (p.y / 2.0).clamp(0.0, 1.0)) * (1.0 - 0.14 * solid);
-                pos.push(p.to_array());
-                normals.push(normal.to_array());
-                // The texture carries the floor color; vertex color only darkens the low tunnels, or turns aztec's green.
-                let green = if aztec { 1.0 - (p.y / 1.5).clamp(0.0, 1.0) } else { 0.0 };
-                let tint = if aztec && p.y < 0.3 { [0.04, 0.07, 0.06] } else { [1.0 - 0.8 * green, 0.97 - 0.4 * green, 0.94 - 0.85 * green] };
-                colors.push([shade * tint[0], shade * tint[1], shade * tint[2], 1.0]);
-                uvs.push([p.x / 4.0, p.z / 4.0]);
+            if MAP.is_wall(x, z) {
+                continue;
             }
-            idx.extend([base, base + 2, base + 1, base, base + 3, base + 2]);
+            let cells = [(x, z), (x + 1, z), (x + 1, z + 1), (x, z + 1)];
+            // Roofs are drawn as boxes.
+            for f in MAP.floors(x, z).iter().filter(|f| f.open || f.bottom == f32::NEG_INFINITY) {
+                let quad: [Vec3; 4] = std::array::from_fn(|k| corner_at(cells[k].0, cells[k].1, f.corners[k]));
+                let normal = (quad[2] - quad[0]).cross(quad[1] - quad[3]).normalize_or(Vec3::Y);
+                let normal = if normal.y < 0.0 { -normal } else { normal };
+                let base = pos.len() as u32;
+                for (i, p) in quad.into_iter().enumerate() {
+                    // Baked contact shadow: floor corners next to walls and crates are darker, like a lightmap.
+                    let (cx, cz) = cells[i];
+                    let around = [(cx.wrapping_sub(1), cz.wrapping_sub(1)), (cx, cz.wrapping_sub(1)), (cx.wrapping_sub(1), cz), (cx, cz)];
+                    let solid = around.iter().filter(|&&(ax, az)| !MAP.walkable(ax, az)).count() as f32;
+                    let low = if aztec { 0.55 + 0.45 * (p.y / 2.0).clamp(0.0, 1.0) } else if trace_world(p + Vec3::Y * 0.1, Vec3::Y) < 8.0 { 0.6 } else { 1.0 };
+                    let shade = low * (1.0 - 0.14 * solid);
+                    pos.push(p.to_array());
+                    normals.push(normal.to_array());
+                    // The texture carries the floor color; vertex color only darkens, or turns aztec's low ground green.
+                    let green = if aztec { 1.0 - (p.y / 1.5).clamp(0.0, 1.0) } else { 0.0 };
+                    let tint = if aztec && p.y < 0.3 { [0.04, 0.07, 0.06] } else { [1.0 - 0.8 * green, 0.97 - 0.4 * green, 0.94 - 0.85 * green] };
+                    colors.push([shade * tint[0], shade * tint[1], shade * tint[2], 1.0]);
+                    uvs.push([p.x / 4.0, p.z / 4.0]);
+                }
+                idx.extend([base, base + 2, base + 1, base, base + 3, base + 2]);
+
+                // Each edge drops to the highest floor below it across the edge (a slab's only down to its underside).
+                for ((a, b), (dx, dz), (na, nb)) in EDGES {
+                    let (nx, nz) = (x.wrapping_add_signed(dx), z.wrapping_add_signed(dz));
+                    if nx >= MAP.width() || nz >= MAP.depth() || (MAP.is_wall(nx, nz) && f.bottom == f32::NEG_INFINITY) {
+                        continue;
+                    }
+                    let below = MAP.floors(nx, nz).iter().filter(|g| g.corners[na] <= f.corners[a] + 0.01 && g.corners[nb] <= f.corners[b] + 0.01 && !MAP.is_wall(nx, nz));
+                    let next = below.max_by(|g, h| (g.corners[na] + g.corners[nb]).total_cmp(&(h.corners[na] + h.corners[nb])));
+                    let (mut lo_a, mut lo_b) = next.map_or((f.bottom, f.bottom), |g| (g.corners[na], g.corners[nb]));
+                    lo_a = lo_a.max(f.bottom).max(-1.0);
+                    lo_b = lo_b.max(f.bottom).max(-1.0);
+                    if f.corners[a] - lo_a < 0.02 && f.corners[b] - lo_b < 0.02 {
+                        continue;
+                    }
+                    let out = Vec3::new(dx as f32, 0.0, dz as f32);
+                    let (ca, cb) = (cells[a], cells[b]);
+                    sides.push([corner_at(ca.0, ca.1, lo_a), corner_at(cb.0, cb.1, lo_b), corner_at(cb.0, cb.1, f.corners[b]), corner_at(ca.0, ca.1, f.corners[a])], out);
+                }
+                if f.bottom > f32::NEG_INFINITY {
+                    let under: [Vec3; 4] = std::array::from_fn(|k| corner_at(cells[k].0, cells[k].1, f.bottom));
+                    sides.push([under[0], under[1], under[2], under[3]], Vec3::NEG_Y);
+                }
+            }
         }
     }
-    custom(pos, normals, uvs, colors, idx)
+    (custom(pos, normals, uvs, colors, idx), sides.mesh())
+}
+
+/// Quads with world-mapped UVs (4 m per texture, like the walls), each facing its normal.
+#[derive(Default)]
+struct Quads {
+    pos: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
+    idx: Vec<u32>,
+}
+
+impl Quads {
+    fn push(&mut self, corners: [Vec3; 4], normal: Vec3) {
+        let base = self.pos.len() as u32;
+        let along = if normal.y.abs() > 0.5 { Vec3::X } else { Vec3::Y.cross(normal) };
+        for p in corners {
+            self.pos.push(p.to_array());
+            self.normals.push(normal.to_array());
+            let v = if normal.y.abs() > 0.5 { p.z } else { -p.y };
+            self.uvs.push([p.dot(along) / 4.0, v / 4.0]);
+        }
+        // Wind counter-clockwise as seen from the side the normal points to.
+        let n = (corners[1] - corners[0]).cross(corners[2] - corners[0]);
+        if n.dot(normal) >= 0.0 {
+            self.idx.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+        } else {
+            self.idx.extend([base, base + 2, base + 1, base, base + 3, base + 2]);
+        }
+    }
+
+    fn mesh(self) -> MeshData {
+        custom(self.pos, self.normals, self.uvs, vec![], self.idx)
+    }
 }
 
 /// A box whose UVs are in meters divided by `tile`: anchored to the world (so neighboring walls line up) or to the

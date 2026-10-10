@@ -56,12 +56,12 @@ pub struct Bot {
     target: Option<(u32, u32)>,
     /// Current aim error as (yaw, pitch) in radians.
     aim_error: (f32, f32),
-    /// Distance field towards the current goal cell, recomputed when the goal changes.
+    /// Distance field towards the current goal node, recomputed when the goal changes.
     field: Vec<u16>,
-    field_goal: (usize, usize),
+    field_goal: usize,
     /// Distance field towards the enemy spawn, to face the way enemies will come from while holding a spot.
     watch: Vec<u16>,
-    watch_goal: (usize, usize),
+    watch_goal: usize,
     last_pos: Vec3,
     stuck_ticks: u32,
     rng: u32,
@@ -83,9 +83,9 @@ impl Bot {
             target: None,
             aim_error: (0.0, 0.0),
             field: vec![],
-            field_goal: (usize::MAX, 0),
+            field_goal: usize::MAX,
             watch: vec![],
-            watch_goal: (usize::MAX, 0),
+            watch_goal: usize::MAX,
             last_pos: Vec3::ZERO,
             stuck_ticks: 0,
             rng: seed.wrapping_mul(0x9E37_79B9) | 1,
@@ -112,27 +112,22 @@ impl Bot {
     fn cover_spots(&mut self, site: char) -> Vec<Vec3> {
         let center = MAP.site_center(site);
         // Where the T path enters the site area: the first point on it within 14 m of the site.
-        let field = MAP.distance_field(MAP.cell(center));
-        let w = MAP.width();
-        let mut cell = MAP.cell(MAP.spawns(Team::T)[0]);
-        while MAP.center(cell.0, cell.1).distance(center.with_y(0.0)) > 14.0 {
-            let here = field[cell.1 * w + cell.0];
-            match MAP.neighbors(cell.0, cell.1).find(|&(x, z)| field[z * w + x] < here) {
-                Some(next) => cell = next,
+        let field = MAP.distance_field(MAP.node(center));
+        let mut node = MAP.node(MAP.spawns(Team::T)[0]);
+        while MAP.node_pos(node).distance(center) > 14.0 {
+            let here = field[node];
+            match MAP.links(node).iter().map(|&m| m as usize).find(|&m| field[m] < here) {
+                Some(next) => node = next,
                 None => break,
             }
         }
-        let choke = MAP.ground(cell.0, cell.1);
-        let near_cover = |x: usize, z: usize| {
-            [(1isize, 0isize), (-1, 0), (0, 1), (0, -1)].iter().any(|&(dx, dz)| {
-                let (nx, nz) = (x.wrapping_add_signed(dx), z.wrapping_add_signed(dz));
-                !MAP.walkable(nx, nz)
-            })
-        };
-        let mut spots: Vec<Vec3> = (0..MAP.depth())
-            .flat_map(|z| (0..w).map(move |x| (x, z)))
-            .filter(|&(x, z)| MAP.walkable(x, z) && near_cover(x, z))
-            .map(|(x, z)| MAP.ground(x, z))
+        let choke = MAP.node_pos(node);
+        // Something on some side that can't be walked into: a wall, a crate or a ledge.
+        let near_cover = |n: usize| MAP.links(n).len() < 8;
+        let mut spots: Vec<Vec3> = MAP
+            .nodes()
+            .filter(|&n| near_cover(n))
+            .map(|n| MAP.node_pos(n))
             .filter(|p| p.distance(center.with_y(p.y)) < 12.0 && p.distance(choke) > 6.0)
             .filter(|p| can_see(*p + Vec3::Y * EYE, choke + Vec3::Y * HEIGHT * (2.0 / 3.0)))
             .collect();
@@ -145,10 +140,9 @@ impl Bot {
 
     /// A random open floor cell 3-9 m from the planted bomb, with a line of sight to it, to guard it from.
     fn guard_spot(&mut self, bomb: Vec3) -> Vec3 {
-        let spots: Vec<Vec3> = (0..MAP.depth())
-            .flat_map(|z| (0..MAP.width()).map(move |x| (x, z)))
-            .filter(|&(x, z)| MAP.walkable(x, z))
-            .map(|(x, z)| MAP.ground(x, z))
+        let spots: Vec<Vec3> = MAP
+            .nodes()
+            .map(|n| MAP.node_pos(n))
             .filter(|p| (3.0..9.0).contains(&p.distance(bomb)) && can_see(*p + Vec3::Y * EYE, bomb + Vec3::Y * 0.3))
             .collect();
         let pick = (self.random() * spots.len() as f32) as usize;
@@ -160,25 +154,23 @@ impl Bot {
         let center = MAP.site_center(site);
         let spots: Vec<Vec3> = MAP.site_cells().filter(|p| MAP.site_at(*p) == Some(site) && p.distance(center) < 8.0).collect();
         let pick = (self.random() * spots.len() as f32) as usize;
-        spots.get(pick).map_or(center, |p| p.with_y(MAP.floor_at(*p)))
+        spots.get(pick).copied().unwrap_or(center)
     }
 
     /// A random point that makes a sensible detour between `from` and `to` (at most `percent`% of the shortest
     /// path), so each bot takes its own route.
     fn pick_via(&mut self, from: Vec3, to: Vec3, percent: u32) -> Option<Vec3> {
-        let (to_goal, to_start) = (MAP.distance_field(MAP.cell(to)), MAP.distance_field(MAP.cell(from)));
-        let w = MAP.width();
-        let (sx, sz) = MAP.cell(from);
-        let direct = to_goal[sz * w + sx] as u32;
-        let candidates: Vec<(usize, usize)> = (0..MAP.depth())
-            .flat_map(|z| (0..w).map(move |x| (x, z)))
-            .filter(|&(x, z)| {
-                let (a, b) = (to_start[z * w + x] as u32, to_goal[z * w + x] as u32);
-                MAP.walkable(x, z) && a > 4 && b > 4 && a + b <= direct * percent / 100 + 4
+        let (to_goal, from_start) = (MAP.distance_field(MAP.node(to)), MAP.distance_from(MAP.node(from)));
+        let direct = to_goal[MAP.node(from)] as u32;
+        let candidates: Vec<usize> = MAP
+            .nodes()
+            .filter(|&n| {
+                let (a, b) = (from_start[n] as u32, to_goal[n] as u32);
+                a > 4 && b > 4 && a + b <= direct * percent / 100 + 4
             })
             .collect();
         let pick = (self.random() * candidates.len() as f32) as usize;
-        candidates.get(pick).map(|&(x, z)| MAP.ground(x, z))
+        candidates.get(pick).map(|&n| MAP.node_pos(n))
     }
 
     fn random(&mut self) -> f32 {
@@ -373,19 +365,23 @@ impl Bot {
     }
 }
 
-/// Unit direction towards the next cell on the shortest path to `goal`, using a cached distance field.
-fn path_dir(field: &mut Vec<u16>, field_goal: &mut (usize, usize), pos: Vec3, goal: Vec3) -> Vec3 {
-    let goal_cell = MAP.cell(goal);
-    if goal_cell != *field_goal {
-        *field = MAP.distance_field(goal_cell);
-        *field_goal = goal_cell;
+/// Unit direction towards the next node on the shortest path to `goal`, using a cached distance field.
+pub(crate) fn path_dir(field: &mut Vec<u16>, field_goal: &mut usize, pos: Vec3, goal: Vec3) -> Vec3 {
+    let goal_node = MAP.node(goal);
+    if goal_node != *field_goal {
+        *field = MAP.distance_field(goal_node);
+        *field_goal = goal_node;
     }
-    let w = MAP.width();
-    let (x, z) = MAP.cell(pos);
-    let here = field[z * w + x];
-    let next = MAP.neighbors(x, z).filter(|&(nx, nz)| field[nz * w + nx] < here).min_by_key(|&(nx, nz)| field[nz * w + nx]);
+    let node = MAP.node(pos);
+    // Stepped off a ledge the path drops from: keep going over the drop, or the next step back under the ledge
+    // would put us right back on it.
+    if pos.y > MAP.node_pos(node).y + STEP {
+        return (MAP.node_pos(node) - pos).with_y(0.0).normalize_or_zero();
+    }
+    let here = field[node];
+    let next = MAP.links(node).iter().map(|&m| m as usize).filter(|&m| field[m] < here).min_by_key(|&m| field[m]);
     let target = match next {
-        Some((nx, nz)) if here > 1 => MAP.center(nx, nz),
+        Some(m) if here > 1 => MAP.node_pos(m),
         _ => goal,
     };
     (target - pos).with_y(0.0).normalize_or_zero()
@@ -426,24 +422,38 @@ mod tests {
     fn guard_spots_are_reachable_floor_near_the_bomb() {
         let mut bot = Bot::new(7);
         for bomb in MAP.site_cells().step_by(5) {
-            let bomb = bomb.with_y(MAP.floor_at(bomb));
             let spot = bot.guard_spot(bomb);
-            let (x, z) = MAP.cell(spot);
-            assert!(MAP.walkable(x, z), "guard spot {spot} for {bomb} is inside something");
             assert!(spot.distance(bomb) < 9.0);
-            let field = MAP.distance_field(MAP.cell(bomb));
-            let (sx, sz) = MAP.cell(MAP.spawns(Team::T)[0]);
-            assert!(field[z * MAP.width() + x] < field[sz * MAP.width() + sx], "reachable");
+            let field = MAP.distance_field(MAP.node(spot));
+            assert!(field[MAP.node(MAP.spawns(Team::T)[0])] < u16::MAX, "guard spot {spot} for {bomb} is out of reach");
         }
     }
 
-    /// The crates across mid keep T spawn from looking straight down it to the CT side.
+    /// T spawn sees neither bomb site nor the CT spawn, so nobody is shot at the start of a round.
     #[test]
-    fn t_spawn_cannot_see_down_mid() {
+    fn t_spawn_cannot_see_the_sites_or_ct_spawn() {
         for s in MAP.spawns(Team::T) {
-            for (x, z) in (0..MAP.depth()).flat_map(|z| (0..30).map(move |x| (x, z))).filter(|&(x, z)| MAP.walkable(x, z)) {
-                assert!(!can_see(*s + Vec3::Y * EYE, MAP.ground(x, z) + Vec3::Y * 1.2), "T spawn {s} sees cell ({x}, {z})");
+            for p in MAP.site_cells().chain(MAP.spawns(Team::Ct).iter().copied()) {
+                assert!(!can_see(*s + Vec3::Y * EYE, p + Vec3::Y * 1.2), "T spawn {s} sees {p}");
             }
+        }
+    }
+
+    /// Following the distance field from under a slab gets onto it, and back down.
+    #[test]
+    fn paths_lead_between_floors() {
+        let cells = (0..MAP.depth()).flat_map(|z| (0..MAP.width()).map(move |x| (x, z)));
+        let (x, z) = cells.filter(|&(x, z)| MAP.floors(x, z).iter().filter(|f| f.open).count() > 1).last().expect("a slab");
+        let [low, high] = [0, 1].map(|i| MAP.node(MAP.center(x, z).with_y(MAP.floors(x, z).iter().filter(|f| f.open).nth(i).unwrap().y)));
+        assert_ne!(low, high);
+        for (from, to) in [(low, high), (high, low)] {
+            let field = MAP.distance_field(to);
+            let mut n = from;
+            for _ in 0..500 {
+                let Some(next) = MAP.links(n).iter().map(|&m| m as usize).min_by_key(|&m| field[m]).filter(|&m| field[m] < field[n]) else { break };
+                n = next;
+            }
+            assert_eq!(n, to, "walked from {} to {}", MAP.node_pos(from), MAP.node_pos(to));
         }
     }
 }

@@ -1027,11 +1027,6 @@ mod tests {
         assert_eq!(players.len(), 2, "no bots");
     }
 
-    /// The big open yard in the south-east, with a long clear line east.
-    fn yard() -> Vec3 {
-        MAP.ground(38, 44)
-    }
-
     /// Shoots east across the open yard at player 2, `dist` away, at a given height.
     fn shoot_at(players: &mut Players, weapon: Weapon, dist: f32, height: f32) -> Option<Hit> {
         let start = yard();
