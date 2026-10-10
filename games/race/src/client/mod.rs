@@ -1,11 +1,12 @@
 //! The Raceslop client: the course, the laser bars, runners in their own colors with name tags, and the HUD.
 
 mod hud;
+mod runner;
 mod sfx;
 mod world;
 
 use crate::shared::*;
-use glam::{Quat, Vec3};
+use glam::Vec3;
 use sdk::Interpolated;
 use sdk::client::*;
 use sdk::scene::Scene;
@@ -35,17 +36,8 @@ struct Sounds {
     go: u32,
     pad: u32,
     jump: u32,
+    land: u32,
     ambience: u32,
-}
-
-/// A remote runner's scene nodes and name tag.
-struct Rig {
-    root: u32,
-    legs: [u32; 2],
-    arms: [u32; 2],
-    tag: u32,
-    stride: f32,
-    last_pos: Vec3,
 }
 
 #[derive(Default)]
@@ -53,15 +45,16 @@ pub struct RaceClient {
     scene: Scene,
     sounds: Sounds,
     hud: hud::Hud,
-    /// Body and glowing trim materials, the trim by color.
-    body: u32,
-    trim: HashMap<[u8; 3], u32>,
     lasers: Vec<u32>,
     lava: u32,
     me: Option<u32>,
     /// Our entity's teleport count as last seen, to face north again after being sent back.
     teleport: Option<u8>,
     pred: PlayerState,
+    /// Camera height over the feet' ground, eased over step-ups and step-downs.
+    cam_y: f32,
+    /// How hard we last landed and when, for the camera dip.
+    landed: (f32, f64),
     yaw: f32,
     pitch: f32,
     time: f64,
@@ -74,7 +67,7 @@ pub struct RaceClient {
     race_at: f64,
     /// Countdown seconds already beeped.
     beeped: Option<u32>,
-    rigs: HashMap<u32, Rig>,
+    rigs: HashMap<u32, runner::Rig>,
     feed: VecDeque<(String, f64)>,
     /// Centered message and when it was shown.
     message: Option<(String, f64)>,
@@ -105,13 +98,11 @@ impl ClientGame for RaceClient {
             go: sound(sfx::beep(true)),
             pad: sound(sfx::pad()),
             jump: sound(sfx::jump()),
+            land: sound(sfx::land()),
             ambience: sound(sfx::ambience()),
         };
         self.lava = world::build(&mut self.scene);
         self.lasers = world::lasers(&mut self.scene);
-        let s = &mut self.scene;
-        self.body = s.material(Material { color: Color::srgb(0.9, 0.9, 0.92), roughness: 0.4, ..Default::default() });
-        self.trim = HashMap::new();
         self.build_hud();
         std::mem::take(&mut self.scene.out)
     }
@@ -158,6 +149,10 @@ impl ClientGame for RaceClient {
         } else if step.jumped {
             self.sound(self.sounds.jump, 0.3);
         }
+        if let Some(speed) = step.landed.filter(|&v| v > 2.0) {
+            self.landed = (speed, self.time);
+            self.sound(self.sounds.land, (speed / 15.0).min(0.6));
+        }
     }
 
     fn frame(&mut self, f: &FrameIn) -> FrameOut {
@@ -179,7 +174,7 @@ impl ClientGame for RaceClient {
         self.scene.out.push(Command::set_transform(self.lava, world::lava_at(self.time)));
         self.countdown();
         self.update_hud();
-        let camera = Camera { pos: f.me_pos + Vec3::Y * EYE, rot: look_rot(self.yaw, self.pitch), fov: FOV };
+        let camera = Camera { pos: f.me_pos.with_y(self.camera_y(f.me_pos.y, f.dt)), rot: look_rot(self.yaw, self.pitch), fov: FOV };
         FrameOut { commands: std::mem::take(&mut self.scene.out), sounds: std::mem::take(&mut self.play), camera, lines: vec![], spheres: vec![] }
     }
 }
@@ -272,11 +267,21 @@ impl RaceClient {
         }
     }
 
+    /// Eye height: eased rather than snapped when the feet step up or down on the ground, and dipping on landing.
+    fn camera_y(&mut self, feet: f32, dt: f32) -> f32 {
+        let stepped = self.pred.on_ground && (feet - self.cam_y).abs() < 0.6;
+        self.cam_y = if stepped { self.cam_y + (feet - self.cam_y) * (1.0 - (-dt * 18.0).exp()) } else { feet };
+        // A quick dip and a slower rise back: t e^(1-t) peaks at 1 when t is 1.
+        let (speed, at) = self.landed;
+        let t = (self.time - at) as f32 / 0.07;
+        self.cam_y + EYE - (speed * 0.015).min(0.2) * t * (1.0 - t).exp()
+    }
+
     fn render_players(&mut self, others: &[Interpolated], dt: f32) {
         let mut seen = HashMap::new();
         for v in others {
             let Some(p) = NetPlayer::from_entity(&v.entity) else { continue };
-            seen.insert(p.id, (p.state.pos, p.state.yaw, !v.teleporting, p.color));
+            seen.insert(p.id, (p.state, !v.teleporting, p.color));
         }
         let gone: Vec<u32> = self.rigs.keys().filter(|id| !seen.contains_key(id)).copied().collect();
         for id in gone {
@@ -284,60 +289,20 @@ impl RaceClient {
             self.scene.push(Command::Despawn { id: rig.root });
             self.scene.ui_despawn(rig.tag);
         }
-        for (id, (pos, yaw, shown, color)) in seen {
+        for (id, (state, shown, color)) in seen {
             if !self.rigs.contains_key(&id) {
-                let rig = self.spawn_rig(color);
+                let rig = runner::spawn(&mut self.scene, color);
                 self.rigs.insert(id, rig);
             }
             let name = self.name(id);
             let rig = self.rigs.get_mut(&id).unwrap();
-            let moved = pos.with_y(0.0).distance(rig.last_pos.with_y(0.0));
-            rig.last_pos = pos;
-            rig.stride += if moved < 2.0 { moved * 2.2 } else { 0.0 };
-            let swing = rig.stride.sin() * 0.7 * (moved / dt.max(1e-3) / MAX_SPEED).min(1.0);
-            let out = &mut self.scene.out;
-            out.push(Command::Set { id: rig.root, transform: Some(Transform::at(pos).rotated(Quat::from_rotation_y(yaw))), visible: Some(shown), light: None });
-            for (limb, (at, side)) in rig.legs.into_iter().zip([(Vec3::new(-0.13, 0.8, 0.0), 1.0), (Vec3::new(0.13, 0.8, 0.0), -1.0)]) {
-                out.push(Command::set_transform(limb, Transform::at(at).rotated(Quat::from_rotation_x(swing * side))));
-            }
-            for (limb, (at, side)) in rig.arms.into_iter().zip([(Vec3::new(-0.36, 1.4, 0.0), -1.0), (Vec3::new(0.36, 1.4, 0.0), 1.0)]) {
-                out.push(Command::set_transform(limb, Transform::at(at).rotated(Quat::from_rotation_x(swing * side))));
-            }
-            let (tag, tag_at) = (rig.tag, pos + Vec3::Y * 2.2);
+            rig.animate(&mut self.scene.out, state.pos, state.yaw, state.vel, state.on_ground, shown, dt);
+            let (tag, tag_at) = (rig.tag, state.pos + Vec3::Y * 2.2);
             self.scene.ui_set(tag, |n| {
                 n.world = Some(tag_at);
                 n.hidden = !shown;
             });
             self.scene.ui_text(tag, name);
         }
-    }
-
-    /// A rounded little runner in white with a glowing band, visor and limbs in its color.
-    fn spawn_rig(&mut self, color: [u8; 3]) -> Rig {
-        let s = &mut self.scene;
-        let (body, trim) = (self.body, *self.trim.entry(color).or_insert_with(|| s.material(glowing(rgb(color), 2.0))));
-        let root = s.empty(None, Transform::default(), false);
-        let torso = s.shared_mesh("torso".into(), || MeshData::Sphere { radius: 0.36, ico: None });
-        s.mesh_node(Some(root), torso, body, Transform { scale: Vec3::new(1.0, 1.15, 0.8), ..Transform::at(Vec3::Y * 1.15) });
-        let band = s.cuboid(Vec3::new(0.66, 0.1, 0.54));
-        s.mesh_node(Some(root), band, trim, Transform::at(Vec3::Y * 1.1));
-        let head = s.shared_mesh("head".into(), || MeshData::Sphere { radius: 0.22, ico: None });
-        s.mesh_node(Some(root), head, body, Transform::at(Vec3::Y * 1.62));
-        let visor = s.cuboid(Vec3::new(0.3, 0.09, 0.1));
-        s.mesh_node(Some(root), visor, trim, Transform::at(Vec3::new(0.0, 1.65, -0.18)));
-        let leg = s.cuboid(Vec3::new(0.16, 0.75, 0.18));
-        let legs = [-0.13, 0.13].map(|x| {
-            let hip = s.empty(Some(root), Transform::at(Vec3::new(x, 0.8, 0.0)), true);
-            s.mesh_node(Some(hip), leg, trim, Transform::at(Vec3::Y * -0.38));
-            hip
-        });
-        let arm = s.cuboid(Vec3::new(0.12, 0.6, 0.12));
-        let arms = [-0.36, 0.36].map(|x| {
-            let shoulder = s.empty(Some(root), Transform::at(Vec3::new(x, 1.4, 0.0)), true);
-            s.mesh_node(Some(shoulder), arm, trim, Transform::at(Vec3::Y * -0.28));
-            shoulder
-        });
-        let tag = s.ui(None, UiNode { text: Some(Text { shadow: true, center: true, ..Text::new("", 14.0, readable(color)) }), hidden: true, ..Default::default() });
-        Rig { root, legs, arms, tag, stride: 0.0, last_pos: Vec3::ZERO }
     }
 }

@@ -50,6 +50,11 @@ pub fn jump() -> Vec<u8> {
     synth(0.12, |t| 320.0 + 500.0 * t, |t| 0.35 * (1.0 - t / 0.12), |p| (p * TAU).sin())
 }
 
+/// Touching down: a short, low thud.
+pub fn land() -> Vec<u8> {
+    synth(0.12, |t| 150.0 - 500.0 * t, |t| 0.6 * (-t * 35.0).exp(), |p| (p * TAU).sin())
+}
+
 /// A deep sci-fi drone under everything.
 pub fn ambience() -> Vec<u8> {
     let (mut a, mut b) = (0.0f32, 0.0f32);

@@ -1,4 +1,5 @@
-//! What client and server both run: movement (Quake style, floaty and fast), the laser sweepers, the wire format.
+//! What client and server both run: movement (fast, with platformer jumps: heavier on the way down, cut short on
+//! release, coyote time and a jump buffer), the laser sweepers, the wire format.
 
 use crate::map::{WALL_TOP, course};
 use glam::Vec3;
@@ -13,17 +14,25 @@ pub const HEIGHT: f32 = 1.8;
 pub const EYE: f32 = 1.6;
 
 pub const MAX_SPEED: f32 = 9.0;
+/// Ground: full speed in about 0.15 s, and a stop from it in about 0.3 s.
 const ACCEL: f32 = 12.0;
-/// In the air you only add speed up to `AIR_CAP` along where you steer, so you can correct a jump but not turn it.
-const AIR_ACCEL: f32 = 12.0;
-const AIR_CAP: f32 = 0.9;
-const FRICTION: f32 = 5.0;
+const FRICTION: f32 = 8.0;
 const STOP_SPEED: f32 = 2.5;
-/// About 60% of earth gravity: a jump goes 1.75 m up and hangs for over a second.
-pub const GRAVITY: f32 = 12.0;
-const JUMP_SPEED: f32 = 6.5;
+/// In the air, Quake style, you add speed only up to `AIR_CAP` along where you steer, at the ground rate, so you can
+/// brake and correct a jump sharply; on top of that you build towards full speed slowly (18 m/s²).
+const AIR_CAP: f32 = 0.9;
+const AIR_BUILD: f32 = 2.0;
+/// Gravity going up, coming down (heavier, so jumps are quick to land), and going up with jump let go early, which
+/// cuts the jump short: held, a jump goes 1.9 m up; tapped, about 0.6 m.
+pub const GRAVITY: f32 = 13.0;
+const FALL_GRAVITY: f32 = 21.0;
+const CUT_GRAVITY: f32 = 39.0;
+const JUMP_SPEED: f32 = 7.0;
+/// A jump still works this long after running off a ledge, and a press this long before landing jumps on landing.
+const COYOTE: u8 = (TICK_HZ / 10.0) as u8;
+const BUFFER: u8 = (TICK_HZ / 8.0) as u8;
 /// Jump pads throw you about 7 m up, keeping up to this much of your run.
-pub const PAD_SPEED: f32 = 13.0;
+pub const PAD_SPEED: f32 = 13.5;
 const PAD_CARRY: f32 = 6.5;
 /// Highest rise walked up without jumping (a stair), and how far down you stay glued to the floor.
 const STEP: f32 = 0.55;
@@ -46,7 +55,7 @@ pub struct Input {
     pub right: f32,
     pub yaw: f32,
     pub pitch: f32,
-    /// Held: jumps again on every landing.
+    /// Held: jumps again on every landing; let go while rising to cut the jump short.
     pub jump: bool,
     /// Back to the last checkpoint.
     pub reset: bool,
@@ -68,6 +77,13 @@ pub struct PlayerState {
     /// Waiting for the start, or the race is over: look around, nothing else. Part of the state so prediction agrees
     /// with the server.
     pub frozen: bool,
+    /// Jump was held last tick, to tell a fresh press.
+    pub held: bool,
+    /// Rising from a jump (not a pad), which letting go of jump cuts short.
+    pub jumping: bool,
+    /// Ticks left to jump after leaving the ground, and of a press waiting for a landing.
+    pub coyote: u8,
+    pub buffer: u8,
 }
 
 /// A player as clients see it, carried in an `sdk::Entity`.
@@ -154,6 +170,8 @@ pub enum Event {
 pub struct Step {
     pub jumped: bool,
     pub launched: bool,
+    /// Touched down this tick, this fast (m/s).
+    pub landed: Option<f32>,
 }
 
 /// Client-side prediction of our own player: one input on top of `me`.
@@ -178,14 +196,18 @@ pub fn step_player(s: &mut PlayerState, inp: &Input) -> Step {
     let right = Vec3::new(s.yaw.cos(), 0.0, -s.yaw.sin());
     let wish = if s.frozen { Vec3::ZERO } else { (fwd * inp.forward + right * inp.right).normalize_or_zero() };
 
+    let pressed = inp.jump && !s.held;
+    s.held = inp.jump;
+    s.buffer = if pressed { BUFFER } else { s.buffer.saturating_sub(1) };
+    s.coyote = if s.on_ground { COYOTE } else { s.coyote.saturating_sub(1) };
     if s.on_ground && course().on_pad(s.pos) && !s.frozen {
         let carry = s.vel.with_y(0.0).clamp_length_max(PAD_CARRY);
         s.vel = carry + Vec3::Y * PAD_SPEED;
-        s.on_ground = false;
+        (s.on_ground, s.jumping, s.coyote) = (false, false, 0);
         step.launched = true;
-    } else if s.on_ground && inp.jump && !s.frozen {
+    } else if s.coyote > 0 && (s.buffer > 0 || (s.on_ground && inp.jump)) && !s.frozen {
         s.vel.y = JUMP_SPEED;
-        s.on_ground = false;
+        (s.on_ground, s.jumping, s.coyote, s.buffer) = (false, true, 0, 0);
         step.jumped = true;
     }
     if s.on_ground {
@@ -196,10 +218,25 @@ pub fn step_player(s: &mut PlayerState, inp: &Input) -> Step {
         }
         accelerate(&mut s.vel, wish, MAX_SPEED, ACCEL);
     } else {
-        accelerate(&mut s.vel, wish, AIR_CAP, AIR_ACCEL);
+        accelerate(&mut s.vel, wish, AIR_CAP, ACCEL);
+        accelerate(&mut s.vel, wish, MAX_SPEED, AIR_BUILD);
     }
-    s.vel.y -= GRAVITY * DT;
+    s.jumping &= s.vel.y > 0.0;
+    let gravity = if s.vel.y <= 0.0 {
+        FALL_GRAVITY
+    } else if s.jumping && !inp.jump {
+        CUT_GRAVITY
+    } else {
+        GRAVITY
+    };
+    s.vel.y -= gravity * DT;
+    let falling = s.vel.y;
+    let airborne = !s.on_ground;
     move_and_collide(s);
+    if airborne && s.on_ground {
+        s.jumping = false;
+        step.landed = Some(-falling);
+    }
     step
 }
 
@@ -358,10 +395,46 @@ mod tests {
         run(&mut s, Input { forward: 1.0, ..Default::default() }, 0.1);
         step_player(&mut s, &Input { forward: 1.0, jump: true, ..Default::default() });
         while !s.on_ground {
-            let forward = (s.pos.z - stone.z).signum();
-            step_player(&mut s, &Input { forward, ..Default::default() });
+            let (forward, jump) = ((s.pos.z - stone.z).signum(), s.vel.y > 0.0);
+            step_player(&mut s, &Input { forward, jump, ..Default::default() });
         }
         assert!((s.pos.y - stone.y).abs() < 1e-3, "landed on the stone: {:?}", s.pos);
+    }
+
+    /// Highest the feet get from standing, jumping with `inp` on the first tick and `held` after.
+    fn apex(first: Input, held: Input) -> f32 {
+        let mut s = standing(Vec3::new(0.0, 0.0, 1000.0));
+        let mut top = 0.0f32;
+        step_player(&mut s, &first);
+        while !s.on_ground {
+            top = top.max(s.pos.y);
+            step_player(&mut s, &held);
+        }
+        top
+    }
+
+    #[test]
+    fn jumps_are_higher_held_and_forgiving_about_timing() {
+        let jump = Input { jump: true, ..Default::default() };
+        let (held, tapped) = (apex(jump, jump), apex(jump, Input::default()));
+        assert!(held > 1.8 && tapped < 0.7, "held {held}, tapped {tapped}");
+
+        // Off a ledge into the air: a press just after still jumps, one later doesn't.
+        let mut s = PlayerState { pos: Vec3::new(0.0, 5.0, 1000.0), coyote: COYOTE, ..Default::default() };
+        run(&mut s, Input::default(), 0.05);
+        assert!(step_player(&mut s, &jump).jumped, "coyote time");
+        let mut s = PlayerState { pos: Vec3::new(0.0, 5.0, 1000.0), coyote: COYOTE, ..Default::default() };
+        run(&mut s, Input::default(), 0.15);
+        assert!(!step_player(&mut s, &jump).jumped, "too late");
+
+        // A press just before landing jumps as soon as we touch down.
+        let mut s = PlayerState { pos: Vec3::new(0.0, 0.05, 1000.0), vel: Vec3::Y * -3.0, ..Default::default() };
+        step_player(&mut s, &jump);
+        let mut jumped = false;
+        for _ in 0..TICK_HZ as usize / 4 {
+            jumped |= step_player(&mut s, &Input::default()).jumped;
+        }
+        assert!(jumped, "buffered");
     }
 
     #[test]

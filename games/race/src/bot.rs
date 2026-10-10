@@ -105,6 +105,8 @@ impl Bot {
         }
         inp.jump |= me.on_ground && bar_coming && self.laser == Some(true);
         inp.jump |= self.stuck_ticks > TICK_HZ as u32 / 2;
+        // Hold it all the way up: letting go cuts a jump short.
+        inp.jump |= !me.on_ground && me.vel.y > 0.0;
         inp
     }
 }
