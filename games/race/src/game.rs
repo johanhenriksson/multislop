@@ -1,9 +1,10 @@
 //! Raceslop, an obstacle course race: everyone starts on the line together and runs for the finish. Lava and laser
 //! bars send you back to your last checkpoint. The race ends when every person is in, `CLOSING_SECS` after the first
-//! finisher, or at `RACE_SECS`; then the results, and the next race. Bots fill up to `FILL` runners.
+//! finisher, or at `RACE_SECS`; then the results, and the next race, on a new course when the map is "random". Bots
+//! fill up to `FILL` runners.
 
 use crate::bot::Bot;
-use crate::map::{MAP, MAPS};
+use crate::map::{self, MAPS, course};
 use crate::shared::*;
 use glam::Vec3;
 use sdk::{Entity, Frame, GameInfo, ServerGame, log};
@@ -60,7 +61,12 @@ const fn ticks(secs: f32) -> u32 {
 }
 
 pub struct Gauntlet {
+    /// One of `MAPS`, as the host picked it.
+    choice: String,
+    /// The course being raced: `choice`, or for "random" the seed this race's course was dealt from.
     map: String,
+    /// Mixed into the next random course's seed: ping times, so courses differ from one server run to the next.
+    entropy: u32,
     players: Players,
     tick: u32,
     next_id: u32,
@@ -77,8 +83,10 @@ pub struct Gauntlet {
 
 impl Default for Gauntlet {
     fn default() -> Gauntlet {
-        Gauntlet {
-            map: MAPS[0].into(),
+        let mut game = Gauntlet {
+            choice: MAPS[0].into(),
+            map: String::new(),
+            entropy: 0,
             players: Players::new(),
             tick: 0,
             next_id: 1,
@@ -88,7 +96,9 @@ impl Default for Gauntlet {
             events: vec![],
             bots: None,
             played: 0,
-        }
+        };
+        game.new_course();
+        game
     }
 }
 
@@ -102,6 +112,10 @@ impl ServerGame for Gauntlet {
     fn connect(&mut self, name: &str) -> u32 {
         let (id, name) = (self.next_id, clean_name(name));
         self.next_id += 1;
+        // The first one in gets a fresh course rather than whatever the empty server last dealt.
+        if self.players.values().all(|p| p.bot.is_some()) {
+            self.new_course();
+        }
         log(&format!("{name} (player {id}) joined"));
         let mut p = Player::new(id, name, None);
         self.line_up(&mut p);
@@ -119,6 +133,7 @@ impl ServerGame for Gauntlet {
         if let Some(p) = self.players.get_mut(&id) {
             p.ping = ms;
         }
+        self.entropy = self.entropy.rotate_left(5) ^ ms as u32;
     }
 
     fn input(&mut self, id: u32, _seq: u32, _view_tick: f32, input: &[u8]) {
@@ -150,10 +165,11 @@ impl ServerGame for Gauntlet {
     }
 
     fn set_map(&mut self, map: &str) {
-        if !MAPS.contains(&map) {
+        if !MAPS.contains(&map) && !map.starts_with("random-") {
             return log(&format!("no map called {map}; playing {}", self.map));
         }
-        (self.map, self.played) = (map.into(), 0);
+        (self.choice, self.played) = (map.into(), 0);
+        self.new_course();
         self.restart();
     }
 
@@ -164,6 +180,22 @@ impl ServerGame for Gauntlet {
 }
 
 impl Gauntlet {
+    /// Loads the chosen course, dealing a new one for "random".
+    fn new_course(&mut self) {
+        self.map = match self.choice.as_str() {
+            "random" => {
+                self.entropy = (self.entropy ^ self.tick).wrapping_mul(0x9E37_79B9).rotate_left(13);
+                format!("random-{}", self.entropy % 100_000)
+            }
+            name => name.into(),
+        };
+        if !map::load(&self.map) {
+            (self.choice, self.map) = ("gauntlet".into(), "gauntlet".into());
+            map::load(&self.map);
+        }
+        log(&format!("course {}", self.map));
+    }
+
     fn first_in(&self) -> bool {
         self.players.values().any(|p| p.finish.is_some())
     }
@@ -171,7 +203,7 @@ impl Gauntlet {
     /// Onto a free spot on the start line, frozen if the race hasn't started yet.
     fn line_up(&self, p: &mut Player) {
         let taken = |s: &Vec3| self.players.values().any(|o| o.id != p.id && o.state.pos.distance(*s) < 1.0);
-        let spot = MAP.spawns.iter().find(|s| !taken(s)).copied().unwrap_or(MAP.spawns[p.id as usize % MAP.spawns.len()]);
+        let spot = course().spawns.iter().find(|s| !taken(s)).copied().unwrap_or(course().spawns[p.id as usize % course().spawns.len()]);
         (p.checkpoint, p.respawn, p.finish) = (0, spot, None);
         p.state.frozen = self.phase != Phase::Racing;
         p.teleport(spot);
@@ -209,6 +241,7 @@ impl Gauntlet {
             }
             Phase::Results if self.tick >= self.ends => {
                 self.played += 1;
+                self.new_course();
                 self.restart();
             }
             _ => {}
@@ -238,15 +271,15 @@ impl Gauntlet {
                     p.teleport(p.respawn);
                     continue;
                 }
-                let (x, z) = MAP.cell(pos);
+                let (x, z) = course().cell(pos);
                 if !p.state.on_ground || !racing {
                     continue;
                 }
-                if let Some(n) = MAP.checkpoint(x, z).filter(|&n| n > p.checkpoint) {
-                    (p.checkpoint, p.respawn) = (n, MAP.ground(x, z));
+                if let Some(n) = course().checkpoint(x, z).filter(|&n| n > p.checkpoint) {
+                    (p.checkpoint, p.respawn) = (n, course().ground(x, z));
                     self.events.push(Event::Checkpoint { id: p.id, n });
                 }
-                if MAP.is_finish(x, z) && p.finish.is_none() {
+                if course().is_finish(x, z) && p.finish.is_none() {
                     finished += 1;
                     let secs = (self.tick - self.began - ticks(COUNTDOWN_SECS)) as f32 / TICK_HZ as f32;
                     p.finish = Some((finished, secs));
@@ -321,11 +354,12 @@ mod tests {
     #[test]
     fn lava_sends_you_back_to_the_last_checkpoint() {
         let mut game = Gauntlet::new();
+        game.set_map("gauntlet");
         game.set_bots(0);
         let id = game.connect("a");
         race(&mut game, COUNTDOWN_SECS + 0.1);
-        let z = (0..MAP.depth()).rev().find(|&z| MAP.checkpoint(7, z) == Some(1)).unwrap();
-        let cp = MAP.ground(7, z);
+        let z = (0..course().depth()).rev().find(|&z| course().checkpoint(7, z) == Some(1)).unwrap();
+        let cp = course().ground(7, z);
         game.players.get_mut(&id).unwrap().teleport(cp);
         race(&mut game, 0.05);
         assert_eq!(game.players[&id].checkpoint, 1);
@@ -341,7 +375,7 @@ mod tests {
         game.set_bots(2);
         let id = game.connect("a");
         race(&mut game, COUNTDOWN_SECS + 1.0);
-        game.players.get_mut(&id).unwrap().teleport(MAP.ground(7, 2));
+        game.players.get_mut(&id).unwrap().teleport(course().ground(7, 2));
         let events = race(&mut game, 0.1);
         assert!(events.iter().any(|e| matches!(e, Event::Finish { place: 1, .. })));
         assert_eq!(game.phase, Phase::Results);
@@ -364,11 +398,11 @@ mod tests {
     }
 
     /// Bots alone on the course, no network: they should get through every obstacle and finish.
-    #[test]
-    fn bots_finish_the_course() {
+    fn bots_finish(map: &str) {
         let mut game = Gauntlet::new();
+        game.set_map(map);
         let watcher = game.connect("observer");
-        game.players.get_mut(&watcher).unwrap().state.pos = MAP.spawns[0] - Vec3::X * 2.0;
+        game.players.get_mut(&watcher).unwrap().state.pos = course().spawns[0] - Vec3::X * 2.0;
         let mut falls = 0;
         let events = race(&mut game, COUNTDOWN_SECS + 200.0);
         let mut finishes = vec![];
@@ -384,7 +418,31 @@ mod tests {
         }
         println!("{falls} falls, finishes: {finishes:?}");
         let stuck: Vec<_> = game.players.values().filter(|p| p.bot.is_some() && p.finish.is_none()).map(|p| (p.checkpoint, p.state.pos)).collect();
-        assert!(finishes.len() >= FILL - 2, "most bots should finish: {finishes:?}, stuck: {stuck:?}");
+        assert!(finishes.len() >= FILL - 2, "{map}: most bots should finish: {finishes:?}, stuck: {stuck:?}");
+    }
+
+    #[test]
+    fn bots_finish_the_gauntlet() {
+        bots_finish("gauntlet");
+    }
+
+    #[test]
+    fn bots_finish_random_courses() {
+        for seed in [1, 2, 3, 4] {
+            bots_finish(&format!("random-{seed}"));
+        }
+    }
+
+    #[test]
+    fn random_deals_a_new_course_every_race() {
+        let mut game = Gauntlet::new();
+        game.set_bots(0);
+        let id = game.connect("a");
+        let first = game.map.clone();
+        assert!(first.starts_with("random-"), "{first}");
+        race(&mut game, COUNTDOWN_SECS + 0.1);
+        game.players.get_mut(&id).unwrap().teleport(course().ground(7, 2));
+        race(&mut game, RESULTS_SECS + 0.2);
+        assert!(game.map.starts_with("random-") && game.map != first, "{} after {first}", game.map);
     }
 }
-

@@ -58,6 +58,7 @@ pub struct RaceClient {
     body: u32,
     trim: Vec<u32>,
     lasers: Vec<u32>,
+    lava: u32,
     me: Option<u32>,
     /// Our entity's teleport count as last seen, to face north again after being sent back.
     teleport: Option<u8>,
@@ -88,8 +89,8 @@ impl RaceClient {
 }
 
 impl ClientGame for RaceClient {
-    // ponytail: one course, so `map` picks nothing yet.
-    fn start(&mut self, _map: &str) -> Vec<Command> {
+    fn start(&mut self, map: &str) -> Vec<Command> {
+        crate::map::load(map);
         let s = &mut self.scene;
         let mut sound = |wav: Vec<u8>| {
             let id = s.id();
@@ -107,7 +108,7 @@ impl ClientGame for RaceClient {
             jump: sound(sfx::jump()),
             ambience: sound(sfx::ambience()),
         };
-        world::build(&mut self.scene);
+        self.lava = world::build(&mut self.scene);
         self.lasers = world::lasers(&mut self.scene);
         let s = &mut self.scene;
         self.body = s.material(Material { color: Color::srgb(0.9, 0.9, 0.92), roughness: 0.4, ..Default::default() });
@@ -176,6 +177,7 @@ impl ClientGame for RaceClient {
         self.tab = f.input.held(Key::Tab);
         self.render_players(&f.others, f.dt);
         self.render_lasers();
+        self.scene.out.push(Command::set_transform(self.lava, world::lava_at(self.time)));
         self.countdown();
         self.update_hud();
         let camera = Camera { pos: f.me_pos + Vec3::Y * EYE, rot: look_rot(self.yaw, self.pitch), fov: FOV };
@@ -225,7 +227,7 @@ impl RaceClient {
             }
             Event::Checkpoint { id, n } if id == you => {
                 self.sound(self.sounds.checkpoint, 0.7);
-                let of = crate::map::MAP.checkpoints();
+                let of = crate::map::course().checkpoints();
                 self.message = Some((format!("Checkpoint {n} of {of}"), self.time));
                 return;
             }

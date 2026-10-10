@@ -190,10 +190,17 @@ Grenades, dropped/pickup weapons, match end, team switching, map height (ramps, 
   `cargo run --release -- server --game target/wasm32-unknown-unknown/release/arena.wasm`. Not in releases yet.
 
 ## Raceslop (`games/race`)
-- A third game module: an obstacle course race on one 30 x 172 m course, "gauntlet", over lava. From the start line:
-  stepping stones, a climb of 1 m blocks, a one-cell beam that zigzags, jump pads up onto a ledge, islands across
-  4 m gaps, and a platform swept by two spinning laser bars, then the checkered finish under a banner. Same height grid
-  as the arena; 0 is lava.
+- A third game module: an obstacle course race over lava, 30 m wide. Two maps: "random" (the default) deals a new
+  course every race, and "gauntlet" is the hand-made one, 172 m long: stepping stones, a climb of 1 m blocks, a
+  one-cell beam that zigzags, jump pads up onto a ledge, islands across 4 m gaps, and a platform swept by two spinning
+  laser bars, then the checkered finish. Same height grid as the arena; 0 is lava.
+- Random courses are six of those seven kinds of obstacle (plus pillars to weave through) in random order and shape,
+  full-width landings between them, a checkpoint after every second one. The course is named `random-<seed>` and both
+  server and client build it from the seed, so nothing but the name goes over the wire. Seeds mix in ping times, so
+  courses differ between server runs; a course a bot can't finish is redealt from the next seed.
+- Look: a sunset sky dome over slowly drifting lava, basalt spires standing in it, glass walls with posts and a glowing
+  rail, platforms colored by height (a color per meter) with glowing edges, green gates over checkpoints, a gold one
+  over the finish.
 - Movement as in Instaslop (fast, floaty, strong air control), no weapons. Lava or a laser bar sends you back to the
   last of 3 checkpoints; R does it on purpose. The lasers run on the race clock, so client and server agree on them.
 - Races: 4 s countdown frozen on the line, then go. Ends when every person is over the line, 30 s after the first

@@ -2,7 +2,7 @@
 //! the standings (Tab, and once the race is over).
 
 use super::{RaceClient, ordinal};
-use crate::map::MAP;
+use crate::map::course;
 use crate::shared::{NetPlayer, Phase};
 use sdk::client::*;
 
@@ -91,7 +91,7 @@ impl RaceClient {
 
         let (place, progress) = mine.map_or((String::new(), String::new()), |(i, p)| match p.finish {
             Some((place, _)) => (ordinal(place), "Finished".into()),
-            None => (format!("{} of {}", ordinal(i as u8 + 1), ranked.len()), format!("Checkpoint {} of {}", p.checkpoint, MAP.checkpoints())),
+            None => (format!("{} of {}", ordinal(i as u8 + 1), ranked.len()), format!("Checkpoint {} of {}", p.checkpoint, course().checkpoints())),
         });
         self.scene.ui_text(self.hud.place, place);
         self.scene.ui_text(self.hud.progress, progress);
