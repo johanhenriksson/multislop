@@ -187,7 +187,7 @@ Grenades, dropped/pickup weapons, match end, team switching, map height (ramps, 
 - Click to respawn after 1 s (automatic after 3 s), at the spawn furthest from the living. First to 25 frags or most
   after 10 min wins; 8 s scoreboard, then a fresh match. Bots fill up to 8 players while anyone is on.
 - Run: `cargo build -p arena --release --target wasm32-unknown-unknown`, then
-  `cargo run --release -- server --game target/wasm32-unknown-unknown/release/arena.wasm`. Not in releases yet.
+  `cargo run --release -- server --game target/wasm32-unknown-unknown/release/arena.wasm`. Shipped in releases.
 
 ## Raceslop (`games/race`)
 - A third game module: an obstacle course race over lava, 30 m wide. Two maps: "random" (the default) deals a new
