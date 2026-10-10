@@ -15,7 +15,7 @@ fn main() {
     }
     let mut cargo = std::process::Command::new(std::env::var("CARGO").unwrap());
     cargo.args(["build", "--release", "--target", "wasm32-unknown-unknown", "--target-dir", &target]);
-    for game in ["dust", "race", "arena", "rocketball"] {
+    for game in ["dust", "race", "arena", "rocketball", "minigolf"] {
         cargo.args(["-p", game]);
     }
     cargo.env_remove("CARGO_ENCODED_RUSTFLAGS").env_remove("RUSTFLAGS");

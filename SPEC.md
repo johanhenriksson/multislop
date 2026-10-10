@@ -171,7 +171,7 @@ Deadline: playable before 00:00. One weapon, one simple map.
   client host tears down the world and starts a fresh instance of the client game with `start(map)`.
 - Game rotation (off by default; `--rotate`, or "Rotate games" in "Host a LAN game", which starts with the picked
   game and then each other one): a game sets `Frame::finished` once its turn is played (dust 20 rounds, race 3
-  races, arena 3 matches, rocketball 2 matches, each counted when its end screen is over, reset by `set_map`). The server then disconnects
+  races, arena 3 matches, rocketball 2 matches, minigolf 1 course, each counted when its end screen is over, reset by `set_map`). The server then disconnects
   everyone from it, starts the next on its first map and bumps a game counter. All modules are loaded up front, and
   each game keeps its own tick (lag compensation rewinds by it). Input for an earlier game is answered with
   `ServerMsg::Game` (hash, size, counter), so clients notice, tear down and load the new game like on connect, then
@@ -392,75 +392,84 @@ pace: no turns, and balls pass through each other. You see the others as ghosts.
 ### Course
 - One map, "random": a 9-hole course dealt from a seed, named `random-<seed>` like Raceslop's courses, so server and
   client build it from the name and nothing else goes over the wire. Hole `i` comes from the seed and `i`. A new
-  course (new seed) every time the last one is over.
+  course (new seed) every time the last one is over, and when the first person joins, unless the host picked one by
+  name (`--map random-42`), which is kept for that course.
 - All 9 holes are built at start and laid side by side, 200 m apart along x, floating in the sky, so changing holes
-  only moves the camera and nothing is torn down. The hole being played is in the match state.
-- Grid: 1 m cells, floor heights in 0.25 m steps, interpolated between cell corners (as in dust), so a ramp is a
-  smooth slope the ball rolls down. Rails (`#`) are 0.3 m bumpers around the fairway. Off the fairway is the void.
-- A hole is a tee, a path of 4-8 pieces, and a green with the cup. Pieces, picked and shaped by the seed:
-  - straight (6-14 m), 90° turns, a doglegged corner with a bank to bounce off
-  - a ramp up or down (1-2 m), a hill or a dip in the middle of the fairway
-  - a slope across the fairway that pulls the ball to one side
-  - bumpers: posts, wedges, a row of blocks with gaps
-  - a windmill: a spinning bar across the fairway (on the hole clock, like Raceslop's lasers, so client and server
-    agree on it)
-  - a gap over the void, with a kicker ramp before it
-  - a split: two routes around a wall, the short one narrower or with a hazard
-  - water: a pool beside or across part of the fairway
-- Par from the path: 2 + one per 12 m of path + one per gap or windmill, at most 5. A hole a bot can't sink within
-  par + 3 is redealt from the next seed (as Raceslop does with courses).
-- Three looks, picked from the seed: meadow (green felt, wooden rails, blue sky), candy (pastel felt, striped rails,
-  pink sky), neon (dark felt with glowing rail edges, night sky). Each hole has a flag over its cup and a mat at its tee.
+  only moves the camera and nothing is torn down; which hole a ball is on follows from its x. The hole being played
+  is in the match state.
+- Grid: 1 m cells with floor heights at the cell corners, interpolated in between, so ramps and hills are smooth
+  slopes. 0.3 m rails stand wherever the inside (floor and water) meets the void, runs at one height merged into one
+  box; under the floor's edge over gaps and water a hidden face stops a ball that drops past it from popping up.
+- A hole is dealt by a turtle heading north from a 3-cell tee: 3-6 pieces, a turn (left or right) before some of
+  them, then a 2-cell lead-in and a 5 x 5 green, gently tilted, with the cup on one of its middle 9 cells. The path
+  is 3 wide; pieces 5 wide get 2-cell lead-ins and lead-outs so they never touch a turn. Pieces:
+  - straight (3-8 m), and square 90° turns
+  - a ramp up or down 0.5-1 m over 5-7 m, eased at both ends; a hill or a dip of 0.25-0.5 m
+  - a slope across the fairway (up to 1 m from side to side) that pulls the ball to one side
+  - bumpers: posts scattered over a wide stretch
+  - a windmill: a paddle spinning across the fairway around a post, on the ball's own clock (`Ball::clock`, ticks
+    since the hole started), so prediction and the server agree on it exactly
+  - a gap of 2-3 m over the void after a 3 m run-up and a kicker ramp
+  - a split: a wide stretch with a wall of blocks down the middle
+  - water: a pool along one side of a wide stretch, or across it with a one-cell bridge
+- A hole whose path runs into itself (pieces may only touch the one before them) or whose cup can't be reached over
+  the floor and across gaps is dealt again, up to 64 times, then it's a plain straight hole.
+- Par: 1 + one per 14 m of path + one per gap, windmill or water crossing, between 2 and 5.
+- Three looks, picked from the seed: meadow (green felt, wooden rails, earth sides, blue sky), candy (pink felt, mint
+  greens, white rails, wafer sides, pink sky), neon (dark felt, glowing rails, night sky). Every look has a darker tee,
+  a lighter green, mowing stripes and clouds below.
 
 ### Ball
 - A sphere, radius 0.15 m. Simulated by a shared `step_ball`, run by the server and predicted by the client from the
-  same inputs, so your own ball moves without lag (the shot and everything after it is deterministic).
-- Gravity 9.8 m/s², rolling friction ~1.2 m/s² (more on the green's fringe), slopes accelerate it along the floor's
-  gradient. Bounces off rails and bumpers keep 0.7 of the speed, off the floor 0.35. Sphere against box by closest
-  point in substeps (rocketball's `bounce`). Top speed 20 m/s.
-- At rest when under 0.05 m/s for 0.25 s on a flat enough floor; only then can you shoot. Its rest spot is
-  remembered.
-- Cup: radius 0.2 m. A ball over it going under 2.5 m/s drops in; faster, it lips out (rolls on, deflected).
-- Out: into the void (below the hole's lowest floor - 2 m) or into water: +1 stroke, back to the last rest spot after
-  a short splash/fall.
-- Balls never touch each other.
+  same inputs, so your own ball moves without lag.
+- Gravity 9.8 m/s², rolling friction 1.4 m/s² (a full-power shot rolls about 50 m on the flat), slopes pull it
+  downhill, and a slope too gentle to beat friction holds a stopped ball. Bounces keep 0.7 of the speed off rails,
+  blocks and the windmill (whose paddle's own motion is added), 0.35 off the floor, nothing when slower than 0.8 m/s.
+  Sphere against box by closest point in 5 cm substeps. Top speed 20 m/s.
+- At rest when under 0.05 m/s on the floor for 0.25 s; only then can you shoot.
+- Cup: radius 0.2 m. A ball over it going under 2 m/s drops in; faster, it rolls on over.
+- Out: into the void (2.5 m below the hole's lowest floor) or into water: you see it fall or sink for 0.6 s, then it's
+  back where the shot was taken from, +1 stroke.
 
 ### Shooting
 - Third-person orbit camera around your ball: the mouse turns it (yaw, and pitch between 10° and 70° down), W/S zoom
-  between 2 and 10 m.
-- Hold the left button and pull the mouse back to set power (up to 1.0 = 16 m/s; the view stops turning while you
-  pull), release to shoot along the camera's yaw. Right click cancels. An arrow on the ground shows direction and
-  power, no trajectory preview.
-- The shot is one input (yaw, power), applied by `step_ball` on the server and in prediction. A shot while not at
-  rest is ignored.
-- Max 10 strokes per hole: then you're picked up and score 10 (the cap is what you write down).
+  between 2 and 10 m. Each hole starts looking north down the tee.
+- Hold the left button and pull the mouse back to set power (500 counts for full power, 12 m/s; the view stops
+  turning while you pull), release to shoot along the camera's yaw. Right click cancels. An arrow on the ground shows
+  direction, growing and reddening with power, and a power bar fills.
+- The shot is one input (yaw, power), applied by `step_ball` on the server and in prediction. A shot while rolling,
+  frozen or picked up is ignored.
+- Max 10 strokes per hole: then you're picked up and score 10.
 
 ### Hole flow
-- 3 s on the tee, frozen, showing the hole from above (camera flies tee to cup), with the hole number and par.
-- Then everyone plays. Sinking it: a cup rattle, your name and score ("Birdie!", "Par", "+2") to everyone, and you
-  watch the others still playing (click cycles who; their ghost becomes solid for you).
-- The hole ends when everyone is in or picked up, or 2:30 after it started (the rest score 10). A 30 s warning when
-  the first one is in. Then 5 s of the scorecard and the next hole.
-- After hole 9: 10 s of the final card (total strokes, lowest wins, ties share), then a new course. Rotation: 1
-  course per turn.
-- Joining mid-course: you start the current hole from the tee with the time that's left; holes you missed score 10.
-- Bots fill up to 4 players. They aim along a distance field over the hole (reverse from the cup, over the fairway
-  cells), pick the shot by simulating a few candidates with `step_ball` and taking the one that ends nearest the cup
-  on that field, then add aim and power error (the difficulty knobs). They wait 1-3 s before each shot.
+- 3 s on the tee, frozen, while the camera flies over the hole from the tee to the cup, with the hole number and par.
+- Then everyone plays. Sinking it: a cup rattle, "Birdie!" (or "Par", "Bogey", ...) with your strokes, a cheer under
+  par, and a feed line for everyone else; then you watch the others still playing (click cycles who; their ghost
+  turns solid for you).
+- The hole ends when every person is done (holed or picked up), or 2:30 after it started (the rest score 10). Then
+  5 s of the scorecard and the next hole.
+- After hole 9: 10 s of the final card (lowest total wins), then a new course. Rotation: 1 course per turn.
+- Joining mid-course: you start the current hole from the tee; holes you missed score 10.
+- Bots fill up to 4 players. With the ball at rest they try shots in 36 directions at 6 strengths plus 8 putts at the
+  cup by running them through `step_ball` (2 a tick, so no tick runs long), each as meant and a little off either
+  way so they don't take shots that only work when hit perfectly, and score where each ends up by a distance field
+  to the cup over the hole. They take 1-3 s over a shot and hit it off by up to 0.05 rad and 8% power (the difficulty
+  knobs), which plays around par.
 
 ### Ghosts
-- Every other ball is an entity, interpolated as usual, drawn as a translucent sphere in its player's color with a
-  short fading trail and a name tag above it. Faded out when within 1 m of the camera, so ghosts never block a shot.
-- Your own ball is solid, in your color, with your name hidden.
-- A ghost in the cup is gone; the flag lists who's in.
+- Every other ball is an entity, interpolated as usual, drawn as a see-through sphere in its player's color with a
+  short fading trail and a name tag above it. Hidden within 1 m of the camera, so ghosts never block a shot, and in
+  the cup.
+- Your own ball is solid, in your color, with no tag.
 
 ### Look and sound
-- Felt with a subtle grain, rails with a highlight on top, the cup a dark hole with a white rim, a flag on a pole.
-  Clouds below the holes, the next holes visible far off.
-- Sounds: putter tock (louder for harder shots), rail clink, cup rattle, splash, whoosh into the void, a soft crowd
-  cheer for under par.
-- HUD: hole number, par and your strokes top left, the hole clock top center, power bar while pulling, a scorecard
-  on Tab (players by hole, total, relative to par), centered messages.
+- Felt with a fine grain, rails as boxes, the cup a dark hole with a white rim tilted to the slope, a flag on a pole,
+  windmills as a post with a cap and a paddle. Clouds below the holes, the next holes visible far off.
+- Sounds: putter tock (louder for harder shots), rail clink, cup rattle, splash, a falling whistle into the void, a
+  ripple of applause under par, a chime at the start of each hole, a soft wind.
+- HUD: hole number, par and your strokes top left, the hole clock top center, the power bar while pulling, the feed
+  top right, centered messages, a hint line, and the scorecard on Tab and between holes (players by hole, total,
+  relative to par, ping, with a par row).
 
 - Run: `cargo build -p minigolf --release --target wasm32-unknown-unknown`, then
   `cargo run --release -- server --game target/wasm32-unknown-unknown/release/minigolf.wasm`. Shipped in releases next to
