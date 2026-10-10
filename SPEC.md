@@ -101,8 +101,12 @@ Deadline: playable before 00:00. One weapon, one simple map.
   `tools/dust2_to_grid.py <Dust2.obj> [--debug dir]`: each 1 m cell is sampled 4x4 times with vertical rays; upward
   faces with 1.85 m of air over them are floors, a flood fill from the sites (up a jump, down any drop) keeps the
   reachable ones so roofs drop out. The lowest reachable floor is the base layer, a second one above it a slab, a
-  ceiling within 4.5 m a roof block; cells without floor become walls as tall as the faces in them (raised over
-  neighboring roofs) or crates by texture. Heights are shifted up 4 m so the lowest floor (the pit at long A) is 0.
+  ceiling within 6.5 m a roof block (so tall rooms like the lower tunnels' stairs don't open to the sky); a cell's
+  height is the median of its biggest cluster of close sample heights, so a cell half on a ramp and half on a ledge
+  gets one of them rather than a step in between. Cells without floor become walls as tall as the faces in them
+  (raised over neighboring roofs; ones with no faces of their own but the floor's, inside thick walls, as tall as the
+  walls around them rather than flush with the floor) or crates by texture. Heights are shifted up 4 m so the
+  lowest floor (the pit at long A) is 0.
   Sites are flood filled around the X decals (A within 7.5 m on the platform, B within 8 m), 16 spawns per team on a
   checkerboard in each spawn yard. `--debug` writes a top-down PNG per layer. The result, 85x89 cells, north up: B
   top-left, A top-right, CT spawn north of mid doors with the B doors corridor west and a passage east to A that runs
