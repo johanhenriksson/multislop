@@ -212,7 +212,7 @@ fn lines(scene: &mut Scene) {
     }
     segment(&mut b, Vec2::new(-x, 0.0), Vec2::new(x, 0.0));
     for end in [-1.0, 1.0] {
-        for (half, depth) in [(14.0, 16.0), (8.5, 6.0)] {
+        for (half, depth) in [(15.0, 16.0), (10.5, 6.0)] {
             let (front, back) = (end * z, end * (z - depth));
             segment(&mut b, Vec2::new(-half, front), Vec2::new(-half, back));
             segment(&mut b, Vec2::new(-half, back), Vec2::new(half, back));

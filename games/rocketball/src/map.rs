@@ -20,17 +20,17 @@ const UNIT: f32 = 0.5;
 pub const WALL_TOP: f32 = 18.0;
 /// The goal lines: the end walls' faces, at z = ±GOAL_LINE.
 pub const GOAL_LINE: f32 = 44.0;
-/// Goal mouths: 12 m wide and 6 m tall; the recess behind is 4 m deep.
-pub const GOAL_HALF_WIDTH: f32 = 6.0;
-pub const GOAL_HEIGHT: f32 = 6.0;
+/// Goal mouths: 16 m wide and 8 m tall; the recess behind is 4 m deep.
+pub const GOAL_HALF_WIDTH: f32 = 8.0;
+pub const GOAL_HEIGHT: f32 = 8.0;
 pub const GOAL_DEPTH: f32 = 4.0;
 /// Depth of the crossbar, the box over each mouth from `GOAL_HEIGHT` up to the ceiling.
 const CROSSBAR: f32 = 1.0;
 
 const LAYOUT: &str = "\
 ##########################
-##########......##########
-##########......##########
+#########........#########
+#########........#########
 #.r....................h.#
 #...S.S............S.S...#
 #............K...........#
@@ -75,8 +75,8 @@ const LAYOUT: &str = "\
 #...........K............#
 #...S.S............S.S...#
 #.h....................r.#
-##########......##########
-##########......##########
+#########........#########
+#########........#########
 ##########################";
 
 const HEIGHTS: &str = "\
@@ -322,7 +322,7 @@ mod tests {
         }
         // The 16 m in front of each goal, as wide as the mouth, and the recess behind it.
         for t in [Team::Orange, Team::Blue] {
-            for x in -5..=5 {
+            for x in -7..=7 {
                 for d in -4..16 {
                     let p = Vec3::new(x as f32, 0.0, t.end() * (GOAL_LINE - d as f32));
                     assert!(!blocks(p), "{p} in front of {t:?}'s goal");
