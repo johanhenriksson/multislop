@@ -1611,6 +1611,23 @@ fn spawn_world(
                 let at = MAP.center(x, z) + normal * (CELL / 2.0 + 0.03) + Vec3::Y * (floor + lift + size.y / 2.0);
                 let half = if dx != 0 { Vec3::new(0.03, size.y / 2.0, size.x / 2.0) } else { Vec3::new(size.x / 2.0, size.y / 2.0, 0.03) };
                 commands.spawn((Mesh3d(meshes.add(textured_box(at, half, size, false))), MeshMaterial3d(door.clone())));
+                // A stone frame standing out from the wall: jambs, a lintel, and a sill under windows.
+                let along = if dx != 0 { Vec3::Z } else { Vec3::X };
+                let piece = |center: Vec3, len: f32, height: f32, depth: f32| {
+                    let half = along * len + Vec3::Y * height + normal.abs() * depth;
+                    (center + normal * depth, half)
+                };
+                let mut frame = vec![
+                    piece(at + along * (size.x / 2.0 + 0.1), 0.1, size.y / 2.0, 0.07),
+                    piece(at - along * (size.x / 2.0 + 0.1), 0.1, size.y / 2.0, 0.07),
+                    piece(at + Vec3::Y * (size.y / 2.0 + 0.1), size.x / 2.0 + 0.22, 0.1, 0.09),
+                ];
+                if lift > 0.0 {
+                    frame.push(piece(at - Vec3::Y * (size.y / 2.0 + 0.05), size.x / 2.0 + 0.16, 0.05, 0.13));
+                }
+                for (center, half) in frame {
+                    commands.spawn((Mesh3d(meshes.add(textured_box(center, half, Vec2::splat(4.0), true))), MeshMaterial3d(stone.clone())));
+                }
             }
         }
     }
