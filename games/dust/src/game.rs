@@ -73,12 +73,12 @@ struct Match {
     loss_streak: [u32; 2],
     /// The site the T bots go for this round.
     t_site: char,
-    /// Rounds played to the end of their end pause, for rotating games.
-    played: u32,
+    /// A team reached `WIN_ROUNDS` and the last round's end pause is over: on to the next map.
+    over: bool,
 }
 
-/// Rounds per turn when the host rotates games: both halves.
-const ROTATE_AFTER: u32 = 2 * HALF;
+/// Rounds a team needs to win the match.
+const WIN_ROUNDS: u32 = 11;
 
 const fn ticks(secs: f32) -> u32 {
     (secs * TICK_HZ as f32) as u32
@@ -173,6 +173,11 @@ impl ServerGame for Dust {
         update_grenades(&mut self.grenades, &mut self.players, self.tick, &mut self.hits, &mut booms, &mut flashes);
         self.tick += 1;
         update_match(&mut self.m, &mut self.players, self.tick);
+        let finished = self.m.over;
+        if finished {
+            let next = MAPS[(MAPS.iter().position(|m| *m == self.map).unwrap_or(0) + 1) % MAPS.len()];
+            self.set_map(next);
+        }
         drop_from_the_dead(&mut self.players, &alive, &mut dropped);
         if self.m.round.number != self.dropped_round {
             (self.dropped_round, self.dropped) = (self.m.round.number, Vec::new());
@@ -215,7 +220,6 @@ impl ServerGame for Dust {
             let to = self.players.values().filter(|c| c.team == team).map(|c| c.id).collect();
             events.push(sdk::Event { to: Some(to), data: encode(&Event::Radio(r)) });
         }
-        let finished = self.m.played >= ROTATE_AFTER;
         Frame { map: self.map.clone(), state: encode(&net_round(&self.m, self.tick)), entities, events, finished }
     }
 
@@ -415,7 +419,7 @@ fn new_match() -> Match {
         bomb: Bomb::None,
         progress: None,
     };
-    Match { round, phase_ends: 0, bomb_explodes: 0, progress: None, buy_until: 0, loss_streak: [0, 0], t_site: 'A', played: 0 }
+    Match { round, phase_ends: 0, bomb_explodes: 0, progress: None, buy_until: 0, loss_streak: [0, 0], t_site: 'A', over: false }
 }
 
 /// Teams trade sides: scores go with them, and everyone starts over like round 1, with the pistol and starting money.
@@ -497,7 +501,12 @@ fn update_match(m: &mut Match, players: &mut Players, tick: u32) {
     match m.round.phase {
         Phase::End { .. } => {
             if tick >= m.phase_ends {
-                m.played += (m.round.number > 0) as u32;
+                if m.round.score.iter().any(|&s| s >= WIN_ROUNDS) {
+                    let [t, ct] = m.round.score;
+                    log(&format!("{} win the match {t} - {ct}", if t > ct { Team::T } else { Team::Ct }.name()));
+                    m.over = true;
+                    return;
+                }
                 if m.round.number > 0 && m.round.number % HALF == 0 {
                     halftime(m, players);
                 }
@@ -972,7 +981,7 @@ mod tests {
         let (mut tick, mut plants, mut planted) = (1, 0, false);
         // FPS16_ROUNDS plays a longer match, for tuning bots without the noise of 10 rounds.
         let rounds = std::env::var("FPS16_ROUNDS").ok().and_then(|r| r.parse().ok()).unwrap_or(10);
-        while m.round.number <= rounds && tick < ticks(rounds as f32 * 3.0 * 60.0) {
+        while m.round.number <= rounds && !m.over && tick < ticks(rounds as f32 * 3.0 * 60.0) {
             run_inputs(&m, &mut players, &history, tick, &mut shots, &mut hits, &mut radio, &mut vec![], &mut vec![]);
             tick += 1;
             update_match(&mut m, &mut players, tick);
@@ -991,10 +1000,27 @@ mod tests {
             shots.len()
         );
         assert!(t + ct >= rounds, "rounds should finish");
-        assert_eq!(m.played, rounds, "a round counts once its end pause is over, for rotating games");
         assert_eq!(players[&1].team == Team::Ct, rounds / HALF % 2 == 1, "sides switch every {HALF} rounds");
         assert!(kills >= 10, "bots should fight");
         assert!(plants >= 1, "Ts should plant at least once");
+    }
+
+    #[test]
+    fn winning_the_match_moves_on_to_the_next_map() {
+        let mut game = Dust::new();
+        game.connect(&"a".into());
+        game.tick();
+        game.m.round.score = [WIN_ROUNDS - 1, 4];
+        game.m.round.phase = Phase::End { winner: Team::T };
+        game.m.phase_ends = game.tick;
+        assert!(!game.tick().finished, "one short of winning plays on");
+        game.m.round.score = [WIN_ROUNDS, 4];
+        game.m.round.phase = Phase::End { winner: Team::T };
+        game.m.phase_ends = game.tick;
+        let frame = game.tick();
+        assert!(frame.finished, "a rotating host moves on");
+        assert_eq!((frame.map.as_str(), game.m.round.score), ("aztec", [0, 0]), "a fresh match on the next map");
+        crate::map::load("dust");
     }
 
     #[test]

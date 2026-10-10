@@ -124,6 +124,8 @@ Deadline: playable before 00:00. One weapon, one simple map.
 - Round: 5 s freeze (look only, movement frozen via `PlayerState::frozen` so prediction agrees), 1:55 live, 5 s end.
 - Halftime every 10 rounds (`HALF`): teams switch sides with their scores, everyone restarts with the pistol and
   $800 and loss bonuses reset; the next freeze says "teams switched sides".
+- First to 11 rounds (`WIN_ROUNDS`) wins the match: after that round's end pause the server moves on to the next map
+  (dust, aztec, dust, ...) for a fresh match, and a host rotating games moves on to the next game.
 - One random T carries the bomb; it drops where the carrier dies and any T picks it up by walking over it.
 - Plant: hold E on a site for 3 s. Defuse: CT holds E within 1.5 m of the bomb for 5 s. Bomb: 35 s, kills within 20 m.
 - Wins: eliminate the other team (a planted bomb must still be defused), bomb explodes (T), defused (CT),
