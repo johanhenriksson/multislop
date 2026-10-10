@@ -5,7 +5,7 @@ Deadline: playable before 00:00. One weapon, one simple map.
 ## Run
 - `cargo build -p dust --release --target wasm32-unknown-unknown` builds the game module. The host has no game built
   in: servers run a module and clients download it from the server.
-- `cargo run --release -- server [port] [--game game.wasm]` (headless, default port 5000; the game defaults to
+- `cargo run --release -- server [port] [--game game.wasm] [--map map]` (headless, default port 5000; the game defaults to
   `dust.wasm` next to the executable, so in development pass `--game target/wasm32-unknown-unknown/release/dust.wasm`)
 - `cargo run --release -- client [host:port] [--game game.wasm] [--lag ms] [--jitter ms] [--interp ms]` (`--game` uses a local module instead of downloading the server's, `--lag`/`--jitter` fake delay and bursty arrival to test netcode, `--interp` is the minimum remote-player buffer, default 50)
 
@@ -25,14 +25,11 @@ Deadline: playable before 00:00. One weapon, one simple map.
   `~/Library/Application Support/fps16/host`) and press Enter.
 - Back to the browser, with the reason shown, when the server goes quiet for 5 s in a game, never answers for 10 s,
   or runs another build; the game's scene, HUD, sounds and environment are torn down and the mouse is freed.
-- "Host a LAN game" lists the game modules it can find (`--game`, `.wasm` files next to the binary, downloaded ones
-  in `games/`), named by their `GameInfo` (game and map), only the newest file of each game. The scan runs in the
-  background from when the browser opens. Compiled module code is cached in `compiled/` by module hash and wasmtime
-  version; `games/` and `compiled/` keep the 4 most recently used files. The
-  picked one runs as a server on a thread in the client, on the first free port of 5000-5009, named
-  "<user>'s game", and the client joins it. Others find it in their browsers; it stops when the host quits.
-
-## Gameplay
+- "Host a LAN game" lists every map of the game modules it can find (`--game`, `.wasm` files next to the binary,
+  downloaded ones in `games/`), e.g. "Counterslop on dust", using only the newest file of each game. The scan runs
+  in the background from when the browser opens. The picked one runs as a server on a thread in the client, on the
+  first free port of 5000-5009, named "<user>'s game", and the client joins it. Compiled module code is cached in
+  `compiled/` by module hash and wasmtime version; `games/` and `compiled/` keep the 4 most recently used files.
 - Players are capsules ("rounded cylinders"): radius 0.4, height 1.8, eye at 1.6.
 - Movement: Quake/GoldSrc style (ground friction, accel, air accel, gravity, jump). WASD + mouse, space jumps.
 - Ctrl crouches over 0.2 s: 1.0 m tall instead of 1.8, eye at 0.85, 34% speed (silent), 30% less spread; standing up
@@ -69,7 +66,7 @@ Deadline: playable before 00:00. One weapon, one simple map.
   fights and only shoot once slowed down (counter-strafing), plant/defuse, call out spotted enemies so teammates rotate, and
   only notice enemies in a 120° field of view (callouts too), aim with a reaction delay, limited turn speed and angular aim error (~30% accuracy bot vs bot; `src/bot.rs`
   constants are the difficulty knobs).
-- Map: dust, traced from a top-down overview image into an ASCII grid in `src/map.rs` (2 m cells, flat): B site
+- The game is Counterslop; its one map is dust, traced from a top-down overview image into an ASCII grid in `src/map.rs` (2 m cells, flat): B site
   top-left, A bottom-left, CT spawn between them, T spawn at the back on the right (as far from A as from B),
   tunnels through the middle. Sites tinted red.
 - Height: a second grid (`DUST2_HEIGHTS`, quarter meters, base 36) gives each cell a floor height: 2 m streets, tunnels
@@ -109,6 +106,9 @@ Deadline: playable before 00:00. One weapon, one simple map.
   `ability` describes anything a player uses as data (trigger, cost, cycle, accuracy, delivery, payload) and runs
   the predicted part (`Hands`: cooldown, reload, bloom, charge, aim); delivery and payload are resolved by the game.
   Each dust weapon is a `Spec` (price, team, slot, kill reward, move speed) around an `Ability`.
+- Maps: games list theirs in `GameInfo::maps`; the host picks one with `ServerGame::set_map` (`--map`, default the
+  first), and a game may switch on its own. The current map rides in every `Frame` and snapshot; when it changes the
+  client host tears down the world and starts a fresh instance of the client game with `start(map)`.
 - `sdk::client`: the client half. `ClientGame` (start, snapshot, input, predict, frame) returns retained commands the
   host applies: assets (textures, meshes, materials, sounds), environment (sky, sun, fog), a scene tree (node 0 is
   the camera), and a HUD of flexbox-like nodes with text, images, click reporting and world-anchored placement;
