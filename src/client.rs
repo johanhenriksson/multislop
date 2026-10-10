@@ -1521,6 +1521,26 @@ fn spawn_world(
         }
     }
 
+    // Sky dome: pale and hazy at the horizon, deeper blue overhead, like the desert skybox.
+    let mut sky = Sphere::new(900.0).mesh().uv(48, 24);
+    if let Some(bevy::mesh::VertexAttributeValues::Float32x3(p)) = sky.attribute(Mesh::ATTRIBUTE_POSITION) {
+        // Linear colors: roughly sRGB (0.78, 0.85, 0.92) at the horizon to (0.33, 0.55, 0.85) at the top.
+        let colors: Vec<[f32; 4]> = p
+            .iter()
+            .map(|v| {
+                let up = (v[1] / 900.0).clamp(0.0, 1.0).powf(0.5);
+                let (h, z) = (Vec3::new(0.58, 0.69, 0.82), Vec3::new(0.09, 0.26, 0.69));
+                let c = h.lerp(z, up);
+                [c.x, c.y, c.z, 1.0]
+            })
+            .collect();
+        sky.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    }
+    commands.spawn((
+        Mesh3d(meshes.add(sky)),
+        MeshMaterial3d(mats.add(StandardMaterial { unlit: true, fog_enabled: false, cull_mode: None, ..default() })),
+        bevy::light::NotShadowCaster,
+    ));
     // A cloud layer high overhead, outside the fog.
     commands.spawn((
         Mesh3d(meshes.add(Plane3d::default().mesh().size(2400.0, 2400.0))),
