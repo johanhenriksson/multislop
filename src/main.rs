@@ -6,9 +6,11 @@ mod render;
 mod server;
 mod wasm;
 
-/// dust.wasm next to this program, where releases put it.
+/// dust.wasm next to this program, where releases put it, or else where `cargo build` put it.
 fn beside() -> Option<std::path::PathBuf> {
-    Some(std::env::current_exe().ok()?.parent()?.join("dust.wasm"))
+    let here = std::env::current_exe().ok()?.parent()?.join("dust.wasm");
+    let built = std::path::Path::new(env!("FPS16_DEV_GAMES")).join("dust.wasm");
+    Some(if here.exists() || !built.exists() { here } else { built })
 }
 
 /// Game modules in the folder next to this program, by name.
