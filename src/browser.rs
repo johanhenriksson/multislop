@@ -11,6 +11,7 @@ use bevy::picking::events::PointerClick;
 use bevy::prelude::*;
 use sdk::{GameInfo, encode};
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 use std::net::{SocketAddr, ToSocketAddrs};
 
 /// Where the last typed address is kept (the launcher used to ask for it there too).
@@ -49,8 +50,11 @@ pub struct Browser {
     /// Module files "Host a LAN game" offers.
     hostable: Vec<std::path::PathBuf>,
     host_clicked: bool,
-    /// The games found in `hostable` when the host button was clicked: label and module.
-    games: Vec<(String, Vec<u8>)>,
+    /// The games found in `hostable`: label and module. Filled in by a background scan.
+    games: Arc<Mutex<Option<Vec<(String, Vec<u8>)>>>>,
+    /// The game list is open (the host button was clicked), and what it shows, so it's redrawn when that changes.
+    host_open: bool,
+    shown_games: Option<usize>,
     /// A game picked to host, by index into `games`.
     host_pick: Option<usize>,
     error: String,
@@ -67,9 +71,11 @@ impl Browser {
             selected: 0,
             asked: f64::MIN,
             clicked: None,
+            games: scan(hostable.clone()),
             hostable,
             host_clicked: false,
-            games: Vec::new(),
+            host_open: false,
+            shown_games: None,
             host_pick: None,
             error: String::new(),
             dirty: true,
@@ -135,22 +141,34 @@ pub struct HostButton;
 #[derive(Component)]
 pub struct HostList;
 
-/// Loads each module once (identical files only once) and asks it what it is.
+/// Asks each module what it is, keeping only the newest file of each game: (label, module), by name.
 fn find_games(paths: &[std::path::PathBuf]) -> Vec<(String, Vec<u8>)> {
-    let mut seen = std::collections::HashSet::new();
-    let mut games = Vec::new();
+    let mut newest: BTreeMap<String, (std::time::SystemTime, String, Vec<u8>)> = BTreeMap::new();
     for path in paths {
         let Ok(bytes) = std::fs::read(path) else { continue };
-        if !seen.insert(crate::client::sha256(&bytes)) {
+        let modified = path.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+        if newest.values().any(|(at, _, b)| *at >= modified && *b == bytes) {
             continue;
         }
         let Ok(mut game) = crate::wasm::WasmGame::load(&bytes) else { continue };
         let info = sdk::ServerGame::info(&mut game);
-        let file: String = path.file_stem().map(|f| f.to_string_lossy().chars().take(12).collect()).unwrap_or_default();
-        let game = if info.game.is_empty() { "Unnamed game".into() } else { info.game };
-        games.push((format!("{game} on {}  ({file})", info.map), bytes));
+        let name = if info.game.is_empty() { "Unnamed game".to_string() } else { info.game };
+        if newest.get(&name).is_none_or(|(at, ..)| modified > *at) {
+            newest.insert(name.clone(), (modified, format!("{name} on {}", info.map), bytes));
+        }
     }
-    games
+    newest.into_values().map(|(_, label, bytes)| (label, bytes)).collect()
+}
+
+/// Finds the games in `paths` on a thread (each takes a compile the first time), into the returned slot.
+fn scan(paths: Vec<std::path::PathBuf>) -> Arc<Mutex<Option<Vec<(String, Vec<u8>)>>>> {
+    let slot = Arc::new(Mutex::new(None));
+    let out = slot.clone();
+    std::thread::spawn(move || {
+        let games = find_games(&paths);
+        *out.lock().unwrap() = Some(games);
+    });
+    slot
 }
 
 pub fn setup(mut commands: Commands) {
@@ -224,22 +242,37 @@ pub fn browse(
 
     let mut join = b.clicked.take();
     if std::mem::take(&mut b.host_clicked) {
-        b.games = find_games(&b.hostable);
-        b.error = if b.games.is_empty() { "no game modules found to host".into() } else { String::new() };
+        b.host_open = true;
+        // Show what we know now; a fresh look (games downloaded since) replaces it when done.
+        let known = b.games.lock().unwrap().clone();
+        b.games = scan(b.hostable.clone());
+        if known.is_some() {
+            *b.games.lock().unwrap() = known;
+        }
+        b.shown_games = None;
+    }
+    let games = b.games.lock().unwrap().clone();
+    let count = games.as_ref().map(Vec::len);
+    if b.host_open && b.shown_games != count.or(Some(usize::MAX)) {
+        b.shown_games = count.or(Some(usize::MAX));
         commands.entity(*host_list).despawn_children();
-        for (i, (label, _)) in b.games.iter().enumerate() {
-            commands
-                .spawn((
-                    ChildOf(*host_list),
-                    Node { padding: UiRect::axes(px(12), px(6)), ..default() },
-                    BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.08)),
-                    children![(Text::new(label.clone()), TextFont { font_size: FontSize::Px(16.0), ..default() })],
-                ))
-                .observe(move |_: On<PointerClick>, mut b: ResMut<Browser>| b.host_pick = Some(i));
+        let row = (Node { padding: UiRect::axes(px(12), px(6)), ..default() }, BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.08)));
+        let font = TextFont { font_size: FontSize::Px(16.0), ..default() };
+        match &games {
+            None => _ = commands.spawn((ChildOf(*host_list), row, children![(Text::new("Finding games..."), font)])),
+            Some(list) if list.is_empty() => _ = commands.spawn((ChildOf(*host_list), row, children![(Text::new("No games found to host"), font)])),
+            Some(list) => {
+                for (i, (label, _)) in list.iter().enumerate() {
+                    commands
+                        .spawn((ChildOf(*host_list), row.clone(), children![(Text::new(label.clone()), font.clone())]))
+                        .observe(move |_: On<PointerClick>, mut b: ResMut<Browser>| b.host_pick = Some(i));
+                }
+            }
         }
     }
-    if let Some((_, module)) = b.host_pick.take().and_then(|i| b.games.get(i).cloned()) {
+    if let Some((_, module)) = b.host_pick.take().and_then(|i| games.as_ref()?.get(i).cloned()) {
         let user = std::env::var("USER").unwrap_or_else(|_| "someone".into());
+        crate::client::store(&module);
         match crate::server::host(format!("{user}'s game"), module) {
             Ok(port) => join = Some(SocketAddr::from(([127, 0, 0, 1], port))),
             Err(e) => b.error = e,
@@ -265,6 +298,7 @@ pub fn browse(
     if let Some(addr) = join {
         net.server = Some(addr);
         b.error.clear();
+        (b.host_open, b.shown_games) = (false, None);
         commands.entity(*host_list).despawn_children();
         return;
     }

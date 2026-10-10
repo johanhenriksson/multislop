@@ -26,7 +26,9 @@ Deadline: playable before 00:00. One weapon, one simple map.
 - Back to the browser, with the reason shown, when the server goes quiet for 5 s in a game, never answers for 10 s,
   or runs another build; the game's scene, HUD, sounds and environment are torn down and the mouse is freed.
 - "Host a LAN game" lists the game modules it can find (`--game`, `.wasm` files next to the binary, downloaded ones
-  in `games/`), each loaded once and named by its `GameInfo` (game and map); identical files are listed once. The
+  in `games/`), named by their `GameInfo` (game and map), only the newest file of each game. The scan runs in the
+  background from when the browser opens. Compiled module code is cached in `compiled/` by module hash and wasmtime
+  version; `games/` and `compiled/` keep the 4 most recently used files. The
   picked one runs as a server on a thread in the client, on the first free port of 5000-5009, named
   "<user>'s game", and the client joins it. Others find it in their browsers; it stops when the host quits.
 

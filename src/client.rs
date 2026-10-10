@@ -269,10 +269,52 @@ fn start(mut client: ResMut<Client>, mut renderer: Renderer, net: Res<Net>) {
     client.started = true;
 }
 
+/// Most downloaded (or compiled) games kept; the least recently used go first.
+const KEEP_CACHED: usize = 4;
+
+pub fn data_dir() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    std::path::Path::new(&home).join("Library/Application Support/fps16")
+}
+
 /// Where downloaded game modules are kept.
 pub fn games_dir() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    std::path::Path::new(&home).join("Library/Application Support/fps16/games")
+    data_dir().join("games")
+}
+
+/// Marks a cached file as just used, so pruning keeps it.
+pub fn touch(path: &std::path::Path) {
+    if let Ok(f) = std::fs::File::options().append(true).open(path) {
+        let _ = f.set_modified(std::time::SystemTime::now());
+    }
+}
+
+/// Deletes all but the `KEEP_CACHED` most recently used `.ext` files in `dir`.
+pub fn prune(dir: &std::path::Path, ext: &str) {
+    let mut files: Vec<(std::time::SystemTime, std::path::PathBuf)> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == ext))
+        .filter_map(|p| Some((p.metadata().ok()?.modified().ok()?, p)))
+        .collect();
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, old) in files.into_iter().skip(KEEP_CACHED) {
+        let _ = std::fs::remove_file(old);
+    }
+}
+
+/// Keeps a module in the download cache (if it isn't already), so joining a server running it needs no download.
+pub fn store(module: &[u8]) {
+    let path = cache_path(&sha256(module));
+    if path.exists() {
+        return touch(&path);
+    }
+    match path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| std::fs::write(&path, module)) {
+        Ok(()) => prune(&games_dir(), "wasm"),
+        Err(e) => eprintln!("can't cache the game at {}: {e}", path.display()),
+    }
 }
 
 fn cache_path(hash: &[u8; 32]) -> std::path::PathBuf {
@@ -300,6 +342,7 @@ fn load(client: &mut Client, bytes: &[u8]) {
 /// The server's answer to which game it runs: cached already, or to download.
 fn on_game(client: &mut Client, hash: [u8; 32], size: u32, cookie: u64) {
     if let Some(bytes) = std::fs::read(cache_path(&hash)).ok().filter(|b| sha256(b) == hash) {
+        touch(&cache_path(&hash));
         return load(client, &bytes);
     }
     if size > MAX_MODULE {
@@ -328,11 +371,8 @@ fn on_chunk(client: &mut Client, index: u32, chunk: &[u8]) {
         client.fetch = Fetch::Asking;
         return;
     }
-    let (hash, data) = (*hash, std::mem::take(data));
-    let path = cache_path(&hash);
-    if let Err(e) = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| std::fs::write(&path, &data)) {
-        eprintln!("can't cache the game at {}: {e}", path.display());
-    }
+    let data = std::mem::take(data);
+    store(&data);
     load(client, &data);
 }
 

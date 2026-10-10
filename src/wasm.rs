@@ -19,10 +19,36 @@ struct Wasm {
     buf: TypedFunc<u32, u32>,
 }
 
+/// Where a module's compiled code is kept: by its sha256 and what this wasmtime build can load.
+fn compiled_path(engine: &Engine, bytes: &[u8]) -> std::path::PathBuf {
+    use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
+    let compat = BuildHasherDefault::<DefaultHasher>::default().hash_one(engine.precompile_compatibility_hash());
+    let hex: String = crate::client::sha256(bytes).iter().map(|b| format!("{b:02x}")).collect();
+    crate::client::data_dir().join("compiled").join(format!("{hex}-{compat:016x}.cwasm"))
+}
+
+/// Compiles a module, or loads its code compiled earlier (milliseconds instead of a third of a second).
+fn compile(engine: &Engine, bytes: &[u8]) -> wasmtime::Result<Module> {
+    let path = compiled_path(engine, bytes);
+    // SAFETY: deserializing runs no wasm checks, so only files we wrote: our own cache, named by the hash of the
+    // module they were compiled from. A file that doesn't match this engine is rejected and recompiled.
+    if let Ok(module) = unsafe { Module::deserialize_file(engine, &path) } {
+        crate::client::touch(&path);
+        return Ok(module);
+    }
+    let module = Module::new(engine, bytes)?;
+    if let (Ok(code), Some(dir)) = (module.serialize(), path.parent()) {
+        if std::fs::create_dir_all(dir).and_then(|_| std::fs::write(&path, code)).is_ok() {
+            crate::client::prune(dir, "cwasm");
+        }
+    }
+    Ok(module)
+}
+
 impl Wasm {
     fn load(bytes: &[u8]) -> wasmtime::Result<Wasm> {
         let engine = Engine::new(Config::new().epoch_interruption(true))?;
-        let module = Module::new(&engine, bytes)?;
+        let module = compile(&engine, bytes)?;
         let mut linker = Linker::new(&engine);
         linker.func_wrap("fps16", "log", |mut caller: Caller<'_, StoreLimits>, ptr: u32, len: u32| {
             let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) else { return };
