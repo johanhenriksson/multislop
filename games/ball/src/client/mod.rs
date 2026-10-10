@@ -9,8 +9,8 @@ mod world;
 use crate::game::RESPAWN_SECS;
 use crate::map::GOAL_LINE;
 use crate::shared::*;
-use glam::{Quat, Vec3};
-use model::{BARREL, Rig, VIEWMODEL, VIEWMODEL_SCALE};
+use glam::{Quat, Vec2, Vec3};
+use model::{BARREL, Rig, VIEWMODEL};
 use sdk::Interpolated;
 use sdk::client::*;
 use sdk::scene::Scene;
@@ -105,9 +105,6 @@ struct Assets {
     confetti_colors: [[u32; 3]; 2],
     rocket: u32,
     rocket_tail: u32,
-    /// The viewmodel's sleeves, colored once we know our team.
-    sleeve: u32,
-    sleeve_team: Option<Team>,
 }
 
 /// The ball's scene nodes and how it's drawn.
@@ -163,9 +160,12 @@ pub struct BallClient {
     hurt_at: f64,
     tab: bool,
     viewmodel: u32,
-    /// Viewmodel kick, 1 right after firing and decaying to 0, and the run bob's phase.
+    /// Viewmodel kick, 1 right after firing and decaying to 0, the run bob's phase, and the sway behind turning
+    /// with the view we last turned to.
     kick: f32,
     bob: f32,
+    sway: Vec2,
+    last_look: Vec2,
     /// Camera shake from nearby blasts, decaying.
     shake: f32,
     /// The kickoff count last beeped.
@@ -223,10 +223,8 @@ impl ClientGame for BallClient {
             confetti_colors,
             rocket: s.mesh(MeshData::Cylinder { radius: 0.06, height: 0.6 }),
             rocket_tail: s.mesh(MeshData::Sphere { radius: 0.11, ico: Some(1) }),
-            sleeve: s.material(Material { color: Color::srgb(0.12, 0.12, 0.14), roughness: 0.5, metallic: 0.5, ..Default::default() }),
-            sleeve_team: None,
         };
-        self.viewmodel = model::spawn_launcher(&mut self.scene, CAMERA, Transform::at(VIEWMODEL).scaled(VIEWMODEL_SCALE), Some(self.assets.sleeve));
+        self.viewmodel = model::spawn_launcher(&mut self.scene, CAMERA, Transform::at(VIEWMODEL), true);
         self.spawn_ball();
         self.build_hud();
         std::mem::take(&mut self.scene.out)
@@ -338,7 +336,7 @@ impl ClientGame for BallClient {
 fn muzzle(o: Vec3, d: Vec3) -> Vec3 {
     let right = d.cross(Vec3::Y).normalize_or_zero();
     let up = right.cross(d);
-    o + right * VIEWMODEL.x + up * VIEWMODEL.y + d * (BARREL * VIEWMODEL_SCALE - VIEWMODEL.z)
+    o + right * VIEWMODEL.x + up * VIEWMODEL.y + d * (BARREL - VIEWMODEL.z)
 }
 
 impl BallClient {
@@ -618,23 +616,23 @@ impl BallClient {
         self.pickups_up = up;
     }
 
-    /// Our launcher: bobs while running, kicks on firing, dips while reloading; sleeves in our team's armor.
+    /// Our launcher, moving like dust's: bobs while running, sways behind turns, kicks on firing, dips while reloading.
     fn render_viewmodel(&mut self, dt: f32) {
-        if let Some(team) = self.team.filter(|&t| self.assets.sleeve_team != Some(t)) {
-            self.assets.sleeve_team = Some(team);
-            let material = model::plate_material(team);
-            self.scene.push(Command::Material { id: self.assets.sleeve, material });
-        }
-        self.kick *= (-dt * 9.0).exp();
+        let look = Vec2::new(self.yaw, self.pitch);
+        let turn = (look - self.last_look) / dt.max(1e-3);
+        self.last_look = look;
+        let target = (Vec2::new(-turn.x, turn.y) * 0.004).clamp(Vec2::splat(-0.04), Vec2::splat(0.04));
+        self.sway = self.sway.lerp(target, (dt * 10.0).min(1.0));
+        self.kick *= (-dt * 16.0).exp();
         let speed = if self.pred.on_ground { (self.pred.vel.with_y(0.0).length() / MAX_SPEED).min(1.0) } else { 0.0 };
         self.bob += dt * 10.0 * speed;
         let bob = Vec3::new(self.bob.sin() * 0.012, -(self.bob * 2.0).sin().abs() * 0.01, 0.0) * speed;
         let reload = self.pred.hands.reloading as f32 / (ROCKET.reload_secs() * TICK_HZ as f32);
         let dip = (reload * std::f32::consts::PI).sin();
-        let at = VIEWMODEL + bob + Vec3::new(0.0, -0.15 * dip, 0.07 * self.kick);
-        let rot = Quat::from_rotation_x(-0.6 * dip + 0.2 * self.kick);
+        let at = VIEWMODEL + bob + Vec3::new(self.sway.x, self.sway.y - 0.15 * dip, 0.05 * self.kick);
+        let rot = Quat::from_rotation_x(-0.6 * dip + 0.12 * self.kick);
         let shown = self.alive && self.me.is_some();
-        self.scene.push(Command::Set { id: self.viewmodel, transform: Some(Transform::at(at).rotated(rot).scaled(VIEWMODEL_SCALE)), visible: Some(shown), light: None });
+        self.scene.push(Command::Set { id: self.viewmodel, transform: Some(Transform::at(at).rotated(rot)), visible: Some(shown), light: None });
     }
 
     /// A puff that grows to `1 + grow` times its size (shrinks when negative) and fades out over `life`.

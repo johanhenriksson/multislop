@@ -57,31 +57,27 @@ fn hands() -> Vec<(Shape, Finish)> {
 
 /// Where the barrel tip is, ahead of the grip.
 pub const BARREL: f32 = 0.61;
-/// First-person position of the grip, relative to the camera, and the model's size there: far enough out that the
-/// tube's back end, which reaches behind the grip, doesn't fill a quarter of the screen.
-pub const VIEWMODEL: Vec3 = Vec3::new(0.2, -0.19, -0.46);
-pub const VIEWMODEL_SCALE: f32 = 0.75;
+/// First-person position of the grip, relative to the camera (dust's).
+pub const VIEWMODEL: Vec3 = Vec3::new(0.23, -0.21, -0.26);
 
-/// A launcher under `parent`; first person also gets hands holding it, their sleeves in `sleeve`.
-pub fn spawn_launcher(scene: &mut Scene, parent: u32, at: Transform, sleeve: Option<u32>) -> u32 {
+/// A launcher under `parent`; first person also gets hands holding it.
+pub fn spawn_launcher(scene: &mut Scene, parent: u32, at: Transform, first_person: bool) -> u32 {
     let along_z = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
     let root = scene.empty(Some(parent), at, true);
     let mut shapes = launcher();
-    if sleeve.is_some() {
+    if first_person {
         shapes.extend(hands());
     }
     for (shape, finish) in shapes {
-        let material = match (finish, sleeve) {
-            (Sleeve, Some(m)) => m,
-            _ => scene.shared_material(format!("finish {}", finish as u8), || {
-                let m = |r, g, b, roughness| Material { color: Color::srgb(r, g, b), roughness, ..Default::default() };
-                match finish {
-                    Black => m(0.07, 0.07, 0.08, 0.5),
-                    Green => m(0.2, 0.27, 0.17, 0.7),
-                    Glove | Sleeve => m(0.09, 0.09, 0.08, 0.9),
-                }
-            }),
-        };
+        let material = scene.shared_material(format!("finish {}", finish as u8), || {
+            let m = |r, g, b, roughness| Material { color: Color::srgb(r, g, b), roughness, ..Default::default() };
+            match finish {
+                Black => m(0.07, 0.07, 0.08, 0.5),
+                Green => m(0.2, 0.27, 0.17, 0.7),
+                Glove => m(0.09, 0.09, 0.08, 0.9),
+                Sleeve => m(0.2, 0.22, 0.16, 0.95),
+            }
+        });
         let (mesh, transform) = match shape {
             Block(size, pos, tilt) => (scene.cuboid(size), Transform::at(pos).rotated(Quat::from_rotation_x(tilt))),
             Tube(r, len, pos) => {
@@ -89,15 +85,14 @@ pub fn spawn_launcher(scene: &mut Scene, parent: u32, at: Transform, sleeve: Opt
                 (mesh, Transform::at(pos).rotated(along_z))
             }
         };
-        let kind = NodeKind::Mesh { mesh, material, shadows: sleeve.is_none() };
+        let kind = NodeKind::Mesh { mesh, material, shadows: !first_person };
         scene.spawn(Some(root), kind, transform, true);
     }
     root
 }
 
-/// Plates in the team's color: the torso, shoulders and arms, so a team reads from across the pitch. The
-/// viewmodel's sleeves use it too.
-pub fn plate_material(team: Team) -> Material {
+/// Plates in the team's color: the torso, shoulders and arms, so a team reads from across the pitch.
+fn plate_material(team: Team) -> Material {
     let c = team_rgb(team);
     Material { color: Color::srgb(c[0] * 0.8, c[1] * 0.8, c[2] * 0.8), roughness: 0.45, metallic: 0.3, ..Default::default() }
 }
@@ -145,6 +140,6 @@ pub fn spawn_rig(scene: &mut Scene, team: Team) -> Rig {
     scene.mesh_node(Some(arms), arm, plate, Transform::at(Vec3::new(0.3, -0.12, -0.15)));
     scene.mesh_node(Some(arms), arm, plate, Transform::at(Vec3::new(-0.15, -0.14, -0.3)).rotated(Quat::from_rotation_y(-0.6)));
     // On the shoulder, sticking out ahead.
-    spawn_launcher(scene, arms, Transform::at(Vec3::new(0.24, 0.0, -0.3)).scaled(1.3), None);
+    spawn_launcher(scene, arms, Transform::at(Vec3::new(0.24, 0.0, -0.3)).scaled(1.3), false);
     Rig { root, arms, legs, team, stride: 0.0, last_pos: Vec3::ZERO }
 }

@@ -286,7 +286,7 @@ health). It comes back after its respawn time; clients learn whether each is up 
   toucher ("X scored!"). If only the defending team touched it, it's an own goal for the scorer's side.
 - Clock: 5:00, running only during play. Most goals wins. A tie goes to golden goal overtime for up to 2 minutes,
   then it's a draw. Then 8 s of the scoreboard, and a new match. Rotation: 2 matches per turn.
-- Dying: respawn after 3 s, automatically, at a free respawn spot of your team, with 100 HP, no armor, 4 + 8 rockets.
+- Dying: respawn after 7 s, automatically, at a free respawn spot of your team, with 100 HP, no armor, 4 + 8 rockets.
   Kills score nothing on their own (they buy time), but the scoreboard counts them.
 - Scoreboard (Tab, and at the end): per team, the players with goals, kills, deaths and ping.
 
