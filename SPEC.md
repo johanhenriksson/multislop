@@ -134,7 +134,7 @@ Deadline: playable before 00:00. One weapon, one simple map.
   client host tears down the world and starts a fresh instance of the client game with `start(map)`.
 - Game rotation (off by default; `--rotate`, or "Rotate games" in "Host a LAN game", which starts with the picked
   game and then each other one): a game sets `Frame::finished` once its turn is played (dust 20 rounds, race 3
-  races, arena 3 matches, each counted when its end screen is over, reset by `set_map`). The server then disconnects
+  races, arena 3 matches, ball 2 matches, each counted when its end screen is over, reset by `set_map`). The server then disconnects
   everyone from it, starts the next on its first map and bumps a game counter. All modules are loaded up front, and
   each game keeps its own tick (lag compensation rewinds by it). Input for an earlier game is answered with
   `ServerMsg::Game` (hash, size, counter), so clients notice, tear down and load the new game like on connect, then

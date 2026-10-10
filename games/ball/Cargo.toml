@@ -1,0 +1,12 @@
+[package]
+name = "ball"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+glam = { version = "0.33", features = ["serde"] }
+sdk = { path = "../../sdk" }
+serde = { version = "1.0.229", features = ["derive"] }

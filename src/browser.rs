@@ -298,7 +298,7 @@ pub fn browse(
                 .spawn((ChildOf(bots), button, BorderColor::all(Color::srgb(0.6, 0.6, 0.6)), children![(Text::new(sign), font.clone())]))
                 .observe(move |_: On<PointerClick>, mut b: ResMut<Browser>| (b.bots, b.shown_games) = (step_bots(b.bots, up), None));
         }
-        let label = if b.rotate { "Rotate games: on (10 rounds, 3 races or 3 matches each)" } else { "Rotate games: off" };
+        let label = if b.rotate { "Rotate games: on (10 rounds, 3 races or 2-3 matches each)" } else { "Rotate games: off" };
         commands
             .spawn((ChildOf(*host_list), row.clone(), children![(Text::new(label), font.clone())]))
             .observe(|_: On<PointerClick>, mut b: ResMut<Browser>| (b.rotate, b.shown_games) = (!b.rotate, None));

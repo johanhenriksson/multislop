@@ -1,5 +1,5 @@
 [workspace]
-members = ["sdk", "games/dust", "games/arena", "games/race"]
+members = ["sdk", "games/dust", "games/arena", "games/race", "games/ball"]
 
 [package]
 name = "fps16"
