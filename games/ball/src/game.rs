@@ -71,6 +71,9 @@ struct Rocket {
     fuse: u32,
 }
 
+/// What teammates, the shooter included, take of a blast's damage.
+const FRIENDLY_DAMAGE: f32 = 0.5;
+
 const fn ticks(secs: f32) -> u32 {
     (secs * TICK_HZ as f32) as u32
 }
@@ -314,7 +317,7 @@ impl Ballslop {
         }
     }
 
-    /// Damages everyone in the open within the blast radius, teammates too (the shooter by half), throws them, and
+    /// Damages everyone in the open within the blast radius (teammates and the shooter less), throws them, and
     /// pushes the ball.
     fn explode(&mut self, at: Vec3, owner: u32, team: Team) {
         self.events.push(Event::Explosion { pos: at, radius: BLAST_RADIUS, team });
@@ -329,7 +332,8 @@ impl Ballslop {
             p.net.state.vel += push;
             p.net.state.on_ground &= push.y <= 0.0;
             let full = BLAST_DAMAGE * (1.0 - dist / BLAST_RADIUS);
-            self.hurt(owner, id, if id == owner { full / 2.0 } else { full });
+            let damage = if id == owner || p.net.team == team { full * FRIENDLY_DAMAGE } else { full };
+            self.hurt(owner, id, damage);
         }
         if let Some(strength) = blast_ball(self.ball, &mut self.ball_vel, at) {
             self.touch(owner, team);
@@ -655,7 +659,7 @@ mod tests {
         for (id, x) in [(a, 0.0), (c, 5.0), (b, 10.0)] {
             place(&mut game, id, start + Vec3::X * x);
         }
-        game.players.get_mut(&c).unwrap().net.hp = 50;
+        game.players.get_mut(&c).unwrap().net.hp = 20;
         let fire = Input { fire: true, yaw: -std::f32::consts::FRAC_PI_2, pitch: -0.12, ..Default::default() };
         game.input(a, 1, 0.0, &encode(&fire));
         let mut kills = vec![];
