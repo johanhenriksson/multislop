@@ -6,7 +6,7 @@
 // ponytail: one floor per spot (a height field), so no bridges over tunnels. Add layers if a map needs them.
 
 use crate::shared::Team;
-use bevy::math::Vec3;
+use glam::Vec3;
 use std::sync::LazyLock;
 
 /// Meters per grid cell.

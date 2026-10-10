@@ -1,17 +1,11 @@
-use bevy::math::{EulerRot, Quat, Vec3};
+use glam::{EulerRot, Quat, Vec3};
 use crate::map::MAP;
 use crate::weapons::{AWP_SCOPED_SPREAD, DRAW_SECS, SCOPED_SPEED, Slot, Weapon};
 use serde::{Deserialize, Serialize};
 
-/// Bumped by every `tools/release.sh publish`. Server and client must match exactly.
-pub const BUILD: &str = env!("FPS16_BUILD");
-
-pub const TICK_HZ: f64 = 128.0;
+pub use sdk::{TICK_HZ, decode, encode};
+use sdk::Entity;
 pub const DT: f32 = 1.0 / TICK_HZ as f32;
-/// Snapshots go out every this many ticks (32 Hz). Fewer, slightly bigger packets suit Wi-Fi better.
-pub const SNAPSHOT_EVERY: u32 = 4;
-/// Clients send inputs every this many ticks (64 Hz); each packet carries several so none are lost.
-pub const INPUT_EVERY: u32 = 2;
 
 pub const RADIUS: f32 = 0.4;
 pub const HEIGHT: f32 = 1.8;
@@ -100,6 +94,8 @@ pub struct Round {
 
 #[derive(Serialize, Deserialize, Clone, Copy, Default, Debug)]
 pub struct Input {
+    /// Stamped by the host, not sent as part of the input.
+    #[serde(skip)]
     pub seq: u32,
     pub forward: f32,
     pub right: f32,
@@ -120,16 +116,22 @@ pub struct Input {
     pub buy: u8,
     /// Radio call from the Z menu (1-based into `Radio::MENU`), 0 for none.
     pub radio: u8,
-    /// Server tick the client was rendering remote players at, used for lag compensation.
+    /// Server tick the client was rendering remote players at, used for lag compensation. Stamped by the host.
+    #[serde(skip)]
     pub view_tick: f32,
 }
 
+/// Position and view travel in the player's `sdk::Entity`, so they're skipped here.
 #[derive(Serialize, Deserialize, Clone, Copy, Default, Debug, PartialEq)]
 pub struct PlayerState {
     /// Feet position.
+    #[serde(skip)]
     pub pos: Vec3,
+    #[serde(skip)]
     pub vel: Vec3,
+    #[serde(skip)]
     pub yaw: f32,
+    #[serde(skip)]
     pub pitch: f32,
     pub on_ground: bool,
     pub primary: Option<Weapon>,
@@ -150,8 +152,11 @@ pub struct PlayerState {
     pub frozen: bool,
 }
 
+/// A player as clients see it, carried in an `sdk::Entity`.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct NetPlayer {
+    /// The entity id, filled in by `NetPlayer::from_entity`.
+    #[serde(skip)]
     pub id: u32,
     pub state: PlayerState,
     pub hp: i32,
@@ -166,31 +171,46 @@ pub struct NetPlayer {
     pub ping: u16,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-pub enum ServerMsg {
-    /// Keep as the first variant so its encoding never changes between builds.
-    WrongBuild { server: String },
-    Snapshot(Snapshot),
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum EntityData {
+    Player(NetPlayer),
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct Snapshot {
-    pub tick: u32,
-    pub you: u32,
-    /// Last input seq the server processed for the receiving client.
-    pub ack: u32,
-    pub players: Vec<NetPlayer>,
-    pub round: Round,
-    /// Shots fired this tick, so clients can draw everyone's beams.
+impl NetPlayer {
+    pub fn entity(&self, teleport: u8) -> Entity {
+        let s = &self.state;
+        let data = encode(&EntityData::Player(self.clone()));
+        Entity { id: self.id, pos: s.pos, vel: s.vel, yaw: s.yaw, pitch: s.pitch, teleport, data }
+    }
+
+    pub fn from_entity(e: &Entity) -> Option<NetPlayer> {
+        let EntityData::Player(mut p) = decode(&e.data)?;
+        p.id = e.id;
+        (p.state.pos, p.state.vel, p.state.yaw, p.state.pitch) = (e.pos, e.vel, e.yaw, e.pitch);
+        Some(p)
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+pub enum Event {
+    /// A shot fired, so clients can draw everyone's beams.
     // ponytail: sent once, so a dropped snapshot loses that beam. Resend for a few ticks if that shows on Wi-Fi.
-    pub shots: Vec<Shot>,
-    /// Damage dealt since the last snapshot.
-    pub hits: Vec<Hit>,
-    /// Radio calls from the receiver's own team since the last snapshot.
-    pub radio: Vec<RadioCall>,
-    /// Latest `InputPacket::time` from this client, and how long the server held it before sending this snapshot.
-    pub echo: f64,
-    pub echo_held: f32,
+    Shot(Shot),
+    Hit(Hit),
+    /// Sent to the caller's team only.
+    Radio(RadioCall),
+}
+
+/// Client-side prediction of our own player: one input on top of `me`. Returns the shot it fired, if any, encoded.
+pub fn predict(me: &mut Entity, input: &[u8], seq: u32) -> Vec<u8> {
+    let mut shot = None;
+    if let (Some(mut p), Some(inp)) = (NetPlayer::from_entity(me), decode::<Input>(input)) {
+        if p.hp > 0 {
+            shot = step_player(&mut p.state, &Input { seq, ..inp });
+            *me = p.entity(me.teleport);
+        }
+    }
+    encode(&shot)
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug)]
@@ -240,29 +260,6 @@ pub struct Hit {
     pub damage: u8,
     pub headshot: bool,
     pub killed: bool,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct InputPacket {
-    /// Must stay the first field: the server reads it alone before decoding the rest, so a mismatch is caught even
-    /// when the rest of the format has changed.
-    pub build: String,
-    /// Player name: the logged-in user on the client's machine.
-    pub name: String,
-    /// The client's measured round trip, shown on everyone's scoreboard.
-    pub ping: u16,
-    /// Client clock when sent, echoed back in snapshots to measure the network round trip.
-    pub time: f64,
-    /// The most recent unacked inputs, oldest first. Redundant on purpose to survive packet loss.
-    pub inputs: Vec<Input>,
-}
-
-pub fn encode<T: Serialize>(v: &T) -> Vec<u8> {
-    postcard::to_stdvec(v).expect("serialize")
-}
-
-pub fn decode<'a, T: Deserialize<'a>>(b: &'a [u8]) -> Option<T> {
-    postcard::from_bytes(b).ok()
 }
 
 pub fn look_rot(yaw: f32, pitch: f32) -> Quat {

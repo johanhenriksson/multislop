@@ -1,7 +1,10 @@
-use crate::map::{CELL, MAP};
+use dust::map::{CELL, MAP};
+use crate::net::*;
+use crate::netclient::{NetClient, clock};
+use dust::shared::Event as GameEvent;
 use crate::model::{Rig, barrel_length, spawn_soldier, spawn_weapon, viewmodel_offset};
-use crate::weapons::{ALL_WEAPONS, DRAW_SECS, Weapon, buy_menu};
-use crate::shared::*;
+use dust::weapons::{ALL_WEAPONS, DRAW_SECS, Weapon, buy_menu};
+use dust::shared::*;
 use crate::sfx;
 use bevy::audio::Volume;
 use bevy::input::mouse::AccumulatedMouseMotion;
@@ -14,7 +17,6 @@ use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
 const MOUSE_SENS: f32 = 0.002;
-const REDUNDANCY: usize = 8;
 /// Field of view, and scoped in with the AWP.
 const FOV: f32 = 1.6;
 const ZOOM_FOV: f32 = 0.42;
@@ -72,32 +74,16 @@ impl Net {
 
 #[derive(Resource, Default)]
 struct Game {
-    me: Option<u32>,
-    seq: u32,
+    netcode: NetClient,
+    /// Our predicted player, decoded from `netcode.pred`.
     pred: PlayerState,
-    prev_pos: Vec3,
-    /// Visual offset left over from reconciliation, decayed to zero so corrections don't snap.
-    smooth: Vec3,
-    pending: VecDeque<Input>,
-    /// Network round trip only, like CS: excludes tick and queue waits on either side.
-    ping_ms: f32,
     hp: i32,
     kills: u32,
     deaths: u32,
-    latest_tick: u32,
-    /// Server tick minus local clock in ticks. Estimating server time as local clock + offset keeps it advancing
-    /// smoothly between snapshots instead of lurching each time one arrives.
-    tick_offset: Option<f64>,
-    snapshots: VecDeque<Snapshot>,
     yaw: f32,
     pitch: f32,
     /// Bullet tracers: (from, to, seconds left, lifetime, color).
     tracers: Vec<(Vec3, Vec3, f32, f32, Color)>,
-    /// How far behind the newest snapshot remote players are drawn. Adapts to jitter, never below `min_interp_ticks`.
-    interp_ticks: f64,
-    min_interp_ticks: f64,
-    /// Recent worst gap between snapshots in ticks, decaying slowly.
-    jitter_ticks: f64,
     net_graph: NetGraph,
     /// Got packets we couldn't decode: the server runs a different build.
     incompatible: bool,
@@ -293,13 +279,9 @@ struct BombLed(Handle<StandardMaterial>);
 #[derive(Component)]
 struct DeathFade;
 
-/// Worst-case network stats over the last second, shown like CS's net_graph.
+/// Frame stats for the net_graph line, next to `netcode.graph`.
 #[derive(Default)]
 struct NetGraph {
-    last_snap: Option<Instant>,
-    max_gap_ms: f32,
-    max_fix_cm: f32,
-    starved: u32,
     frames: u32,
     worst_frame_ms: f32,
     since: Option<Instant>,
@@ -366,12 +348,7 @@ pub fn run(server: SocketAddr, lag_ms: u64, jitter_ms: u64, interp_ms: u64) {
             out_q: default(),
             in_q: default(),
         })
-        .insert_resource(Game {
-            hp: MAX_HP,
-            min_interp_ticks: interp_ms as f64 / 1000.0 * TICK_HZ,
-            interp_ticks: interp_ms as f64 / 1000.0 * TICK_HZ,
-            ..default()
-        })
+        .insert_resource(Game { hp: MAX_HP, netcode: NetClient::new(interp_ms), ..default() })
         .add_systems(Startup, setup)
         .add_systems(PostUpdate, debug_shot.run_if(|| std::env::var_os("FPS16_SHOT").is_some()))
         .add_systems(PreUpdate, receive)
@@ -740,39 +717,33 @@ fn net_tick(
     mouse: Res<ButtonInput<MouseButton>>,
     cursor: Single<&CursorOptions, With<PrimaryWindow>>,
 ) {
-    // Grow the buffer fast when snapshots arrive late, shrink it slowly once they don't.
-    let target = (g.jitter_ticks + 2.0).clamp(g.min_interp_ticks, 0.15 * TICK_HZ);
-    let rate = if target > g.interp_ticks { 0.2 } else { 0.005 };
-    g.interp_ticks += (target - g.interp_ticks) * rate;
-
-
     let axis = |pos, neg| keys.pressed(pos) as i32 as f32 - keys.pressed(neg) as i32 as f32;
     let active = cursor.grab_mode != CursorGrabMode::None;
-    g.seq += 1;
     let inp = Input {
-        seq: g.seq,
         forward: axis(KeyCode::KeyW, KeyCode::KeyS),
-        right: axis(KeyCode::KeyD, KeyCode::KeyA),
+        // FPS16_STRAFE runs left and right, for checking prediction without a person at the keys.
+        right: axis(KeyCode::KeyD, KeyCode::KeyA) + if std::env::var_os("FPS16_STRAFE").is_some() { (clock() as f32 * 3.0).sin().signum() } else { 0.0 },
         yaw: g.yaw,
         pitch: g.pitch,
         jump: keys.any_pressed([KeyCode::Space, KeyCode::Backspace]),
         walk: keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]),
         use_key: keys.pressed(KeyCode::KeyE),
         // FPS16_FIRE clicks repeatedly, for screenshots of effects.
-        fire: (active && !g.menu && mouse.pressed(MouseButton::Left)) || (std::env::var_os("FPS16_FIRE").is_some() && g.seq % 16 < 8),
+        fire: (active && !g.menu && mouse.pressed(MouseButton::Left)) || (std::env::var_os("FPS16_FIRE").is_some() && clock() % 0.125 < 0.0625),
         slot: std::mem::take(&mut g.want_slot),
         reload: std::mem::take(&mut g.want_reload),
         zoom: g.zoom,
         buy: std::mem::take(&mut g.want_buy),
         radio: std::mem::take(&mut g.want_radio),
-        view_tick: (server_tick(&g) - g.interp_ticks) as f32,
+        ..default()
     };
 
-    g.prev_pos = g.pred.pos;
-    if g.me.is_some() && g.hp > 0 {
-        let mut pred = g.pred;
-        let was_reloading = pred.reloading > 0;
-        if let Some((weapon, d)) = step_player(&mut pred, &inp) {
+    let was_reloading = g.pred.reloading > 0;
+    let events = g.netcode.input(encode(&inp), &mut predict);
+    sync_pred(&mut g);
+    if g.netcode.me.is_some() && g.hp > 0 {
+        let pred = g.pred;
+        if let Some((weapon, d)) = events.and_then(|e| decode::<Option<(Weapon, Vec3)>>(&e)).flatten() {
             let o = eye(&pred);
             g.sounds.push((Sound::Gun(weapon), 0.6));
             g.kick = 1.0;
@@ -803,40 +774,34 @@ fn net_tick(
                 g.sounds.push((Sound::Step(v), 0.3));
             }
         }
-        g.pred = pred;
     }
-    g.pending.push_back(inp);
-    while g.pending.len() > 128 {
-        g.pending.pop_front();
-    }
-    if g.seq % INPUT_EVERY == 0 {
-        let start = g.pending.len().saturating_sub(REDUNDANCY);
-        let inputs = g.pending.iter().skip(start).copied().collect();
-        let ping = g.ping_ms.round() as u16;
-        let packet = InputPacket { build: BUILD.into(), name: player_name(), ping, time: clock(), inputs };
+    if let Some(packet) = g.netcode.packet(player_name()) {
         net.send(encode(&packet));
     }
 }
 
-fn on_snapshot(g: &mut Game, snap: Snapshot) {
-    if snap.tick <= g.latest_tick {
-        return;
+/// Mirrors the predicted entity into `g.pred`, which the rest of the client reads.
+fn sync_pred(g: &mut Game) {
+    if let Some(p) = g.netcode.pred.as_ref().and_then(NetPlayer::from_entity) {
+        g.pred = p.state;
     }
-    g.latest_tick = snap.tick;
-    let sample = snap.tick as f64 - clock() * TICK_HZ;
-    g.tick_offset = Some(match g.tick_offset {
-        Some(o) if (sample - o).abs() < 8.0 => o + (sample - o) * 0.05,
-        _ => sample,
-    });
-    g.me = Some(snap.you);
-    g.players = snap.players.clone();
-    for p in &snap.players {
+}
+
+fn on_snapshot(g: &mut Game, snap: Snapshot) {
+    let Some(snap) = g.netcode.snapshot(snap, &mut predict) else { return };
+    let you = snap.you;
+    let players: Vec<NetPlayer> = snap.entities.iter().filter_map(NetPlayer::from_entity).collect();
+    let events: Vec<GameEvent> = snap.events.iter().filter_map(|e| decode(e)).collect();
+    let Some(round) = decode::<Round>(&snap.state) else { return g.incompatible = true };
+    sync_pred(g);
+    g.players = players.clone();
+    for p in &players {
         g.teams.insert(p.id, p.team);
         if g.names.get(&p.id) != Some(&p.name) {
             g.names.insert(p.id, p.name.clone());
         }
     }
-    for r in &snap.radio {
+    for r in events.iter().filter_map(|e| if let GameEvent::Radio(r) = e { Some(r) } else { None }) {
         g.sounds.push((Sound::Radio(r.call), 0.75));
         let line = format!("{} (RADIO): {}", name(g, r.from), r.call.text());
         g.chat.push_back((line, Instant::now()));
@@ -844,18 +809,18 @@ fn on_snapshot(g: &mut Game, snap: Snapshot) {
             g.chat.pop_front();
         }
     }
-    for h in &snap.hits {
-        if Some(h.attacker) == g.me {
+    for h in events.iter().filter_map(|e| if let GameEvent::Hit(h) = e { Some(h) } else { None }) {
+        if Some(h.attacker) == g.netcode.me {
             g.sounds.push((if h.headshot { Sound::Headshot } else { Sound::HitBody }, 0.7));
             if h.killed {
                 g.sounds.push((Sound::Kill, 0.6));
                 g.sounds.push((Sound::Voice(Announce::EnemyDown), 0.6));
             }
         }
-        if Some(h.victim) == g.me {
+        if Some(h.victim) == g.netcode.me {
             g.sounds.push((Sound::Hurt, 0.8));
             g.hurt_at = Some(Instant::now());
-        } else if let Some(v) = snap.players.iter().find(|p| p.id == h.victim) {
+        } else if let Some(v) = players.iter().find(|p| p.id == h.victim) {
             let at = v.state.pos + Vec3::Y * if h.headshot { 1.65 } else { 1.1 };
             g.fx.push(FxKind::Blood(at));
         }
@@ -869,9 +834,9 @@ fn on_snapshot(g: &mut Game, snap: Snapshot) {
             g.feed_version += 1;
         }
     }
-    let prev = g.round.replace(snap.round);
+    let prev = g.round.replace(round);
     if let Some(prev) = prev {
-        let r = snap.round;
+        let r = round;
         let mut say = |a: Announce, text: &str| {
             g.sounds.push((Sound::Voice(a), 0.9));
             g.announce = Some((text.into(), Instant::now()));
@@ -890,34 +855,22 @@ fn on_snapshot(g: &mut Game, snap: Snapshot) {
             _ => {}
         }
     }
-    if prev.map(|r| r.number) != Some(snap.round.number) {
+    if prev.map(|r| r.number) != Some(round.number) {
         // New round: everyone is back in spawn, so face the way the server spawned us.
-        if let Some(me) = snap.players.iter().find(|p| p.id == snap.you) {
+        if let Some(me) = players.iter().find(|p| p.id == you) {
             (g.yaw, g.pitch) = (me.state.yaw, 0.0);
         }
         g.died_at = None;
         g.explosion = None;
     }
-    if let Bomb::Exploded(pos) = snap.round.bomb {
+    if let Bomb::Exploded(pos) = round.bomb {
         if !matches!(prev.map(|r| r.bomb), Some(Bomb::Exploded(_))) {
             g.explosion = Some((pos, clock()));
             let volume = 1.0 / (1.0 + pos.distance(g.pred.pos) / 30.0);
             g.sounds.push((Sound::Explosion, volume));
         }
     }
-    if let Some(last) = g.net_graph.last_snap.replace(Instant::now()) {
-        let gap = last.elapsed().as_secs_f64();
-        g.net_graph.max_gap_ms = g.net_graph.max_gap_ms.max(gap as f32 * 1000.0);
-        // Decays by elapsed time (half-life 2 s) so one hitch, e.g. while the window opens, doesn't linger.
-        g.jitter_ticks = (gap * TICK_HZ).max(g.jitter_ticks * 0.5f64.powf(gap / 2.0));
-    }
-
-    if snap.echo > 0.0 {
-        let rtt_ms = ((clock() - snap.echo) as f32 - snap.echo_held).max(0.0) * 1000.0;
-        g.ping_ms = g.ping_ms * 0.9 + rtt_ms * 0.1;
-    }
-
-    if let Some(me) = snap.players.iter().find(|p| p.id == snap.you) {
+    if let Some(me) = players.iter().find(|p| p.id == you) {
         if me.money < g.money && g.round.is_some_and(|r| r.buy_secs > 0.0) {
             g.sounds.push((Sound::Buy, 0.6));
         }
@@ -932,27 +885,10 @@ fn on_snapshot(g: &mut Game, snap: Snapshot) {
         g.hp = me.hp;
         g.kills = me.kills;
         g.deaths = me.deaths;
-        while g.pending.front().is_some_and(|i| i.seq <= snap.ack) {
-            g.pending.pop_front();
-        }
-        let mut s = me.state;
-        if me.hp > 0 {
-            for inp in &g.pending {
-                step_player(&mut s, inp);
-            }
-        }
-        let err = g.pred.pos - s.pos;
-        g.net_graph.max_fix_cm = g.net_graph.max_fix_cm.max(err.length() * 100.0);
-        if err.length() < 2.0 {
-            g.smooth += err;
-        } else {
-            g.smooth = Vec3::ZERO;
-        }
-        g.prev_pos -= err;
-        g.pred = s;
     }
 
-    for s in snap.shots.iter().filter(|s| s.shooter != snap.you) {
+    let shots = events.iter().filter_map(|e| if let GameEvent::Shot(s) = e { Some(s) } else { None });
+    for s in shots.filter(|s| s.shooter != you) {
         let d = (s.to - s.from).normalize_or_zero();
         add_tracer(g, s.weapon, muzzle(s.from, d, s.weapon), s.to);
         if s.weapon != Weapon::Knife {
@@ -966,10 +902,6 @@ fn on_snapshot(g: &mut Game, snap: Snapshot) {
         let volume = 0.6 / (1.0 + s.from.distance(g.pred.pos) / 12.0);
         g.sounds.push((Sound::Gun(s.weapon), volume));
     }
-    g.snapshots.push_back(snap);
-    while g.snapshots.len() > 64 {
-        g.snapshots.pop_front();
-    }
 }
 
 fn render_self(
@@ -982,13 +914,12 @@ fn render_self(
     if let Projection::Perspective(p) = &mut *projection {
         p.fov = if g.zoom { ZOOM_FOV } else { FOV };
     }
-    g.smooth *= (-time.delta_secs() * 15.0).exp();
+    let pos = g.netcode.render_pos(fixed.overstep_fraction(), time.delta_secs());
     if let Some((_, eye, yaw, pitch)) = g.spectate.filter(|_| spectating(&g)) {
         cam.translation = eye;
         cam.rotation = look_rot(yaw, pitch);
         return;
     }
-    let pos = g.prev_pos.lerp(g.pred.pos, fixed.overstep_fraction()) + g.smooth;
     cam.translation = pos + Vec3::Y * EYE;
     let (side, up) = punch(&g.pred);
     cam.rotation = look_rot(g.yaw + side, g.pitch + up);
@@ -1003,38 +934,22 @@ fn render_remotes(
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
 ) {
-    let render_tick = server_tick(&g) - g.interp_ticks;
-    if g.snapshots.back().is_some_and(|s| render_tick > s.tick as f64) {
-        g.net_graph.starved += 1;
-    }
-    let Some(newest) = g.snapshots.back() else { return };
-    let (a, b) = g
-        .snapshots
-        .iter()
-        .zip(g.snapshots.iter().skip(1))
-        .find(|(a, b)| a.tick as f64 <= render_tick && render_tick <= b.tick as f64)
-        .unwrap_or((newest, newest));
-    let f = if b.tick > a.tick { ((render_tick - a.tick as f64) / (b.tick - a.tick) as f64) as f32 } else { 0.0 };
-    // Starved: keep players moving on their last velocity for a moment rather than freezing them.
-    let extrapolate = ((render_tick - newest.tick as f64) / TICK_HZ).clamp(0.0, 0.1) as f32;
-
-    let my_team = g.me.and_then(|me| g.teams.get(&me)).copied();
-    let carrier = match newest.round.bomb {
-        Bomb::Carried(id) => Some(id),
+    let views = g.netcode.interpolate();
+    let my_team = g.netcode.me.and_then(|me| g.teams.get(&me)).copied();
+    let carrier = match g.round.map(|r| r.bomb) {
+        Some(Bomb::Carried(id)) => Some(id),
         _ => None,
     };
     let (mut spectate, mut carrier_pos) = (None, None);
     let mut seen = HashMap::new();
-    for p in b.players.iter().filter(|p| Some(p.id) != g.me) {
-        let from = a.players.iter().find(|q| q.id == p.id).map_or(p.state, |q| q.state);
-        let pos = from.pos.lerp(p.state.pos, f) + p.state.vel * extrapolate;
-        let yaw = from.yaw + wrap_angle(p.state.yaw - from.yaw) * f;
-        let pitch = from.pitch + (p.state.pitch - from.pitch) * f;
+    for v in &views {
+        let Some(p) = NetPlayer::from_entity(&v.entity) else { continue };
+        let (pos, yaw, pitch) = (p.state.pos, p.state.yaw, p.state.pitch);
         // Dead as soon as we hear of it (the body falls and stays); hidden while a respawn is being interpolated
         // past, so the teleport is never drawn as a slide across the map.
-        let alive_in = |s: &Snapshot| s.players.iter().find(|q| q.id == p.id).is_some_and(|q| q.hp > 0);
-        let alive = alive_in(newest) && alive_in(a) && p.hp > 0;
-        let life = if alive { Life::Alive } else if !alive_in(newest) { Life::Dead } else { Life::Respawning };
+        let alive_now = g.players.iter().any(|q| q.id == p.id && q.hp > 0);
+        let alive = alive_now && p.hp > 0 && !v.teleporting;
+        let life = if alive { Life::Alive } else if !alive_now { Life::Dead } else { Life::Respawning };
         if alive && spectate.is_none() && Some(p.team) == my_team {
             spectate = Some((p.id, pos + Vec3::Y * EYE, yaw, pitch));
         }
@@ -1121,10 +1036,6 @@ fn render_remotes(
     }
 }
 
-fn wrap_angle(a: f32) -> f32 {
-    (a + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
-}
-
 #[allow(clippy::type_complexity)]
 fn hud(
     mut texts: ParamSet<(
@@ -1138,24 +1049,25 @@ fn hud(
     mut g: ResMut<Game>,
     time: Res<Time>,
 ) {
-    let ping = g.ping_ms;
-    let interp = g.interp_ticks / TICK_HZ * 1000.0;
-    let n = &mut g.net_graph;
+    let ping = g.netcode.ping_ms;
+    let interp = g.netcode.interp_ticks / TICK_HZ * 1000.0;
+    let g = &mut *g;
+    let (n, net) = (&mut g.net_graph, &mut g.netcode.graph);
     n.frames += 1;
     n.worst_frame_ms = n.worst_frame_ms.max(time.delta_secs() * 1000.0);
     if n.since.is_none_or(|t| t.elapsed() >= Duration::from_secs(1)) {
         n.line = format!(
             "fps {} (worst frame {:.0} ms)   ping {ping:.0} ms   worst snapshot gap {:.0} ms   correction {:.0} cm   interp {interp:.0} ms, starved {} frames",
-            n.frames, n.worst_frame_ms, n.max_gap_ms, n.max_fix_cm, n.starved
+            n.frames, n.worst_frame_ms, net.max_gap_ms, net.max_fix_cm, net.starved
         );
         if std::env::var_os("FPS16_NETLOG").is_some() {
             println!("{}", n.line);
         }
-        (n.max_gap_ms, n.max_fix_cm, n.starved, n.since) = (0.0, 0.0, 0, Some(Instant::now()));
+        (net.max_gap_ms, net.max_fix_cm, net.starved, n.since) = (0.0, 0.0, 0, Some(Instant::now()));
         (n.frames, n.worst_frame_ms) = (0, 0.0);
     }
-    let status = match (g.incompatible, g.me) {
-        _ if g.me.is_none() && g.wrong_build.is_some() => format!(
+    let status = match (g.incompatible, g.netcode.me) {
+        _ if g.netcode.me.is_none() && g.wrong_build.is_some() => format!(
             "SERVER IS ON BUILD {}, YOU HAVE BUILD {BUILD} - restart the game to update",
             g.wrong_build.as_deref().unwrap_or("?")
         ),
@@ -1165,7 +1077,7 @@ fn hud(
         _ => "You are dead - spectating".into(),
     };
     texts.p0().0 = status;
-    let alive = g.hp > 0 && g.me.is_some();
+    let alive = g.hp > 0 && g.netcode.me.is_some();
     texts.p1().0 = if alive { g.hp.to_string() } else { String::new() };
     texts.p2().0 = if alive { g.armor.to_string() } else { String::new() };
     texts.p3().0 = format!("$ {}", g.money);
@@ -1196,7 +1108,7 @@ fn muzzle(o: Vec3, d: Vec3, weapon: Weapon) -> Vec3 {
 
 /// Dead and the fade to black is done: watch a teammate instead.
 fn spectating(g: &Game) -> bool {
-    g.me.is_some() && g.hp <= 0 && g.died_at.is_none_or(|t| t.elapsed().as_secs_f32() > 1.6)
+    g.netcode.me.is_some() && g.hp <= 0 && g.died_at.is_none_or(|t| t.elapsed().as_secs_f32() > 1.6)
 }
 
 fn render_bomb(
@@ -1251,20 +1163,20 @@ fn scoreboard(
 ) {
     let Some(r) = g.round else { return };
     let secs = r.time_left.ceil() as u32;
-    let my_team = g.me.and_then(|me| g.teams.get(&me)).copied();
+    let my_team = g.netcode.me.and_then(|me| g.teams.get(&me)).copied();
     let message = match (r.phase, r.bomb, r.progress) {
         (Phase::End { winner }, Bomb::Exploded(_), _) => format!("{} win - the bomb exploded", winner.name()),
         (Phase::End { winner }, Bomb::Defused(_), _) => format!("{} win - the bomb was defused", winner.name()),
         (Phase::End { winner }, ..) => format!("{} win", winner.name()),
         (Phase::Freeze, ..) => format!("Round {} - get ready", r.number),
-        (_, _, Some((id, p))) if Some(id) == g.me => {
+        (_, _, Some((id, p))) if Some(id) == g.netcode.me => {
             let verb = if matches!(r.bomb, Bomb::Planted(_)) { "Defusing" } else { "Planting" };
             let bar = "#".repeat((p * 20.0) as usize) + &".".repeat(20 - (p * 20.0) as usize);
             format!("{verb} [{bar}]")
         }
         (_, Bomb::Planted(_), Some(_)) => "BOMB PLANTED - being defused!".into(),
         (_, Bomb::Planted(_), None) => "BOMB PLANTED".into(),
-        (_, Bomb::Carried(id), _) if Some(id) == g.me => "You have the bomb - hold E on A or B to plant".into(),
+        (_, Bomb::Carried(id), _) if Some(id) == g.netcode.me => "You have the bomb - hold E on A or B to plant".into(),
         (_, Bomb::Dropped(_), _) if my_team == Some(Team::T) => "The bomb was dropped - pick it up".into(),
         _ => String::new(),
     };
@@ -1396,7 +1308,7 @@ fn viewmodel(
     g.kick *= (-dt * 16.0).exp();
     let slash = if held == Weapon::Knife { g.kick } else { 0.0 };
 
-    let show = g.hp > 0 && g.me.is_some() && !g.zoom;
+    let show = g.hp > 0 && g.netcode.me.is_some() && !g.zoom;
     for (vm, mut t, mut vis) in &mut q {
         *vis = if show && vm.0 == held { Visibility::Inherited } else { Visibility::Hidden };
         let offset = Vec3::new(anim.sway.x, anim.sway.y - 0.15 * dip - 0.3 * draw, 0.05 * kick) + bob;
@@ -1422,7 +1334,7 @@ fn buy_menu_hud(
 ) {
     let show = g.menu || std::env::var_os("FPS16_BUYMENU").is_some();
     **panel = if show { Visibility::Inherited } else { Visibility::Hidden };
-    let (Some(r), Some(team)) = (g.round, g.me.and_then(|me| g.teams.get(&me))) else { return };
+    let (Some(r), Some(team)) = (g.round, g.netcode.me.and_then(|me| g.teams.get(&me))) else { return };
     title.0 = format!("BUY   ${}   {:.0}s", g.money, r.buy_secs.ceil());
     let menu = buy_menu(*team);
     for (row, mut text, mut color) in &mut rows {
@@ -1474,17 +1386,6 @@ fn kill_feed(mut commands: Commands, feed: Single<Entity, With<KillFeed>>, mut g
 fn hurt_flash(mut flash: Single<&mut BackgroundColor, With<HurtFlash>>, g: Res<Game>) {
     let alpha = g.hurt_at.map_or(0.0, |t| (0.35 * (1.0 - t.elapsed().as_secs_f32() / 0.4)).max(0.0));
     flash.0 = Color::srgba(0.8, 0.0, 0.0, alpha);
-}
-
-/// Monotonic seconds since the client started.
-fn clock() -> f64 {
-    static START: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);
-    START.elapsed().as_secs_f64()
-}
-
-/// Estimated current server tick (fractional), as of the latest snapshot's arrival.
-fn server_tick(g: &Game) -> f64 {
-    g.tick_offset.map_or(0.0, |o| clock() * TICK_HZ + o)
 }
 
 fn scope(mut vis: Single<&mut Visibility, With<Scope>>, g: Res<Game>) {
@@ -1772,7 +1673,7 @@ fn mountain_ring(radius: f32, low: f32, high: f32, color: [f32; 3], seed: f32) -
 
 /// For checking visuals without a person at the screen: `FPS16_SHOT=out.png` saves one screenshot after
 /// `FPS16_SHOT_AT` seconds (default 4) and quits; `FPS16_POSE="x,y,z,yaw,pitch"` places the camera (degrees);
-/// `FPS16_FIRE` keeps clicking fire.
+/// `FPS16_FIRE` keeps clicking fire, `FPS16_STRAFE` runs left and right.
 #[derive(Resource)]
 struct ShotTarget(Handle<Image>);
 
@@ -1924,7 +1825,7 @@ fn score_panel(
                 (_, true) => "Bomb",
                 _ => "",
             };
-            let you = if Some(p.id) == g.me { ">" } else { " " };
+            let you = if Some(p.id) == g.netcode.me { ">" } else { " " };
             let ping = if p.bot { "BOT".to_string() } else { p.ping.to_string() };
             out += &format!("{you}{:<20}{tag:<13}{:>6}{:>7}{:>9}\n", p.name, p.kills, p.deaths, ping);
         }
@@ -1979,7 +1880,7 @@ fn spawn_c4(commands: &mut Commands, meshes: &mut Assets<Mesh>, mats: &mut Asset
 
 fn target_id(mut q: Single<(&mut Text, &mut TextColor), With<TargetText>>, g: Res<Game>) {
     let (text, color) = &mut *q;
-    let my_team = g.me.and_then(|me| g.teams.get(&me)).copied();
+    let my_team = g.netcode.me.and_then(|me| g.teams.get(&me)).copied();
     let player = |id: u32| g.players.iter().find(|p| p.id == id);
     let (line, team) = match (g.hp > 0, g.aim_target, g.spectate) {
         (true, Some(id), _) => match player(id) {

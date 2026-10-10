@@ -3,7 +3,8 @@
 Deadline: playable before 00:00. One weapon, one simple map.
 
 ## Run
-- `cargo run --release -- server [port]` (headless, default 5000)
+- `cargo run --release -- server [port] [--game game.wasm]` (headless, default 5000; `--game` runs the game from a
+  wasm module instead of the linked-in one: `cargo build -p dust --release --target wasm32-unknown-unknown`)
 - `cargo run --release -- client <host:port> [--lag ms] [--jitter ms] [--interp ms]` (`--lag`/`--jitter` fake delay and bursty arrival to test netcode, `--interp` is the minimum remote-player buffer, default 50)
 
 ## Distribution
@@ -38,7 +39,7 @@ Deadline: playable before 00:00. One weapon, one simple map.
 - HUD: HP/armor/money, weapon + ammo, buy menu, kill feed, red flash when hit. Short tracers (AWP longer).
 
 ## Rounds (bomb defusal)
-- Teams T and CT, humans auto-balanced on join, friendly fire off. Server-side bots fill both teams to 3v3 (or to the
+- Teams T and CT, humans auto-balanced on join, friendly fire off. Server-side bots fill both teams to 6v6 (or to the
   bigger human team); they path over the map grid via a random detour point each round (Ts share a random site, some lurk;
   CTs hold spots next to cover that watch the T entrance and move between them, facing the entrance), strafe in
   fights and only shoot once slowed down (counter-strafing), plant/defuse, call out spotted enemies so teammates rotate, and
@@ -73,6 +74,19 @@ Deadline: playable before 00:00. One weapon, one simple map.
   the voice and show a yellow chat line.
 - `FPS16_SHOT=out.png [FPS16_POSE="x,y,z,yaw,pitch"]` renders off-screen, saves a screenshot and quits, for checking
   visuals without a person at the screen.
+
+## Structure
+- `games/dust`: the game (movement, weapons, map, bots, rounds, economy, snapshot format). Builds natively and to wasm.
+- `sdk`: the host/game boundary. `ServerGame` is what the server host calls; `export_server!` exposes it from wasm
+  through one shared byte buffer, with `log` as the only import. A game's world is `Entity`s (id, pos, vel, yaw,
+  pitch, a `teleport` counter, opaque data) plus an opaque state blob and audience-addressed events; each tick returns
+  them as a `Frame`. `History` is the lag compensation rewind games use with the `view_tick` the host passes in.
+- Root crate: the host. Networking (`src/net.rs` envelope, `src/server.rs` transport, input queues, link stats),
+  `src/netclient.rs` (clock sync, input stamping and redundancy, prediction/reconciliation through the game's
+  `predict` step, entity interpolation, net_graph stats), wasmtime loader (`src/wasm.rs`: memory cap, 1 s per call
+  limit), and for now the rest of the client.
+- Goal: games become downloadable wasm modules that own rules, assets and HUD; the client host becomes a generic
+  renderer. Next: the client half of the boundary.
 
 ## Netcode (server authoritative, Valve-style)
 - Plain UDP, postcard-serialized messages. Fixed tick 128 Hz on both sides; snapshots sent at 32 Hz, input packets at 64 Hz

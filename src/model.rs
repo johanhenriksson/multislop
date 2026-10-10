@@ -1,8 +1,8 @@
 //! Player and weapon models built from primitives, so the game ships as a single binary with no asset files.
 //! Everything fits inside the hit capsule (radius 0.4, height 1.8). Models face -Z with the origin at the feet.
 
-use crate::shared::{RADIUS, Team};
-use crate::weapons::{ALL_WEAPONS, Weapon};
+use dust::shared::{RADIUS, Team};
+use dust::weapons::{ALL_WEAPONS, Weapon};
 use bevy::prelude::*;
 
 /// Moving parts of a player model: legs swing with speed, arms and rifle follow the aim pitch.

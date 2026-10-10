@@ -1,6 +1,6 @@
 //! Sound effects synthesized at startup, so the game stays a single binary with no asset files.
 
-use crate::weapons::Weapon;
+use dust::weapons::Weapon;
 use std::f32::consts::TAU;
 
 const RATE: u32 = 44100;
@@ -142,8 +142,8 @@ pub const VOICE_GO: &[u8] = include_bytes!("../assets/voice/go.wav");
 pub const VOICE_ENEMY_DOWN: &[u8] = include_bytes!("../assets/voice/enemy_down.wav");
 
 /// Team radio lines, same voice.
-pub fn radio_line(call: crate::shared::Radio) -> &'static [u8] {
-    use crate::shared::Radio::*;
+pub fn radio_line(call: dust::shared::Radio) -> &'static [u8] {
+    use dust::shared::Radio::*;
     match call {
         EnemySpotted => include_bytes!("../assets/voice/enemy_spotted.wav"),
         NeedBackup => include_bytes!("../assets/voice/need_backup.wav"),
@@ -307,7 +307,7 @@ fn wav_at(samples: &[f32], rate: u32) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use crate::weapons::Weapon;
+    use dust::weapons::Weapon;
 
     #[test]
     fn valid_wav() {

@@ -1,0 +1,792 @@
+//! Bomb defusal: rounds, economy, bots and lag-compensated hitscan. The host owns the network and calls in through
+//! `ServerGame`.
+
+use crate::bot::{Bot, Seen, can_see, in_view};
+use crate::map::MAP;
+use crate::shared::*;
+use crate::weapons::*;
+use glam::Vec3;
+use sdk::{Entity, Frame, History, ServerGame, log};
+use std::collections::BTreeMap;
+
+type Players = BTreeMap<u32, Player>;
+
+struct Player {
+    id: u32,
+    state: PlayerState,
+    hp: i32,
+    armor: u8,
+    money: u32,
+    kills: u32,
+    deaths: u32,
+    team: Team,
+    /// Holding E as of the last simulated input.
+    using: bool,
+    /// No radio from this player before this tick.
+    radio_quiet_until: u32,
+    /// Inputs received since the last tick, applied in order on the next one.
+    inputs: Vec<Input>,
+    /// Bumped on every respawn; see `sdk::Entity::teleport`.
+    teleport: u8,
+    /// Server-controlled player filling a team slot.
+    bot: Option<Bot>,
+    name: String,
+    ping: u16,
+}
+
+impl Player {
+    fn new(id: u32, name: String, team: Team, bot: Option<Bot>) -> Player {
+        Player {
+            id,
+            state: PlayerState::default(),
+            hp: MAX_HP,
+            armor: 0,
+            money: START_MONEY,
+            kills: 0,
+            deaths: 0,
+            team,
+            using: false,
+            radio_quiet_until: 0,
+            inputs: Vec::new(),
+            teleport: 0,
+            bot,
+            name,
+            ping: 0,
+        }
+    }
+}
+
+/// Server-side round state; `Round` is the part clients see.
+struct Match {
+    round: Round,
+    phase_ends: u32,
+    bomb_explodes: u32,
+    /// Who is planting or defusing, and since which tick.
+    progress: Option<(u32, u32)>,
+    /// Buying is allowed until this tick.
+    buy_until: u32,
+    /// Consecutive round losses per team, for the loss bonus.
+    loss_streak: [u32; 2],
+    /// The site the T bots go for this round.
+    t_site: char,
+}
+
+const fn ticks(secs: f32) -> u32 {
+    (secs * TICK_HZ as f32) as u32
+}
+
+pub struct Dust {
+    m: Match,
+    players: Players,
+    /// Positions of every player per tick, for lag compensation.
+    history: History,
+    tick: u32,
+    next_id: u32,
+    /// Shots, damage and radio this tick.
+    shots: Vec<Shot>,
+    hits: Vec<Hit>,
+    radio: Vec<RadioCall>,
+}
+
+impl Dust {
+    pub fn new() -> Dust {
+        Dust {
+            m: new_match(),
+            players: Players::new(),
+            history: History::new(MAX_REWIND_TICKS as usize + 8),
+            tick: 0,
+            next_id: 1,
+            shots: Vec::new(),
+            hits: Vec::new(),
+            radio: Vec::new(),
+        }
+    }
+}
+
+impl ServerGame for Dust {
+    fn connect(&mut self, name: &str) -> u32 {
+        let team = smaller_team(&self.players);
+        let name = clean_name(name);
+        let id = self.next_id;
+        self.next_id += 1;
+        log(&format!("{name} (player {id}) joined as {}", team.name()));
+        // Freeze time: spawn now. Otherwise sit out (spectating) until the next round.
+        let freeze = self.m.round.phase == Phase::Freeze;
+        let index = self.players.values().filter(|c| c.team == team).count();
+        let state = spawn_state(team, index);
+        self.players.insert(id, Player { state, hp: if freeze { MAX_HP } else { 0 }, ..Player::new(id, name, team, None) });
+        id
+    }
+
+    fn disconnect(&mut self, id: u32) {
+        let Some(c) = self.players.remove(&id) else { return };
+        log(&format!("{} left", c.name));
+        if self.m.round.bomb == Bomb::Carried(c.id) {
+            self.m.round.bomb = Bomb::Dropped(c.state.pos);
+        }
+    }
+
+    fn ping(&mut self, id: u32, ms: u16) {
+        if let Some(c) = self.players.get_mut(&id) {
+            c.ping = ms;
+        }
+    }
+
+    fn input(&mut self, id: u32, seq: u32, view_tick: f32, input: &[u8]) {
+        if let (Some(c), Some(inp)) = (self.players.get_mut(&id), decode::<Input>(input)) {
+            c.inputs.push(Input { seq, view_tick, ..inp });
+        }
+    }
+
+    fn tick(&mut self) -> Frame {
+        balance_bots(&mut self.m, &mut self.players, &mut self.next_id);
+        run_inputs(&self.m, &mut self.players, &self.history, self.tick, &mut self.shots, &mut self.hits, &mut self.radio);
+        self.tick += 1;
+        update_match(&mut self.m, &mut self.players, self.tick);
+        let entities = entities(&self.players);
+        self.history.record(self.tick, &entities);
+
+        let everyone = |e: Event| sdk::Event { to: None, data: encode(&e) };
+        let mut events: Vec<sdk::Event> = self.shots.drain(..).map(|s| everyone(Event::Shot(s))).collect();
+        events.extend(self.hits.drain(..).map(|h| everyone(Event::Hit(h))));
+        for r in self.radio.drain(..) {
+            let Some(team) = self.players.get(&r.from).map(|c| c.team) else { continue };
+            let to = self.players.values().filter(|c| c.team == team).map(|c| c.id).collect();
+            events.push(sdk::Event { to: Some(to), data: encode(&Event::Radio(r)) });
+        }
+        Frame { state: encode(&net_round(&self.m, self.tick)), entities, events }
+    }
+}
+
+fn entities(players: &Players) -> Vec<Entity> {
+    players
+        .values()
+        .map(|c| {
+            let p = NetPlayer {
+                id: c.id,
+                state: c.state,
+                hp: c.hp,
+                armor: c.armor,
+                money: c.money,
+                kills: c.kills,
+                deaths: c.deaths,
+                team: c.team,
+                bot: c.bot.is_some(),
+                name: c.name.clone(),
+                ping: c.ping,
+            };
+            p.entity(c.teleport)
+        })
+        .collect()
+}
+
+/// One tick of player simulation: bots decide, then every player's inputs since the last tick are applied.
+fn run_inputs(
+    game: &Match,
+    players: &mut Players,
+    history: &History,
+    tick: u32,
+    shots: &mut Vec<Shot>,
+    hits: &mut Vec<Hit>,
+    radio: &mut Vec<RadioCall>,
+) {
+    let seen: Vec<Seen> =
+        players.values().map(|c| Seen { id: c.id, team: c.team, pos: c.state.pos, alive: c.hp > 0 }).collect();
+    // An enemy any living teammate (bot or human) can see right now, so bots can rotate to help.
+    let callout = |team: Team| {
+        let mut spotters = players.values().filter(|c| c.team == team && c.hp > 0);
+        let enemies = || seen.iter().filter(|p| p.alive && p.team != team);
+        spotters.find_map(|c| enemies().find(|p| in_view(&c.state, p.pos) && can_see(eye(&c.state), p.pos)).map(|p| p.pos))
+    };
+    let callouts = [callout(Team::T), callout(Team::Ct)];
+    for c in players.values_mut() {
+        if let Some(bot) = &mut c.bot {
+            let inp = bot.think(c.id, &c.state, c.team, &game.round, &seen, callouts[c.team as usize], game.t_site, tick);
+            if let Some(call) = bot.radio.take() {
+                radio.push(RadioCall { from: c.id, call });
+            }
+            c.inputs.push(inp);
+        }
+    }
+
+    let ids: Vec<u32> = players.keys().copied().collect();
+    for id in ids {
+        for inp in std::mem::take(&mut player_mut(players, id).inputs) {
+            let c = player_mut(players, id);
+            c.using = inp.use_key;
+            if c.hp <= 0 {
+                continue;
+            }
+            if inp.buy != 0 {
+                try_buy(game, c, inp.buy, tick);
+            }
+            if let Some(&call) = Radio::MENU.get((inp.radio as usize).wrapping_sub(1)) {
+                if tick >= c.radio_quiet_until {
+                    radio.push(RadioCall { from: c.id, call });
+                    c.radio_quiet_until = tick + ticks(2.0);
+                }
+            }
+            if let Some((weapon, dir)) = step_player(&mut c.state, &inp) {
+                let (shooter, from) = (c.id, eye(&c.state));
+                let (to, hit) = fire(players, history, tick, shooter, weapon, (from, dir), inp.view_tick);
+                shots.push(Shot { shooter, weapon, from, to });
+                hits.extend(hit);
+            }
+        }
+    }
+}
+
+/// Printable, at most 16 characters, never empty.
+fn clean_name(raw: &str) -> String {
+    let name: String = raw.chars().filter(|c| !c.is_control()).take(16).collect();
+    if name.trim().is_empty() { "player".into() } else { name.trim().into() }
+}
+
+fn bot_name(id: u32) -> String {
+    const NAMES: [&str; 16] =
+        ["Albert", "Bill", "Cliffe", "Gunner", "Hans", "Ivan", "Joe", "Kurt", "Lester", "Moe", "Ringo", "Sergei", "Vladimir", "Yanni", "Zach", "Wolf"];
+    format!("BOT {}", NAMES[id as usize % NAMES.len()])
+}
+
+/// Balances humans only; bots then fill whichever side is short.
+fn smaller_team(players: &Players) -> Team {
+    let humans = players.values().filter(|c| c.bot.is_none());
+    let ts = humans.clone().filter(|c| c.team == Team::T).count();
+    if ts * 2 <= humans.count() { Team::T } else { Team::Ct }
+}
+
+/// Teams always have at least this many players; bots fill the gaps.
+const TEAM_SIZE: usize = 6;
+
+/// Adds or removes bots so both teams are TEAM_SIZE, or the bigger human team if larger. No humans, no bots.
+fn balance_bots(m: &mut Match, players: &mut Players, next_id: &mut u32) {
+    let humans = |team: Team| players.values().filter(|c| c.bot.is_none() && c.team == team).count();
+    let (ts, cts) = (humans(Team::T), humans(Team::Ct));
+    let size = if ts + cts == 0 { 0 } else { ts.max(cts).max(TEAM_SIZE) };
+    for (team, human_count) in [(Team::T, ts), (Team::Ct, cts)] {
+        let want = size - human_count;
+        let mut bots: Vec<u32> = players.values().filter(|c| c.bot.is_some() && c.team == team).map(|c| c.id).collect();
+        while bots.len() > want {
+            let c = players.remove(&bots.pop().unwrap()).unwrap();
+            if m.round.bomb == Bomb::Carried(c.id) {
+                m.round.bomb = Bomb::Dropped(c.state.pos);
+            }
+        }
+        for _ in bots.len()..want {
+            let id = *next_id;
+            *next_id += 1;
+            let index = players.values().filter(|c| c.team == team).count();
+            let freeze = m.round.phase == Phase::Freeze;
+            let state = spawn_state(team, index);
+            let hp = if freeze { MAX_HP } else { 0 };
+            players.insert(id, Player { state, hp, ..Player::new(id, bot_name(id), team, Some(Bot::new(id))) });
+            log(&format!("{} joined {}", bot_name(id), team.name()));
+        }
+    }
+}
+
+fn spawn_state(team: Team, index: usize) -> PlayerState {
+    let spawns = MAP.spawns(team);
+    // T spawn is south facing north (-z), CT the other way round.
+    let yaw = if team == Team::T { 0.0 } else { std::f32::consts::PI };
+    let mut s = PlayerState { pos: spawns[index % spawns.len()], yaw, frozen: true, ..Default::default() };
+    s.loadout(None, Weapon::default_pistol(team));
+    s
+}
+
+fn new_match() -> Match {
+    let round = Round {
+        number: 0,
+        phase: Phase::End { winner: Team::Ct },
+        time_left: 0.0,
+        buy_secs: 0.0,
+        score: [0, 0],
+        bomb: Bomb::None,
+        progress: None,
+    };
+    Match { round, phase_ends: 0, bomb_explodes: 0, progress: None, buy_until: 0, loss_streak: [0, 0], t_site: 'A' }
+}
+
+fn start_round(m: &mut Match, players: &mut Players, tick: u32) {
+    m.round.number += 1;
+    m.round.phase = Phase::Freeze;
+    m.phase_ends = tick + ticks(FREEZE_SECS);
+    m.progress = None;
+    let mut by_id: Vec<&mut Player> = players.values_mut().collect();
+    by_id.sort_by_key(|c| c.id);
+    let mut counts = [0, 0];
+    for c in by_id {
+        let n = &mut counts[c.team as usize];
+        let kept = (c.hp > 0 && m.round.number > 1).then_some((c.state.primary, c.state.secondary));
+        c.state = spawn_state(c.team, *n);
+        c.teleport = c.teleport.wrapping_add(1);
+        match kept {
+            // Survivors keep their guns, with ammo topped up.
+            Some((primary, secondary)) => c.state.loadout(primary, secondary),
+            None => c.armor = 0,
+        }
+        if m.round.number == 1 {
+            c.money = START_MONEY;
+        }
+        c.hp = MAX_HP;
+        *n += 1;
+        if c.bot.is_some() {
+            bot_buy(c);
+        }
+    }
+    m.buy_until = m.phase_ends + ticks(BUY_SECS);
+    m.t_site = if (tick.wrapping_mul(2246822519) >> 13) & 1 == 0 { 'A' } else { 'B' };
+    let ts: Vec<u32> = players.values().filter(|c| c.team == Team::T).map(|c| c.id).collect();
+    m.round.bomb = match ts.len() {
+        0 => Bomb::None,
+        n => Bomb::Carried(ts[(tick.wrapping_mul(2654435761) >> 16) as usize % n]),
+    };
+    log(&format!("round {} starts, T bots go {}", m.round.number, m.t_site));
+}
+
+fn end_round(m: &mut Match, players: &mut Players, tick: u32, winner: Team, why: &str) {
+    m.round.score[winner as usize] += 1;
+    let loser = if winner == Team::T { Team::Ct } else { Team::T };
+    m.loss_streak[winner as usize] = 0;
+    let bonus = LOSS_BONUS * m.loss_streak[loser as usize].min(3);
+    m.loss_streak[loser as usize] += 1;
+    for c in players.values_mut() {
+        let reward = if c.team == winner { WIN_REWARD } else { LOSS_REWARD + bonus };
+        c.money = (c.money + reward).min(MAX_MONEY);
+    }
+    m.round.phase = Phase::End { winner };
+    m.phase_ends = tick + ticks(ROUND_END_SECS);
+    m.progress = None;
+    let [t, ct] = m.round.score;
+    log(&format!("round {}: {} win ({why})  T {t} - {ct} CT", m.round.number, winner.name()));
+}
+
+/// Advances the round: freeze/live/end transitions, bomb pickup, plant, defuse, explosion and win conditions.
+fn update_match(m: &mut Match, players: &mut Players, tick: u32) {
+    if players.is_empty() {
+        *m = new_match();
+        return;
+    }
+    match m.round.phase {
+        Phase::End { .. } => {
+            if tick >= m.phase_ends {
+                start_round(m, players, tick);
+            }
+            return;
+        }
+        Phase::Freeze => {
+            if tick >= m.phase_ends {
+                m.round.phase = Phase::Live;
+                m.phase_ends = tick + ticks(ROUND_SECS);
+                players.values_mut().for_each(|c| c.state.frozen = false);
+            }
+            return;
+        }
+        Phase::Live => {}
+    }
+
+    let alive = |c: &&Player| c.hp > 0;
+    match m.round.bomb {
+        Bomb::Carried(id) => {
+            let carrier = players.values().find(|c| c.id == id);
+            match carrier {
+                Some(c) if c.hp > 0 => {
+                    let planting = c.using && c.state.on_ground && MAP.site_at(c.state.pos).is_some();
+                    m.progress = planting.then(|| m.progress.filter(|p| p.0 == id).unwrap_or((id, tick)));
+                    if m.progress.is_some_and(|(_, since)| tick - since >= ticks(PLANT_SECS)) {
+                        let site = MAP.site_at(c.state.pos).unwrap_or('?');
+                        log(&format!("round {}: bomb planted at {site}", m.round.number));
+                        m.round.bomb = Bomb::Planted(c.state.pos);
+                        let planter = player_mut(players, id);
+                        planter.money = (planter.money + OBJECTIVE_REWARD).min(MAX_MONEY);
+                        m.bomb_explodes = tick + ticks(BOMB_SECS);
+                        m.progress = None;
+                    }
+                }
+                Some(c) => m.round.bomb = Bomb::Dropped(c.state.pos),
+                None => m.round.bomb = Bomb::None,
+            }
+        }
+        Bomb::Dropped(pos) => {
+            let near = |c: &&Player| c.team == Team::T && c.state.pos.distance(pos) < BOMB_REACH;
+            if let Some(c) = players.values().filter(alive).find(near) {
+                m.round.bomb = Bomb::Carried(c.id);
+            }
+        }
+        Bomb::Planted(pos) => {
+            let can_defuse = |c: &&Player| {
+                c.team == Team::Ct && c.using && c.state.on_ground && c.state.pos.distance(pos) < BOMB_REACH
+            };
+            let defusers: Vec<u32> = players.values().filter(alive).filter(can_defuse).map(|c| c.id).collect();
+            m.progress = match m.progress {
+                Some(p) if defusers.contains(&p.0) => Some(p),
+                _ => defusers.first().map(|&id| (id, tick)),
+            };
+            if let Some((defuser, _)) = m.progress.filter(|(_, since)| tick - since >= ticks(DEFUSE_SECS)) {
+                m.round.bomb = Bomb::Defused(pos);
+                let defuser = player_mut(players, defuser);
+                defuser.money = (defuser.money + OBJECTIVE_REWARD).min(MAX_MONEY);
+                return end_round(m, players, tick, Team::Ct, "bomb defused");
+            }
+            if tick >= m.bomb_explodes {
+                m.round.bomb = Bomb::Exploded(pos);
+                for c in players.values_mut().filter(|c| c.hp > 0 && c.state.pos.distance(pos) < BOMB_RADIUS) {
+                    c.hp = 0;
+                    c.deaths += 1;
+                }
+                return end_round(m, players, tick, Team::T, "bomb exploded");
+            }
+        }
+        Bomb::None | Bomb::Exploded(_) | Bomb::Defused(_) => {}
+    }
+
+    let count = |team: Team| {
+        let members = players.values().filter(|c| c.team == team);
+        (members.clone().count(), members.filter(|c| c.hp > 0).count())
+    };
+    let ((ts, ts_alive), (cts, cts_alive)) = (count(Team::T), count(Team::Ct));
+    let planted = matches!(m.round.bomb, Bomb::Planted(_));
+    if cts > 0 && cts_alive == 0 {
+        end_round(m, players, tick, Team::T, "eliminated");
+    } else if ts > 0 && ts_alive == 0 && !planted {
+        end_round(m, players, tick, Team::Ct, "eliminated");
+    } else if !planted && tick >= m.phase_ends {
+        end_round(m, players, tick, Team::Ct, "time ran out");
+    }
+}
+
+fn net_round(m: &Match, tick: u32) -> Round {
+    let until = if matches!(m.round.bomb, Bomb::Planted(_)) { m.bomb_explodes } else { m.phase_ends };
+    let needed = if matches!(m.round.bomb, Bomb::Planted(_)) { DEFUSE_SECS } else { PLANT_SECS };
+    let buying = matches!(m.round.phase, Phase::Freeze | Phase::Live);
+    Round {
+        time_left: until.saturating_sub(tick) as f32 / TICK_HZ as f32,
+        buy_secs: if buying { m.buy_until.saturating_sub(tick) as f32 / TICK_HZ as f32 } else { 0.0 },
+        progress: m.progress.map(|(id, since)| (id, (tick - since) as f32 / TICK_HZ as f32 / needed)),
+        ..m.round
+    }
+}
+
+fn player_mut(players: &mut Players, id: u32) -> &mut Player {
+    players.values_mut().find(|c| c.id == id).unwrap()
+}
+
+/// Lag-compensated hitscan: rewinds everyone else to where the shooter saw them and applies damage by hit zone,
+/// distance and armor. Returns where the shot ended and the damage dealt, if any.
+fn fire(
+    players: &mut Players,
+    history: &History,
+    tick: u32,
+    shooter: u32,
+    weapon: Weapon,
+    (o, d): (Vec3, Vec3),
+    view_tick: f32,
+) -> (Vec3, Option<Hit>) {
+    let spec = weapon.spec();
+    let view_tick = view_tick.clamp(tick as f32 - MAX_REWIND_TICKS, tick as f32);
+    let wall = trace_world(o, d).min(spec.range);
+    let mut best: Option<(u32, f32, Vec3)> = None;
+    let team = players.values().find(|c| c.id == shooter).map(|c| c.team);
+    for c in players.values() {
+        // Friendly fire is off: shots pass through teammates.
+        if c.id == shooter || c.hp <= 0 || Some(c.team) == team {
+            continue;
+        }
+        let now = Entity { id: c.id, pos: c.state.pos, teleport: c.teleport, ..Default::default() };
+        let Some(pos) = history.rewind(&now, view_tick) else { continue };
+        if let Some(t) = trace_capsule(o, d, pos) {
+            if t < wall && best.is_none_or(|b| t < b.1) {
+                best = Some((c.id, t, pos));
+            }
+        }
+    }
+    let Some((victim, t, feet)) = best else { return (o + d * wall, None) };
+
+    let height = (o + d * t).y - feet.y;
+    let (headshot, legs) = (height > HEAD_HEIGHT, height < LEGS_HEIGHT);
+    let zone = if headshot { 4.0 } else if legs { 0.75 } else { 1.0 };
+    let mut damage = spec.damage * spec.range_mod.powf(t / 12.7) * zone;
+    let v = player_mut(players, victim);
+    if v.armor > 0 && !legs {
+        let through = damage * spec.armor_pen;
+        v.armor = v.armor.saturating_sub(((damage - through) * 0.5) as u8);
+        damage = through;
+    }
+    let damage = damage.round().max(1.0) as i32;
+    v.hp -= damage;
+    let killed = v.hp <= 0;
+    if killed {
+        v.hp = 0;
+        v.deaths += 1;
+        let killer = player_mut(players, shooter);
+        killer.kills += 1;
+        killer.money = (killer.money + spec.kill_reward).min(MAX_MONEY);
+    }
+    let hit = Hit { attacker: shooter, victim, weapon, damage: damage.min(255) as u8, headshot, killed };
+    (o + d * t, Some(hit))
+}
+
+/// Spends money on a buy menu item if it's buy time and the player is near their spawn.
+fn try_buy(m: &Match, c: &mut Player, item: u8, tick: u32) {
+    let buy_time = m.round.phase == Phase::Freeze || (m.round.phase == Phase::Live && tick < m.buy_until);
+    let near_spawn = MAP.spawns(c.team).iter().any(|s| s.distance(c.state.pos) < BUY_RADIUS);
+    let Some(&buy) = buy_menu(c.team).get((item as usize).wrapping_sub(1)) else { return };
+    if !buy_time || !near_spawn || c.hp <= 0 || c.money < buy.price() {
+        return;
+    }
+    match buy {
+        Buy::Armor if c.armor >= 100 => return,
+        Buy::Armor => c.armor = 100,
+        Buy::Weapon(w) if w.spec().team.is_some_and(|t| t != c.team) => return,
+        Buy::Weapon(w) if w.spec().slot == Slot::Primary => {
+            let secondary = c.state.secondary;
+            let ammo = c.state.ammo[1];
+            c.state.loadout(Some(w), secondary);
+            c.state.ammo[1] = ammo;
+        }
+        Buy::Weapon(w) => {
+            let (primary, ammo) = (c.state.primary, c.state.ammo[0]);
+            c.state.loadout(primary, w);
+            c.state.ammo[0] = ammo;
+            c.state.slot = Slot::Secondary;
+        }
+    }
+    c.money -= buy.price();
+}
+
+/// Bots spend at round start: the best gun they can afford, then armor.
+fn bot_buy(c: &mut Player) {
+    let menu = buy_menu(c.team);
+    // Rifle, then MP5, then Deagle; an AWP now and then when rich.
+    let picks = if c.money > 6000 && c.id % 4 == 0 { [3, 2, 1, 0] } else { [2, 1, 0, 0] };
+    if c.state.primary.is_none() {
+        if let Some(&Buy::Weapon(w)) = picks.iter().map(|&i| &menu[i]).find(|b| b.price() <= c.money) {
+            if w.spec().slot == Slot::Primary {
+                c.state.loadout(Some(w), c.state.secondary);
+            } else {
+                c.state.loadout(None, w);
+            }
+            c.money -= w.spec().price;
+        }
+    }
+    if c.armor == 0 && c.money >= ARMOR_PRICE {
+        (c.armor, c.money) = (100, c.money - ARMOR_PRICE);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn client(id: u32, team: Team) -> Player {
+        Player::new(id, format!("test{id}"), team, None)
+    }
+
+    /// A match with player 1 on T and 2 on CT, advanced into the live phase. Returns the tick.
+    fn live() -> (Match, Players, u32) {
+        let mut players = Players::new();
+        players.insert(1, client(1, Team::T));
+        players.insert(2, client(2, Team::Ct));
+        let mut m = new_match();
+        let mut tick = 1;
+        update_match(&mut m, &mut players, tick);
+        assert_eq!((m.round.number, m.round.phase, m.round.bomb), (1, Phase::Freeze, Bomb::Carried(1)));
+        assert!(players.values().all(|c| c.state.frozen && c.hp == MAX_HP));
+        tick += ticks(FREEZE_SECS);
+        update_match(&mut m, &mut players, tick);
+        assert_eq!(m.round.phase, Phase::Live);
+        assert!(players.values().all(|c| !c.state.frozen));
+        (m, players, tick)
+    }
+
+    fn player(players: &mut Players, id: u32) -> &mut Player {
+        players.values_mut().find(|c| c.id == id).unwrap()
+    }
+
+    fn run(m: &mut Match, players: &mut Players, tick: &mut u32, secs: f32) {
+        for _ in 0..ticks(secs) {
+            *tick += 1;
+            update_match(m, players, *tick);
+        }
+    }
+
+    fn site_a() -> Vec3 {
+        MAP.site_cells().find(|p| MAP.site_at(*p) == Some('A')).unwrap()
+    }
+
+    fn plant(m: &mut Match, players: &mut Players, tick: &mut u32) {
+        let t = player(players, 1);
+        (t.state.pos, t.state.on_ground, t.using) = (site_a(), true, true);
+        run(m, players, tick, PLANT_SECS - 0.1);
+        assert_eq!(m.round.bomb, Bomb::Carried(1), "not before 3 s");
+        run(m, players, tick, 0.2);
+        assert_eq!(m.round.bomb, Bomb::Planted(site_a()));
+    }
+
+    #[test]
+    fn plant_then_defuse() {
+        let (mut m, mut players, mut tick) = live();
+        plant(&mut m, &mut players, &mut tick);
+        let ct = player(&mut players, 2);
+        (ct.state.pos, ct.state.on_ground, ct.using) = (site_a() + Vec3::X, true, true);
+        run(&mut m, &mut players, &mut tick, DEFUSE_SECS + 0.1);
+        assert_eq!(m.round.bomb, Bomb::Defused(site_a()));
+        assert_eq!((m.round.phase, m.round.score), (Phase::End { winner: Team::Ct }, [0, 1]));
+        run(&mut m, &mut players, &mut tick, ROUND_END_SECS + 0.1);
+        assert_eq!((m.round.number, m.round.phase), (2, Phase::Freeze));
+    }
+
+    #[test]
+    fn bomb_explodes_and_kills_nearby() {
+        let (mut m, mut players, mut tick) = live();
+        plant(&mut m, &mut players, &mut tick);
+        player(&mut players, 2).state.pos = site_a() + Vec3::X * 5.0;
+        run(&mut m, &mut players, &mut tick, BOMB_SECS + 0.1);
+        assert_eq!(m.round.phase, Phase::End { winner: Team::T });
+        assert!(players.values().all(|c| c.hp == 0), "both within the blast radius");
+    }
+
+    #[test]
+    fn elimination_and_bomb_drop() {
+        let (mut m, mut players, mut tick) = live();
+        player(&mut players, 1).state.pos = Vec3::new(3.0, 0.0, 4.0);
+        player(&mut players, 1).hp = 0;
+        run(&mut m, &mut players, &mut tick, 0.1);
+        assert_eq!(m.round.bomb, Bomb::Dropped(Vec3::new(3.0, 0.0, 4.0)));
+        assert_eq!(m.round.phase, Phase::End { winner: Team::Ct }, "no Ts left and no bomb planted");
+    }
+
+    #[test]
+    fn planted_bomb_outlives_the_terrorists() {
+        let (mut m, mut players, mut tick) = live();
+        plant(&mut m, &mut players, &mut tick);
+        player(&mut players, 1).hp = 0;
+        run(&mut m, &mut players, &mut tick, 1.0);
+        assert_eq!(m.round.phase, Phase::Live, "CT still has to defuse");
+    }
+
+    /// 6v6 bots, no network: they should move, fight, plant and finish rounds on their own.
+    #[test]
+    fn bots_play_rounds() {
+        let mut players = Players::new();
+        for id in 1..=12 {
+            let team = if id <= 6 { Team::T } else { Team::Ct };
+            let mut c = client(id, team);
+            c.bot = Some(Bot::new(id));
+            players.insert(id, c);
+        }
+        let (mut m, mut history, mut shots, mut hits, mut radio) = (new_match(), History::new(64), vec![], vec![], vec![]);
+        let (mut tick, mut plants, mut planted) = (1, 0, false);
+        // FPS16_ROUNDS plays a longer match, for tuning bots without the noise of 10 rounds.
+        let rounds = std::env::var("FPS16_ROUNDS").ok().and_then(|r| r.parse().ok()).unwrap_or(10);
+        while m.round.number <= rounds && tick < ticks(rounds as f32 * 3.0 * 60.0) {
+            run_inputs(&m, &mut players, &history, tick, &mut shots, &mut hits, &mut radio);
+            tick += 1;
+            update_match(&mut m, &mut players, tick);
+            history.record(tick, &entities(&players));
+            let now_planted = matches!(m.round.bomb, Bomb::Planted(_));
+            plants += (now_planted && !planted) as u32;
+            planted = now_planted;
+        }
+        let kills: u32 = players.values().map(|c| c.kills).sum();
+        let [t, ct] = m.round.score;
+        let accuracy = 100.0 * hits.len() as f32 / shots.len().max(1) as f32;
+        println!(
+            "{} rounds in {:.0} min, T {t} - {ct} CT, {kills} kills, {plants} plants, {} shots, {accuracy:.0}% accuracy",
+            t + ct,
+            tick as f32 / TICK_HZ as f32 / 60.0,
+            shots.len()
+        );
+        assert!(t + ct >= rounds, "rounds should finish");
+        assert!(kills >= 10, "bots should fight");
+        assert!(plants >= 1, "Ts should plant at least once");
+    }
+
+    #[test]
+    fn bots_fill_to_six_a_side() {
+        let mut players = Players::new();
+        let (mut m, mut next_id) = (new_match(), 10);
+        balance_bots(&mut m, &mut players, &mut next_id);
+        assert!(players.is_empty(), "no humans, no bots");
+        let count = |c: &Players, t: Team| c.values().filter(|c| c.team == t).count();
+        players.insert(1, client(1, Team::T));
+        balance_bots(&mut m, &mut players, &mut next_id);
+        assert_eq!((count(&players, Team::T), count(&players, Team::Ct)), (6, 6));
+        for i in 2..=8 {
+            players.insert(i, client(i, Team::Ct));
+        }
+        balance_bots(&mut m, &mut players, &mut next_id);
+        assert_eq!((count(&players, Team::T), count(&players, Team::Ct)), (7, 7), "7 human CTs: Ts topped up to 7");
+        players.retain(|_, c| c.bot.is_some());
+        balance_bots(&mut m, &mut players, &mut next_id);
+        assert!(players.is_empty(), "bots leave with the last human");
+    }
+
+    /// Shoots east across the open T spawn yard at player 2, `dist` away, at a given height.
+    fn shoot_at(players: &mut Players, weapon: Weapon, dist: f32, height: f32) -> Option<Hit> {
+        let start = MAP.spawns(Team::T)[0];
+        player_mut(players, 2).state.pos = start + Vec3::X * dist;
+        fire(players, &History::new(0), 100, 1, weapon, (start + Vec3::Y * height, Vec3::X), 100.0).1
+    }
+
+    #[test]
+    fn damage_by_zone_armor_and_range() {
+        let mut players = Players::new();
+        players.insert(1, client(1, Team::T));
+        players.insert(2, client(2, Team::Ct));
+        let body = shoot_at(&mut players, Weapon::Ak47, 5.0, 1.2).unwrap();
+        assert!((34..=36).contains(&body.damage) && !body.headshot && !body.killed, "{body:?}");
+        player_mut(&mut players, 2).hp = MAX_HP;
+        let head = shoot_at(&mut players, Weapon::Ak47, 5.0, 1.65).unwrap();
+        assert!(head.headshot && head.killed, "AK headshot kills: {head:?}");
+        assert_eq!(player_mut(&mut players, 1).money, START_MONEY + 300);
+
+        player_mut(&mut players, 2).hp = MAX_HP;
+        player_mut(&mut players, 2).armor = 100;
+        let armored = shoot_at(&mut players, Weapon::Ak47, 5.0, 1.2).unwrap();
+        assert!(armored.damage < body.damage, "armor absorbs some: {armored:?}");
+        let legs = shoot_at(&mut players, Weapon::Ak47, 5.0, 0.5).unwrap();
+        assert!(legs.damage < body.damage && legs.damage > armored.damage / 2, "legs: {legs:?}");
+
+        player_mut(&mut players, 2).armor = 0;
+        let near = shoot_at(&mut players, Weapon::Glock, 2.0, 1.2).unwrap().damage;
+        player_mut(&mut players, 2).hp = MAX_HP;
+        let far = shoot_at(&mut players, Weapon::Glock, 24.0, 1.2).unwrap().damage;
+        assert!(far < near, "pistol falls off with range: {near} -> {far}");
+        player_mut(&mut players, 2).hp = MAX_HP;
+        assert!(shoot_at(&mut players, Weapon::Knife, 3.0, 1.2).is_none(), "knife reach is short");
+    }
+
+    #[test]
+    fn buying_rules_and_round_money() {
+        let (mut m, mut players, tick) = live();
+        let t = player_mut(&mut players, 1);
+        (t.money, t.state.pos) = (3000, MAP.spawns(Team::T)[0]);
+        try_buy(&m, t, 4, tick);
+        assert_eq!((t.state.primary, t.money), (None, 3000), "AWP too expensive");
+        try_buy(&m, t, 3, tick);
+        assert_eq!((t.state.primary, t.money), (Some(Weapon::Ak47), 500), "T rifle is the AK");
+        try_buy(&m, t, 5, tick);
+        assert_eq!(t.armor, 0, "can't afford armor");
+        t.money = 5000;
+        t.state.pos = MAP.spawns(Team::Ct)[0];
+        try_buy(&m, t, 5, tick);
+        assert_eq!(t.armor, 0, "not in the buy zone");
+        t.state.pos = MAP.spawns(Team::T)[0];
+        try_buy(&m, t, 5, tick + ticks(BUY_SECS) + 1);
+        assert_eq!(t.armor, 0, "buy time is over");
+
+        end_round(&mut m, &mut players, tick, Team::Ct, "test");
+        assert_eq!(player_mut(&mut players, 1).money, 5000 + LOSS_REWARD);
+        assert_eq!(player_mut(&mut players, 2).money, START_MONEY + WIN_REWARD);
+        end_round(&mut m, &mut players, tick, Team::Ct, "test");
+        assert_eq!(player_mut(&mut players, 1).money, 5000 + 2 * LOSS_REWARD + LOSS_BONUS, "loss streak bonus");
+    }
+
+    #[test]
+    fn timeout_goes_to_ct() {
+        let (mut m, mut players, mut tick) = live();
+        run(&mut m, &mut players, &mut tick, ROUND_SECS + 0.1);
+        assert_eq!(m.round.phase, Phase::End { winner: Team::Ct });
+    }
+}

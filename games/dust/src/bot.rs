@@ -4,7 +4,7 @@
 use crate::map::MAP;
 use crate::shared::*;
 use crate::weapons::{Slot, Weapon};
-use bevy::math::Vec3;
+use glam::Vec3;
 
 /// Seconds between first seeing an enemy and being allowed to shoot. The main difficulty knob.
 const REACTION_SECS: f32 = 0.6;
