@@ -262,6 +262,15 @@ fn parts(weapon: Weapon) -> Vec<(Shape, Finish)> {
             b([0.012, 0.03, 0.06], [0.0, 0.03, -0.03], 0.0, Steel),
             t(0.012, 0.005, [0.02, 0.035, -0.06], Steel),
         ],
+        // Rocket launcher: a fat olive tube with rings at both ends, two grips and a sight.
+        Weapon::Rocket => vec![
+            t(0.055, 0.95, [0.0, 0.03, -0.12], Green),
+            t(0.066, 0.06, [0.0, 0.03, -0.58], Black),
+            t(0.066, 0.06, [0.0, 0.03, 0.33], Black),
+            b([0.03, 0.11, 0.05], [0.0, -0.07, 0.0], 0.3, Black),
+            b([0.03, 0.09, 0.04], [0.0, -0.06, -0.26], 0.0, Black),
+            b([0.02, 0.06, 0.09], [0.055, 0.1, -0.12], 0.0, Black),
+        ],
     }
 }
 
@@ -282,6 +291,7 @@ fn hands(weapon: Weapon) -> Vec<(Shape, Finish)> {
         Weapon::M4a1 => Some(-0.22),
         Weapon::Mp5 => Some(-0.21),
         Weapon::Awp => Some(-0.3),
+        Weapon::Rocket => Some(-0.26),
         Weapon::Glock | Weapon::Usp | Weapon::Deagle => Some(0.0),
         Weapon::Knife | Weapon::He => None,
     };
@@ -305,6 +315,7 @@ pub fn barrel_length(weapon: Weapon) -> f32 {
         Weapon::M4a1 => 0.63,
         Weapon::Awp => 0.86,
         Weapon::He => 0.1,
+        Weapon::Rocket => 0.61,
     }
 }
 

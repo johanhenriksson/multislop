@@ -110,7 +110,7 @@ impl DustClient {
         // CS 1.6 buy menu: dark panel, amber title, numbered entries, unaffordable ones grayed out.
         h.buy_menu = s.ui(None, UiNode { column: true, gap: 6.0, ..panel() });
         h.buy_title = s.ui(Some(h.buy_menu), text("", 20.0, HUD_AMBER));
-        h.buy_rows = (0..6).map(|_| s.ui(Some(h.buy_menu), text("", 18.0, Color::WHITE))).collect();
+        h.buy_rows = (0..7).map(|_| s.ui(Some(h.buy_menu), text("", 18.0, Color::WHITE))).collect();
         s.ui(Some(h.buy_menu), text("B / Esc  close", 13.0, Color::srgb(0.55, 0.55, 0.55)));
         let feed = UiNode { absolute: true, right: px(16.0), top: px(12.0), column: true, align: Align::End, gap: 3.0, ..node() };
         h.kill_feed = s.ui(None, feed);

@@ -52,6 +52,8 @@ pub fn gunshot(weapon: Weapon) -> Vec<u8> {
         Weapon::M4a1 => shot(&mut rng, 0.16, 0.18, 180.0, 0.5).mix(click(&mut rng, 0.035), 0.03, 0.55),
         // The real thing, from the soundboard: trimmed to the shot and its tail, 70% level, faded out.
         Weapon::Awp => return AWP.to_vec(),
+        // A deep whoomp as the rocket leaves, rolling off the walls.
+        Weapon::Rocket => shot(&mut rng, 0.9, 0.2, 42.0, 1.2).echo(0.2, 0.35, 2),
     };
     let peak = match weapon {
         Weapon::Usp | Weapon::M4a1 => 0.4,

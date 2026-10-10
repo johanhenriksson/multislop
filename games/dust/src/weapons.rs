@@ -16,6 +16,7 @@ pub enum Weapon {
     M4a1,
     Awp,
     He,
+    Rocket,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -151,12 +152,30 @@ const HE: Spec = gun(
         cost: Cost::Ammo { mag: 1, reserve: 0, reload: 0.0 },
         cycle: 0.5,
         accuracy: Accuracy { spread: 0.0, moving: 0.0, airborne: 0.0, kick: 0.0 },
-        delivery: Delivery::Projectile { speed: 17.0, gravity: 20.3, bounce: 0.45, fuse: 1.5 },
+        delivery: Delivery::Projectile { speed: 25.0, gravity: 20.3, bounce: 0.45, fuse: 2.0, contact: false },
         payload: Payload::Explode { damage: 98.0, radius: 8.9, armor_pen: 0.5 },
     },
 );
+/// A rocket launcher: one rocket at a time, flying straight and fast and going off on whatever it touches.
+const ROCKET: Spec = Spec {
+    speed: 0.75,
+    ..gun(
+        "Rocket Launcher",
+        13000,
+        None,
+        Slot::Primary,
+        Ability {
+            trigger: Trigger::Semi,
+            cost: Cost::Ammo { mag: 1, reserve: 3, reload: 2.5 },
+            cycle: 0.8,
+            accuracy: Accuracy { spread: 0.0, moving: 0.01, airborne: 0.03, kick: 0.08 },
+            delivery: Delivery::Projectile { speed: 35.0, gravity: 0.0, bounce: 0.0, fuse: 6.0, contact: true },
+            payload: Payload::Explode { damage: 150.0, radius: 5.0, armor_pen: 0.6 },
+        },
+    )
+};
 
-pub const ALL_WEAPONS: [Weapon; 9] = [
+pub const ALL_WEAPONS: [Weapon; 10] = [
     Weapon::Knife,
     Weapon::Glock,
     Weapon::Usp,
@@ -166,6 +185,7 @@ pub const ALL_WEAPONS: [Weapon; 9] = [
     Weapon::M4a1,
     Weapon::Awp,
     Weapon::He,
+    Weapon::Rocket,
 ];
 
 pub const AWP_SCOPED_SPREAD: f32 = 0.0005;
@@ -186,6 +206,7 @@ impl Weapon {
             Weapon::M4a1 => &M4A1,
             Weapon::Awp => &AWP,
             Weapon::He => &HE,
+            Weapon::Rocket => &ROCKET,
         }
     }
 
@@ -221,10 +242,10 @@ pub enum Buy {
 }
 
 /// The buy menu, numbered from 1. The rifle entry depends on the team.
-pub fn buy_menu(team: Team) -> [Buy; 6] {
+pub fn buy_menu(team: Team) -> [Buy; 7] {
     let rifle = if team == Team::T { Weapon::Ak47 } else { Weapon::M4a1 };
     let guns = [Weapon::Deagle, Weapon::Mp5, rifle, Weapon::Awp].map(Buy::Weapon);
-    [guns[0], guns[1], guns[2], guns[3], Buy::Armor, Buy::Weapon(Weapon::He)]
+    [guns[0], guns[1], guns[2], guns[3], Buy::Armor, Buy::Weapon(Weapon::He), Buy::Weapon(Weapon::Rocket)]
 }
 
 impl Buy {

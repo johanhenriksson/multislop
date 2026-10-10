@@ -41,6 +41,10 @@ enum Announce {
 #[derive(Clone, Copy)]
 enum FxKind {
     Muzzle(Vec3),
+    /// A puff of rocket smoke.
+    Smoke(Vec3),
+    /// An explosion this big: a fireball and a cloud of smoke.
+    Blast(Vec3, f32),
     /// Bullet striking the map: dust puff and a hole, at a position with the surface normal.
     Impact(Vec3, Vec3),
     Blood(Vec3),
@@ -145,6 +149,8 @@ struct FxAssets {
     hole_material: u32,
     grenade_mesh: u32,
     grenade_material: u32,
+    rocket_mesh: u32,
+    rocket_material: u32,
 }
 
 pub struct DustClient {
@@ -305,6 +311,8 @@ impl ClientGame for DustClient {
             hole_material: s.material(Material { color: Color::srgb(0.08, 0.06, 0.05), unlit: true, ..Default::default() }),
             grenade_mesh: s.mesh(MeshData::Sphere { radius: 0.07, ico: None }),
             grenade_material: s.material(Material { color: Color::srgb(0.18, 0.24, 0.12), roughness: 0.7, ..Default::default() }),
+            rocket_mesh: s.mesh(MeshData::Cylinder { radius: 0.05, height: 0.6 }),
+            rocket_material: s.material(Material { color: Color::srgb(0.25, 0.27, 0.22), emissive: [2.0, 0.6, 0.1], ..Default::default() }),
         };
         self.build_hud();
         self.blood.init(&mut self.scene);
@@ -328,6 +336,7 @@ impl ClientGame for DustClient {
             match *e {
                 Event::Explosion { pos, radius } => {
                     self.explosion = Some((pos, self.time, radius));
+                    self.fx.push(FxKind::Blast(pos, radius));
                     let volume = 1.0 / (1.0 + pos.distance(self.pred.pos) / 30.0);
                     self.sound(self.sounds.explosion, volume);
                 }
@@ -598,6 +607,14 @@ impl DustClient {
 
     fn on_remote_shot(&mut self, s: &Shot) {
         let d = (s.to - s.from).normalize_or_zero();
+        // Thrown or launched: just the sound, and a flash for a rocket. What flies is an entity.
+        if s.weapon.ability().range() == 0.0 {
+            if s.weapon == Weapon::Rocket {
+                self.fx.push(FxKind::Muzzle(muzzle(s.from, d, s.weapon)));
+            }
+            let volume = 0.6 / (1.0 + s.from.distance(self.pred.pos) / 12.0);
+            return self.sound(self.gun_sound(s.weapon), volume);
+        }
         self.add_tracer(s.weapon, muzzle(s.from, d, s.weapon), s.to);
         if s.weapon != Weapon::Knife {
             self.fx.push(FxKind::Muzzle(muzzle(s.from, d, s.weapon)));
@@ -613,7 +630,7 @@ impl DustClient {
 
     fn add_tracer(&mut self, weapon: Weapon, from: Vec3, to: Vec3) {
         let life = match weapon {
-            Weapon::Knife | Weapon::He => return,
+            Weapon::Knife | Weapon::He | Weapon::Rocket => return,
             Weapon::Awp => 0.35,
             _ => 0.06,
         };
@@ -634,7 +651,7 @@ impl DustClient {
         if !can_buy || raw.pressed(Key::Escape) {
             self.menu = false;
         }
-        let digits = [Key::Digit1, Key::Digit2, Key::Digit3, Key::Digit4, Key::Digit5, Key::Digit6];
+        let digits = [Key::Digit1, Key::Digit2, Key::Digit3, Key::Digit4, Key::Digit5, Key::Digit6, Key::Digit7];
         if raw.pressed(Key::Z) && self.hp > 0 {
             (self.radio_menu, self.menu) = (!self.radio_menu, false);
         }
@@ -684,8 +701,8 @@ impl DustClient {
         let mut seen = HashMap::new();
         let mut grenades = HashMap::new();
         for v in others {
-            if let Some(EntityData::Grenade(_)) = decode(&v.entity.data) {
-                grenades.insert(v.entity.id, v.entity.pos);
+            if let Some(EntityData::Grenade(weapon)) = decode(&v.entity.data) {
+                grenades.insert(v.entity.id, (v.entity.pos, v.entity.vel, weapon == Weapon::Rocket));
                 continue;
             }
             let Some(p) = NetPlayer::from_entity(&v.entity) else { continue };
@@ -790,20 +807,33 @@ impl DustClient {
         }
     }
 
-    fn render_grenades(&mut self, mut now: HashMap<u32, Vec3>) {
+    /// Thrown and launched things: grenades as balls, rockets as a body along their flight trailing smoke.
+    fn render_grenades(&mut self, mut now: HashMap<u32, (Vec3, Vec3, bool)>) {
         let gone: Vec<u32> = self.grenades.keys().filter(|id| !now.contains_key(id)).copied().collect();
         for id in gone {
             let node = self.grenades.remove(&id).unwrap();
             self.scene.push(Command::Despawn { id: node });
         }
+        // A rocket points along its flight; a grenade just tumbles along.
+        let pose = |pos: Vec3, vel: Vec3, rocket: bool| match rocket && vel.length() > 0.1 {
+            true => Transform::at(pos).rotated(Quat::from_rotation_arc(Vec3::Y, vel.normalize())),
+            false => Transform::at(pos),
+        };
+        let eye = eye(&self.pred);
         for (&id, &node) in &self.grenades {
-            if let Some(pos) = now.remove(&id) {
-                self.scene.out.push(Command::set_transform(node, Transform::at(pos)));
+            if let Some((pos, vel, rocket)) = now.remove(&id) {
+                self.scene.out.push(Command::set_transform(node, pose(pos, vel, rocket)));
+                // Smoke behind it, though not in our face as it leaves.
+                if rocket && pos.distance(eye) > 2.0 {
+                    self.fx.push(FxKind::Smoke(pos - vel.normalize_or_zero() * 0.4));
+                }
             }
         }
-        for (id, pos) in now {
+        for (id, (pos, vel, rocket)) in now {
+            let t = pose(pos, vel, rocket);
             let a = &self.fx_assets;
-            let node = self.scene.mesh_node(None, a.grenade_mesh, a.grenade_material, Transform::at(pos));
+            let (mesh, material) = if rocket { (a.rocket_mesh, a.rocket_material) } else { (a.grenade_mesh, a.grenade_material) };
+            let node = self.scene.mesh_node(None, mesh, material, t);
             self.grenades.insert(id, node);
         }
     }
@@ -917,6 +947,18 @@ impl DustClient {
                         let id = self.decals.pop_front().unwrap();
                         self.scene.push(Command::Despawn { id });
                     }
+                }
+                FxKind::Smoke(at) => {
+                    let smoke = fading(&mut self.scene, at, Color::srgba(0.75, 0.73, 0.7, 0.5), 0.08, 0.8, 3.0);
+                    self.live_fx.push(smoke);
+                }
+                FxKind::Blast(at, radius) => {
+                    let fire = fading(&mut self.scene, at, Color::srgba(1.0, 0.55, 0.1, 0.95), radius * 0.15, 0.35, 4.0);
+                    let smoke = fading(&mut self.scene, at + Vec3::Y * 0.5, Color::srgba(0.25, 0.23, 0.22, 0.8), radius * 0.2, 1.6, 2.5);
+                    self.live_fx.extend([fire, smoke]);
+                    let kind = NodeKind::PointLight { color: Color::srgb(1.0, 0.6, 0.2), intensity: 4_000_000.0, range: radius * 4.0 };
+                    let node = self.scene.spawn(None, kind, Transform::at(at + Vec3::Y * 0.5), true);
+                    self.live_fx.push(Fx { node, pos: at, material: None, light: Some(4_000_000.0), age: 0.0, life: 0.4, grow: 0.0, size: 1.0 });
                 }
                 FxKind::Blood(at) => {
                     let blood = fading(&mut self.scene, at, Color::srgba(0.6, 0.02, 0.02, 0.9), 0.14, 0.45, 5.0);

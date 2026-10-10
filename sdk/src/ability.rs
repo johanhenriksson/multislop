@@ -46,8 +46,9 @@ pub enum Delivery {
     /// Instant ray. Damage is multiplied by `falloff` per 12.7 m travelled.
     Hitscan { range: f32, falloff: f32 },
     Melee { reach: f32 },
-    /// Thrown or launched: `speed` at full strength, bouncing with `bounce` of its speed kept, going off after `fuse`.
-    Projectile { speed: f32, gravity: f32, bounce: f32, fuse: f32 },
+    /// Thrown or launched: `speed` at full strength, bouncing with `bounce` of its speed kept, going off after `fuse`
+    /// or, with `contact`, as soon as it touches anything (a rocket).
+    Projectile { speed: f32, gravity: f32, bounce: f32, fuse: f32, contact: bool },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -198,19 +199,19 @@ pub fn spread_offset(seq: u32) -> (f32, f32) {
 }
 
 /// Moves a thrown object one tick: gravity, then a bounce off whatever `trace(origin, dir) -> (distance, normal)`
-/// reports in its way. Comes to rest once a bounce leaves it slow.
-pub fn step_projectile(pos: &mut Vec3, vel: &mut Vec3, gravity: f32, bounce: f32, trace: impl Fn(Vec3, Vec3) -> (f32, Vec3)) {
+/// reports in its way. Comes to rest once a bounce leaves it slow. Returns whether it hit something.
+pub fn step_projectile(pos: &mut Vec3, vel: &mut Vec3, gravity: f32, bounce: f32, trace: impl Fn(Vec3, Vec3) -> (f32, Vec3)) -> bool {
     vel.y -= gravity * DT;
     let step = *vel * DT;
     let len = step.length();
     if len == 0.0 {
-        return;
+        return false;
     }
     let dir = step / len;
     let (t, normal) = trace(*pos, dir);
     if t > len {
         *pos += step;
-        return;
+        return false;
     }
     // Stop just short of the surface and reflect.
     *pos += dir * (t - 0.02).max(0.0);
@@ -218,6 +219,7 @@ pub fn step_projectile(pos: &mut Vec3, vel: &mut Vec3, gravity: f32, bounce: f32
     if vel.length() < 1.0 {
         *vel = Vec3::ZERO;
     }
+    true
 }
 
 #[cfg(test)]

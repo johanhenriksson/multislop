@@ -268,6 +268,8 @@ fn run_inputs(
             if let Delivery::Projectile { speed, fuse, .. } = weapon.ability().delivery {
                 let vel = dir * speed * strength + c.state.vel;
                 throws.push(Grenade { id: 0, owner: shooter, weapon, pos: from, vel, fuse: tick + ticks(fuse) });
+                // Heard and seen leaving by everyone (a launch flash and whoosh); the projectile itself is an entity.
+                shots.push(Shot { shooter, weapon, from, to: from + dir });
                 continue;
             }
             let (to, hit) = fire(players, history, tick, shooter, weapon, (from, dir), inp.view_tick);
@@ -599,8 +601,22 @@ struct Grenade {
 /// `booms` gets (where, radius) of each explosion.
 fn update_grenades(grenades: &mut Vec<Grenade>, players: &mut Players, tick: u32, hits: &mut Vec<Hit>, booms: &mut Vec<(Vec3, f32)>) {
     for g in grenades.iter_mut() {
-        if let Delivery::Projectile { gravity, bounce, .. } = g.weapon.ability().delivery {
-            step_projectile(&mut g.pos, &mut g.vel, gravity, bounce, trace_world_normal);
+        let Delivery::Projectile { gravity, bounce, contact, .. } = g.weapon.ability().delivery else { continue };
+        // Contact-fused: a direct hit on an enemy in the way this tick sets it off right there.
+        let (step, team) = (g.vel * DT, players.get(&g.owner).map(|c| c.team));
+        let direct = players
+            .values()
+            .filter(|c| contact && c.hp > 0 && Some(c.team) != team)
+            .filter_map(|c| trace_capsule(g.pos, step.normalize_or_zero(), c.state.pos, height(c.state.duck)))
+            .filter(|&t| t <= step.length())
+            .min_by(f32::total_cmp);
+        if let Some(t) = direct {
+            g.pos += step.normalize_or_zero() * t;
+            g.fuse = tick;
+            continue;
+        }
+        if step_projectile(&mut g.pos, &mut g.vel, gravity, bounce, trace_world_normal) && contact {
+            g.fuse = tick;
         }
     }
     let (live, done): (Vec<Grenade>, Vec<Grenade>) = std::mem::take(grenades).into_iter().partition(|g| tick < g.fuse);
@@ -871,6 +887,42 @@ mod tests {
         assert!(shoot_at(&mut players, Weapon::Knife, 3.0, 1.2).is_none(), "knife reach is short");
     }
 
+    /// Player 1 fires a rocket east at player 2 across the yard: it goes off on contact, long before its fuse. One
+    /// fired north into a wall goes off at the wall.
+    #[test]
+    fn rockets_explode_on_contact() {
+        let fire_rocket = |yaw: f32, target: Option<f32>| {
+            let (m, mut players, mut tick) = live();
+            let start = yard();
+            let t = player_mut(&mut players, 1);
+            t.state.pos = start;
+            t.state.loadout(Some(Weapon::Rocket), Weapon::Glock);
+            player_mut(&mut players, 2).state.pos = start + Vec3::X * target.unwrap_or(40.0);
+            let aim = Input { yaw, ..Default::default() };
+            let script = std::iter::repeat_n(aim, 2).chain(std::iter::once(Input { fire: true, ..aim })).chain(std::iter::repeat_n(aim, 128));
+            let (history, mut rockets, mut hits, mut booms) = (History::new(0), vec![], vec![], vec![]);
+            let mut boom_tick = None;
+            for inp in script {
+                player_mut(&mut players, 1).inputs.push(inp);
+                run_inputs(&m, &mut players, &history, tick, &mut vec![], &mut hits, &mut vec![], &mut rockets);
+                update_grenades(&mut rockets, &mut players, tick, &mut hits, &mut booms);
+                if !booms.is_empty() && boom_tick.is_none() {
+                    boom_tick = Some(tick);
+                }
+                tick += 1;
+            }
+            (hits, booms, boom_tick.map(|b| b - (tick - 131)))
+        };
+        let east = -std::f32::consts::FRAC_PI_2;
+        let (hits, booms, after) = fire_rocket(east, Some(10.0));
+        assert_eq!(booms.len(), 1);
+        assert!(after.unwrap() < ticks(0.5), "went off on contact, {after:?} ticks after firing");
+        assert!(hits.iter().any(|h| h.victim == 2 && h.weapon == Weapon::Rocket && h.damage > 80), "{hits:?}");
+        let (_, booms, after) = fire_rocket(0.0, None);
+        assert_eq!(booms.len(), 1, "into the wall to the north");
+        assert!(after.unwrap() < ticks(1.0));
+    }
+
     /// A crouched target is shorter: chest-high shots over it miss, its head is still a head, and the shooter's
     /// lag compensation uses how crouched it was back then.
     #[test]
@@ -940,7 +992,7 @@ mod tests {
         let script = std::iter::once(Input { slot: 4, ..aim })
             .chain(std::iter::repeat_n(aim, ticks(DRAW_SECS + 0.1) as usize))
             .chain(std::iter::repeat_n(Input { fire: true, ..aim }, 10))
-            .chain(std::iter::repeat_n(aim, ticks(2.0) as usize));
+            .chain(std::iter::repeat_n(aim, ticks(2.5) as usize));
         let (history, mut grenades, mut hits, mut booms) = (History::new(0), vec![], vec![], vec![]);
         for inp in script {
             player_mut(&mut players, 1).inputs.push(inp);

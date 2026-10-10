@@ -44,10 +44,13 @@ Deadline: playable before 00:00. One weapon, one simple map.
 
 ## Weapons and economy (`src/weapons.rs`, CS 1.6 stats)
 - Knife (always), Glock (T) / USP (CT) free, Deagle $650, MP5 $1500, AK-47 (T) $2500 / M4A1 (CT) $3100, AWP $4750
-  (right-click scope), Kevlar+Helmet $1000, HE grenade $300. Buy with B then 1-6 during freeze + 20 s, within 15 m
+  (right-click scope), Kevlar+Helmet $1000, HE grenade $300, Rocket Launcher $13000. Buy with B then 1-6 during freeze + 20 s, within 15 m
   of your spawn.
-- HE grenade: hold fire to wind up (harder throw the longer, up to 0.6 s), release to throw; it bounces and goes off
-  after 1.5 s, up to 98 damage to enemies in the open within 8.9 m. Survivors keep it.
+- HE grenade: hold fire to wind up (harder throw the longer, up to 0.6 s), release to throw (up to 25 m/s); it
+  bounces and goes off after 2 s, up to 98 damage to enemies in the open within 8.9 m. Survivors keep it.
+- Rocket launcher (primary, 1 + 3 rockets, 2.5 s reload, 75% move speed): a straight 35 m/s rocket that explodes on
+  touching a wall, the floor or an enemy, up to 150 damage within 5 m; smoke trail, launch flash and sound for all,
+  fireball and smoke on impact (explosions from grenades too).
 - Slots: 1 primary, 2 pistol, 3 knife, 4 grenade, Q last; R reload (auto when empty), draw delay on switch, semi-auto needs a
   click per shot. Mag + reserve ammo, refilled at round start.
 - 100 HP. Damage by zone (head x4, legs x0.75), falls off with distance, armor absorbs per weapon penetration.
@@ -98,8 +101,8 @@ Deadline: playable before 00:00. One weapon, one simple map.
 - Team radio: bots call "Enemy spotted!", "Need backup!", "I'm in position.", "Sector clear.", "Cover me!" (with
   cooldowns), players with Z then 1-5 (2 s cooldown); the server sends calls only to the caller's team; clients play
   the voice and show a yellow chat line.
-- `FPS16_SHOT=out.png [FPS16_POSE="x,y,z,yaw,pitch"]` renders off-screen, saves a screenshot and quits, for checking
-  visuals without a person at the screen.
+- `FPS16_SHOT=out.png [FPS16_POSE="x,y,z,yaw,pitch"]` renders off-screen with the window hidden, saves a screenshot
+  and quits, for checking visuals without a person at the screen.
 
 ## Structure
 - `games/dust`: the game (movement, weapons, map, bots, rounds, economy, snapshot format). Builds natively and to wasm.

@@ -184,6 +184,8 @@ pub fn run(server: Option<SocketAddr>, local: Option<Vec<u8>>, hostable: Vec<std
                     primary_window: Some(Window {
                         title: format!("fps16 build {BUILD}"),
                         present_mode: PresentMode::AutoNoVsync,
+                        // Screenshot runs render off-screen: no window popping up or taking the keyboard.
+                        visible: std::env::var_os("FPS16_SHOT").is_none(),
                         ..default()
                     }),
                     ..default()
