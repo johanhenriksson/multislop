@@ -25,7 +25,7 @@ R = CELL / SUB
 SHIFT = 4.0  # added to every height so the lowest floor sits near 0
 HEADROOM = 1.85  # a floor needs this much air above it
 JUMP = 1.15  # highest rise a player gets onto
-ROOF_MAX = 4.5  # ceilings at most this high over the floor become roof blocks
+ROOF_MAX = 6.5  # ceilings at most this high over the floor become roof blocks
 ROOF = 2.0  # how thick the game makes a roof block
 CRATE_TOPS = {"material_9", "material_17", "material_21"}
 CRATE_SIDES = {"material_2", "material_12", "material_21", "material_31"}
@@ -34,7 +34,7 @@ IGNORED_MATERIALS = {"material_32", "material_33", "material_3", "material_18"}
 # OBJ coordinates (meters) of the A and B site decals, and the spawn yards as (x0, y0, x1, y1).
 SITE_X = {"A": (23.0, 49.2), "B": (-33.2, 53.8)}
 SITE_RADIUS = {"A": 7.5, "B": 8.0}
-SPAWN_AREA = {"T": (-44.0, -19.0, -24.0, -7.0), "C": (-17.5, 41.5, -6.5, 52.5)}
+SPAWN_AREA = {"T": (-18.0, -21.0, -9.0, -13.0), "C": (-17.5, 41.5, -6.5, 52.5)}
 DIGITS = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 
@@ -102,6 +102,18 @@ def floors(col):
     return out
 
 
+def level(zs):
+    """The height most of a cell is at: the median of the biggest run of heights that are close together, so a cell
+    split between a ramp and a ledge gets one or the other rather than a height in between."""
+    zs = sorted(zs)
+    runs, start = [], 0
+    for k in range(1, len(zs) + 1):
+        if k == len(zs) or zs[k] - zs[k - 1] > 0.3:
+            runs.append(zs[start:k])
+            start = k
+    return float(np.median(max(runs, key=len)))
+
+
 def reachable(fl, seeds):
     nx, ny = len(fl[0]), len(fl)
     seen = set(seeds)
@@ -156,8 +168,8 @@ def convert(obj):
             ground = [s[0] for s in stacks if s]
             if len(ground) * 2 >= len(samples):
                 on_crate = sum(f[2] in CRATE_TOPS for f in ground)
-                z = float(np.median([f[0] for f in ground]))
-                ceiling = float(np.median([f[1] for f in ground]))
+                z = level([f[0] for f in ground])
+                ceiling = level([f[1] for f in ground])
                 if on_crate * 2 > len(ground):
                     base[row][ci] = "k"
                 else:
@@ -165,8 +177,8 @@ def convert(obj):
                 base_h[row][ci] = z
                 upper = [s[1] for s in stacks if len(s) > 1]
                 if len(upper) * 2 >= len(samples) and base[row][ci] == ".":
-                    slab[row][ci] = float(np.median([f[0] for f in upper]))
-                    ceiling = float(np.median([f[1] for f in upper]))
+                    slab[row][ci] = level([f[0] for f in upper])
+                    ceiling = level([f[1] for f in upper])
                 # Ceilings well overhead (arches, beams) are left out.
                 if ceiling - (slab[row][ci] if slab[row][ci] is not None else z) < ROOF_MAX and base[row][ci] == ".":
                     roof[row][ci] = ceiling
@@ -175,11 +187,17 @@ def convert(obj):
             crate = [t for t in tops if t[2] in CRATE_TOPS and t[1] > 0.7]
             if len(crate) * 2 > len(samples):
                 base[row][ci] = "k"
-                base_h[row][ci] = float(np.median([t[0] for t in crate]))
+                base_h[row][ci] = level([t[0] for t in crate])
             else:
                 h = max(top[j][i] for i, j in samples)
                 base_h[row][ci] = h if h > -50 else None
-    # Walls with no faces of their own (outside the map) stand as tall as the walls next to them.
+    # Walls with no faces of their own but the floor's (inside thick walls, or outside the map) stand as tall as the
+    # walls next to them rather than flush with the floor.
+    for row in range(d):
+        for ci in range(w):
+            beside = [base_h[r][c] for r, c in ((row - 1, ci), (row + 1, ci), (row, ci - 1), (row, ci + 1)) if 0 <= r < d and 0 <= c < w and base[r][c] == "."]
+            if base[row][ci] == "#" and base_h[row][ci] is not None and base_h[row][ci] < max(beside, default=-99) + 1.0:
+                base_h[row][ci] = None
     for row in range(d):
         for ci in range(w):
             if base[row][ci] == "#" and base_h[row][ci] is None:

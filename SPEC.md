@@ -93,7 +93,7 @@ Deadline: playable before 00:00. One weapon, one simple map.
   Maps are ASCII grids (`games/dust/src/maps/<map>.txt`) with a height grid each (`<map>_heights.txt`, quarter
   meters as base-62 digits 0-9a-zA-Z), in layers separated by a blank line; cell size per map (dust 1 m, aztec 2 m).
   The base layer: `#` wall (height = its top; walls 6.5 m and up get a random 0-3 m extra for the skyline), `x`/`X`
-  low/tall crate standing on its height, `k` crate whose top is its height (standing on the lowest floor beside it),
+  low/tall crate standing on its height, `k` crate whose top is its height (standing on the lowest floor beside its pile),
   `A`/`B` site floor, `T`/`C` spawn, `.` floor. Upper layers (blank = nothing): `.` (or a site/spawn letter) a floor
   slab 0.6 m thick whose top is the height, `#` a 2 m roof block whose underside is the height. So a cell has a stack
   of floors (`map::Floor`: a surface over a solid underside, the ground solid all the way down), with air between.
@@ -101,13 +101,20 @@ Deadline: playable before 00:00. One weapon, one simple map.
   `tools/dust2_to_grid.py <Dust2.obj> [--debug dir]`: each 1 m cell is sampled 4x4 times with vertical rays; upward
   faces with 1.85 m of air over them are floors, a flood fill from the sites (up a jump, down any drop) keeps the
   reachable ones so roofs drop out. The lowest reachable floor is the base layer, a second one above it a slab, a
-  ceiling within 4.5 m a roof block; cells without floor become walls as tall as the faces in them (raised over
-  neighboring roofs) or crates by texture. Heights are shifted up 4 m so the lowest floor (the pit at long A) is 0.
+  ceiling within 6.5 m a roof block (so tall rooms like the lower tunnels' stairs don't open to the sky); a cell's
+  height is the median of its biggest cluster of close sample heights, so a cell half on a ramp and half on a ledge
+  gets one of them rather than a step in between. Cells without floor become walls as tall as the faces in them
+  (raised over neighboring roofs; ones with no faces of their own but the floor's, inside thick walls, as tall as the
+  walls around them rather than flush with the floor) or crates by texture. Heights are shifted up 4 m so the
+  lowest floor (the pit at long A) is 0.
   Sites are flood filled around the X decals (A within 7.5 m on the platform, B within 8 m), 16 spawns per team on a
   checkerboard in each spawn yard. `--debug` writes a top-down PNG per layer. The result, 85x89 cells, north up: B
   top-left, A top-right, CT spawn north of mid doors with the B doors corridor west and a passage east to A that runs
   under the bridge of short A (the stacked floor), mid down the middle with catwalk east of it, long A down the east
-  side through long doors to the pit, T spawn bottom-left with upper tunnels north to B and lower tunnels into mid.
+  side through long doors to the pit, T spawn at the back of the south yard, from whose west end the upper tunnels
+  go north to B, with mid straight north and outside long down the ramp east. The T spawns are placed where the walk
+  to A and to B is about as long (bot path steps 83-87 to A, 73-78 to B; a test checks they're within a quarter of
+  each other and no shorter than the walk between the sites).
 - Aztec (85x47, one layer, ported from the old pre-wasm counter-slop branch): CT spawn west, A site north-west, B
   south-middle, T spawn east, 16 spawn spots each; the rope bridge is a raised walkway along the north wall of a
   sunken water room, plus sunken grass pits and double doors. Bots play it with the same logic (a test plays 10

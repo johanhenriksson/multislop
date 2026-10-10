@@ -304,23 +304,35 @@ fn terrain_mesh(aztec: bool) -> (MeshData, MeshData) {
                 }
                 idx.extend([base, base + 2, base + 1, base, base + 3, base + 2]);
 
-                // Each edge drops to the highest floor below it across the edge (a slab's only down to its underside).
+                // Each edge drops to every floor below it across the edge, up to the underside of whatever is over
+                // that floor there, so the space under a neighboring slab is walled off too (a slab's side only goes
+                // down to its own underside).
                 for ((a, b), (dx, dz), (na, nb)) in EDGES {
                     let (nx, nz) = (x.wrapping_add_signed(dx), z.wrapping_add_signed(dz));
                     if nx >= MAP.width() || nz >= MAP.depth() || (MAP.is_wall(nx, nz) && f.bottom == f32::NEG_INFINITY) {
                         continue;
                     }
-                    let below = MAP.floors(nx, nz).iter().filter(|g| g.corners[na] <= f.corners[a] + 0.01 && g.corners[nb] <= f.corners[b] + 0.01 && !MAP.is_wall(nx, nz));
-                    let next = below.max_by(|g, h| (g.corners[na] + g.corners[nb]).total_cmp(&(h.corners[na] + h.corners[nb])));
-                    let (mut lo_a, mut lo_b) = next.map_or((f.bottom, f.bottom), |g| (g.corners[na], g.corners[nb]));
-                    lo_a = lo_a.max(f.bottom).max(-1.0);
-                    lo_b = lo_b.max(f.bottom).max(-1.0);
-                    if f.corners[a] - lo_a < 0.02 && f.corners[b] - lo_b < 0.02 {
-                        continue;
+                    let others = if MAP.is_wall(nx, nz) { &[][..] } else { MAP.floors(nx, nz) };
+                    let below = others.iter().filter(|g| g.corners[na] <= f.corners[a] + 0.01 && g.corners[nb] <= f.corners[b] + 0.01);
+                    let mut spans: Vec<((f32, f32), (f32, f32))> = below
+                        .map(|g| {
+                            let over = others.iter().filter(|h| h.y > g.y).map(|h| h.bottom).fold(f32::INFINITY, f32::min);
+                            ((g.corners[na], g.corners[nb]), (f.corners[a].min(over), f.corners[b].min(over)))
+                        })
+                        .collect();
+                    if spans.is_empty() {
+                        spans.push(((f.bottom, f.bottom), (f.corners[a], f.corners[b])));
                     }
-                    let out = Vec3::new(dx as f32, 0.0, dz as f32);
-                    let (ca, cb) = (cells[a], cells[b]);
-                    sides.push([corner_at(ca.0, ca.1, lo_a), corner_at(cb.0, cb.1, lo_b), corner_at(cb.0, cb.1, f.corners[b]), corner_at(ca.0, ca.1, f.corners[a])], out);
+                    for ((lo_a, lo_b), (hi_a, hi_b)) in spans {
+                        let (lo_a, lo_b) = (lo_a.max(f.bottom).max(-1.0), lo_b.max(f.bottom).max(-1.0));
+                        let (hi_a, hi_b) = (hi_a.max(lo_a), hi_b.max(lo_b));
+                        if hi_a - lo_a < 0.02 && hi_b - lo_b < 0.02 {
+                            continue;
+                        }
+                        let out = Vec3::new(dx as f32, 0.0, dz as f32);
+                        let (ca, cb) = (cells[a], cells[b]);
+                        sides.push([corner_at(ca.0, ca.1, lo_a), corner_at(cb.0, cb.1, lo_b), corner_at(cb.0, cb.1, hi_b), corner_at(ca.0, ca.1, hi_a)], out);
+                    }
                 }
                 if f.bottom > f32::NEG_INFINITY {
                     let under: [Vec3; 4] = std::array::from_fn(|k| corner_at(cells[k].0, cells[k].1, f.bottom));
