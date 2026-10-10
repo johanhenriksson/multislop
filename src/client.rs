@@ -108,8 +108,9 @@ struct Game {
     died_at: Option<Instant>,
     round: Option<Round>,
     teams: HashMap<u32, Team>,
-    /// Clock time of the next bomb beep.
+    /// Clock time of the next bomb beep, and of the last one (for the light).
     next_beep: f64,
+    last_beep: f64,
     /// Where and when (clock) the bomb went off, for the flash.
     explosion: Option<(Vec3, f64)>,
     /// The teammate we watch while dead: id, interpolated eye position and view.
@@ -278,6 +279,10 @@ struct Scoreboard;
 
 #[derive(Component)]
 struct BombModel;
+
+/// The C4's red light, blinking with each beep.
+#[derive(Component)]
+struct BombLed(Handle<StandardMaterial>);
 
 #[derive(Component)]
 struct DeathFade;
@@ -464,13 +469,7 @@ fn setup(
         let at = p.with_y(MAP.floor_at(p) + 0.03);
         commands.spawn((Mesh3d(site_mesh.clone()), MeshMaterial3d(site_mat.clone()), Transform::from_translation(at)));
     }
-    commands.spawn((
-        BombModel,
-        Mesh3d(meshes.add(Cuboid::new(0.4, 0.15, 0.3))),
-        MeshMaterial3d(mats.add(StandardMaterial { base_color: Color::srgb(0.9, 0.1, 0.1), unlit: true, ..default() })),
-        Transform::default(),
-        Visibility::Hidden,
-    ));
+    spawn_c4(&mut commands, &mut meshes, &mut mats);
     commands.spawn((
         Scoreboard,
         Text::new(""),
@@ -1179,12 +1178,22 @@ fn spectating(g: &Game) -> bool {
 
 fn render_bomb(
     mut bomb: Single<(&mut Transform, &mut Visibility), With<BombModel>>,
+    led: Single<(&BombLed, &mut PointLight)>,
+    mut mats: ResMut<Assets<StandardMaterial>>,
     g: Res<Game>,
     mut gizmos: Gizmos,
 ) {
+    // The light flashes with each beep while planted.
+    let planted = matches!(g.round.map(|r| r.bomb), Some(Bomb::Planted(_)));
+    let lit = planted && clock() - g.last_beep < 0.09;
+    let (led, mut light) = led.into_inner();
+    if let Some(mut m) = mats.get_mut(&led.0) {
+        m.emissive = if lit { LinearRgba::rgb(40.0, 0.0, 0.0) } else { LinearRgba::rgb(0.3, 0.0, 0.0) };
+    }
+    light.intensity = if lit { 4000.0 } else { 0.0 };
     let (t, vis) = &mut *bomb;
     let at = match g.round.map(|r| r.bomb) {
-        Some(Bomb::Dropped(p) | Bomb::Planted(p)) => Some(p + Vec3::Y * 0.08),
+        Some(Bomb::Dropped(p) | Bomb::Planted(p)) => Some(p + Vec3::Y * 0.045),
         // On the carrier's back.
         Some(Bomb::Carried(_)) => g.carrier_pos.map(|p| p + Vec3::Y * 1.1),
         _ => None,
@@ -1206,6 +1215,7 @@ fn bomb_beep(mut g: ResMut<Game>) {
     if clock() < g.next_beep {
         return;
     }
+    g.last_beep = clock();
     g.next_beep = clock() + 0.12 + 0.88 * (time_left / BOMB_SECS) as f64;
     let volume = 0.7 / (1.0 + pos.distance(g.pred.pos) / 15.0);
     g.sounds.push((Sound::Beep, volume));
@@ -1865,4 +1875,32 @@ fn chat(mut text: Single<&mut Text, With<ChatText>>, mut g: ResMut<Game>) {
 
 fn radio_menu(mut vis: Single<&mut Visibility, With<RadioMenu>>, g: Res<Game>) {
     **vis = if g.radio_menu || std::env::var_os("FPS16_RADIOMENU").is_some() { Visibility::Inherited } else { Visibility::Hidden };
+}
+
+/// C4: an olive brick of charges taped together, keypad and display on top, a couple of wires and a red light.
+fn spawn_c4(commands: &mut Commands, meshes: &mut Assets<Mesh>, mats: &mut Assets<StandardMaterial>) {
+    let mut part = |size: [f32; 3], at: [f32; 3], color: Color| {
+        (Mesh3d(meshes.add(Cuboid::from_size(Vec3::from(size)))), MeshMaterial3d(mats.add(color)), Transform::from_translation(Vec3::from(at)))
+    };
+    let parts = [
+        part([0.34, 0.08, 0.2], [0.0, 0.0, 0.0], Color::srgb(0.36, 0.37, 0.25)),
+        part([0.345, 0.082, 0.03], [0.0, 0.0, -0.06], Color::srgb(0.45, 0.38, 0.22)),
+        part([0.345, 0.082, 0.03], [0.0, 0.0, 0.06], Color::srgb(0.45, 0.38, 0.22)),
+        part([0.13, 0.015, 0.1], [0.05, 0.046, 0.0], Color::srgb(0.12, 0.12, 0.12)),
+        part([0.09, 0.008, 0.035], [0.05, 0.056, -0.025], Color::srgb(0.25, 0.45, 0.2)),
+        part([0.02, 0.012, 0.16], [-0.1, 0.046, 0.0], Color::srgb(0.7, 0.1, 0.1)),
+        part([0.02, 0.012, 0.16], [-0.07, 0.046, 0.0], Color::srgb(0.15, 0.2, 0.6)),
+    ];
+    let led_mat = mats.add(StandardMaterial { base_color: Color::srgb(0.6, 0.0, 0.0), emissive: LinearRgba::rgb(0.3, 0.0, 0.0), ..default() });
+    let led = commands
+        .spawn((
+            BombLed(led_mat.clone()),
+            Mesh3d(meshes.add(Sphere::new(0.012))),
+            MeshMaterial3d(led_mat),
+            Transform::from_xyz(0.1, 0.056, 0.03),
+            PointLight { intensity: 0.0, range: 3.0, color: Color::srgb(1.0, 0.1, 0.05), ..default() },
+        ))
+        .id();
+    let ids: Vec<Entity> = parts.into_iter().map(|p| commands.spawn(p).id()).collect();
+    commands.spawn((BombModel, Transform::default(), Visibility::Hidden)).add_children(&ids).add_child(led);
 }
