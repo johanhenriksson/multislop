@@ -245,12 +245,16 @@ struct Game {
     map: String,
 }
 
-/// Asks each module what it is, keeping only the newest file of each game, and lists every map of each.
+/// Asks each module what it is, keeping one file of each game (our own before downloaded ones, then the newest), and
+/// lists every map of each.
 fn find_games(paths: &[std::path::PathBuf]) -> Vec<Game> {
-    let mut newest: BTreeMap<String, (std::time::SystemTime, Vec<String>, Vec<u8>)> = BTreeMap::new();
+    let mut newest: BTreeMap<String, ((bool, std::time::SystemTime), Vec<String>, Vec<u8>)> = BTreeMap::new();
+    let cache = crate::client::games_dir();
     for path in paths {
         let Ok(bytes) = std::fs::read(path) else { continue };
-        let modified = path.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+        // Our own modules (--game, next to the binary, built by cargo) over downloaded ones, which are touched on
+        // every use and can be from an older build.
+        let modified = (!path.starts_with(&cache), path.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH));
         if newest.values().any(|(at, _, b)| *at >= modified && *b == bytes) {
             continue;
         }
