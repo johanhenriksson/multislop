@@ -91,6 +91,11 @@ fn row(commands: &mut Commands, parent: Entity, cells: [String; 4], size: f32, c
 }
 
 impl Browser {
+    /// Why we're back here (a lost connection, say).
+    pub fn show_error(&mut self, why: String) {
+        (self.error, self.dirty) = (why, true);
+    }
+
     /// Joinable servers first, then by name.
     fn sorted(&self) -> Vec<(SocketAddr, &Found)> {
         let mut rows: Vec<(SocketAddr, &Found)> = self.found.iter().map(|(a, f)| (*a, f)).collect();
@@ -259,6 +264,7 @@ pub fn browse(
     }
     if let Some(addr) = join {
         net.server = Some(addr);
+        b.error.clear();
         commands.entity(*host_list).despawn_children();
         return;
     }

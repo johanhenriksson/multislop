@@ -41,6 +41,10 @@ impl Ids {
 #[derive(Resource, Default)]
 pub struct Clicked(pub Option<u32>);
 
+/// A sound the game started, stopped when the game is torn down.
+#[derive(Component)]
+pub struct GameSound;
+
 /// Keeps a HUD node centered on a world point.
 #[derive(Component)]
 pub struct WorldAnchor(Vec3);
@@ -53,6 +57,7 @@ pub struct Renderer<'w, 's> {
     images: ResMut<'w, Assets<Image>>,
     mats: ResMut<'w, Assets<StandardMaterial>>,
     audio: ResMut<'w, Assets<AudioSource>>,
+    playing: Query<'w, 's, Entity, With<GameSound>>,
 }
 
 pub fn color(c: g::Color) -> Color {
@@ -79,8 +84,20 @@ impl Renderer<'_, '_> {
         for p in sounds {
             let Some(Asset::Sound(handle)) = self.ids.assets.get(&p.sound) else { continue };
             let settings = if p.looped { PlaybackSettings::LOOP } else { PlaybackSettings::DESPAWN };
-            self.commands.spawn((AudioPlayer::new(handle.clone()), PlaybackSettings { volume: Volume::Linear(p.volume), ..settings }));
+            self.commands.spawn((GameSound, AudioPlayer::new(handle.clone()), PlaybackSettings { volume: Volume::Linear(p.volume), ..settings }));
         }
+    }
+
+    /// Removes everything the game made: scene, HUD, sounds, environment and assets.
+    pub fn clear(&mut self) {
+        let ids = &mut *self.ids;
+        let entities = ids.nodes.drain().chain(ids.ui.drain()).map(|(_, e)| e).chain(ids.sun.take()).chain(&self.playing);
+        for e in entities.collect::<Vec<_>>() {
+            self.commands.entity(e).try_despawn();
+        }
+        (ids.assets, ids.lights, ids.clickable) = default();
+        self.commands.entity(ids.camera).remove::<DistanceFog>();
+        self.commands.insert_resource(ClearColor::default());
     }
 
     fn apply_one(&mut self, cmd: g::Command) {

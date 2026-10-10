@@ -79,9 +79,9 @@ pub trait ServerGame {
     fn info(&mut self) -> GameInfo;
 }
 
-/// Recent entity positions, for lag compensation: rewinding others to where a shooter saw them.
+/// Recent entities, for lag compensation: rewinding others to where (and how, e.g. crouched) a shooter saw them.
 pub struct History {
-    ticks: VecDeque<(u32, Vec<(u32, Vec3, u8)>)>,
+    ticks: VecDeque<(u32, Vec<Entity>)>,
     keep: usize,
 }
 
@@ -91,23 +91,23 @@ impl History {
     }
 
     pub fn record(&mut self, tick: u32, entities: &[Entity]) {
-        self.ticks.push_back((tick, entities.iter().map(|e| (e.id, e.pos, e.teleport)).collect()));
+        self.ticks.push_back((tick, entities.to_vec()));
         while self.ticks.len() > self.keep {
             self.ticks.pop_front();
         }
     }
 
-    /// Where `now` was at a fractional tick: its current position when there's no record, None if it has teleported
-    /// since (a respawned player can't be hit where they died).
-    pub fn rewind(&self, now: &Entity, at: f32) -> Option<Vec3> {
+    /// `now` as it was at a fractional tick (position interpolated, data from the earlier tick): `now` itself when
+    /// there's no record, None if it has teleported since (a respawned player can't be hit where they died).
+    pub fn rewind(&self, now: &Entity, at: f32) -> Option<Entity> {
         let find = |t: u32| {
             let (_, es) = self.ticks.iter().find(|(ht, _)| *ht == t)?;
-            es.iter().find(|(id, ..)| *id == now.id).map(|&(_, pos, teleport)| (pos, teleport == now.teleport))
+            es.iter().find(|e| e.id == now.id).filter(|e| e.teleport == now.teleport).map(Some)
         };
         match (find(at.floor() as u32), find(at.ceil() as u32)) {
-            (Some(a), Some(b)) => (a.1 && b.1).then(|| a.0.lerp(b.0, at.fract())),
-            (Some(a), None) | (None, Some(a)) => a.1.then_some(a.0),
-            (None, None) => Some(now.pos),
+            (Some(Some(a)), Some(Some(b))) => Some(Entity { pos: a.pos.lerp(b.pos, at.fract()), ..a.clone() }),
+            (Some(a), _) | (None, Some(a)) => a.cloned(),
+            (None, None) => Some(now.clone()),
         }
     }
 }

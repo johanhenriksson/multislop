@@ -23,6 +23,8 @@ Deadline: playable before 00:00. One weapon, one simple map.
   ping. Servers on another build answer with their build and are listed grayed out. Entries vanish after 3.5 s of
   silence. Click a server, or arrow keys and Enter, or type an address (remembered in
   `~/Library/Application Support/fps16/host`) and press Enter.
+- Back to the browser, with the reason shown, when the server goes quiet for 5 s in a game, never answers for 10 s,
+  or runs another build; the game's scene, HUD, sounds and environment are torn down and the mouse is freed.
 - "Host a LAN game" lists the game modules it can find (`--game`, `.wasm` files next to the binary, downloaded ones
   in `games/`), each loaded once and named by its `GameInfo` (game and map); identical files are listed once. The
   picked one runs as a server on a thread in the client, on the first free port of 5000-5009, named
@@ -31,6 +33,9 @@ Deadline: playable before 00:00. One weapon, one simple map.
 ## Gameplay
 - Players are capsules ("rounded cylinders"): radius 0.4, height 1.8, eye at 1.6.
 - Movement: Quake/GoldSrc style (ground friction, accel, air accel, gravity, jump). WASD + mouse, space jumps.
+- Ctrl crouches over 0.2 s: 1.0 m tall instead of 1.8, eye at 0.85, 34% speed (silent), 30% less spread; standing up
+  needs headroom. Hits use the crouched hull (zones scale with it) as it was at the shooter's view tick; crouched
+  players are drawn down on one knee.
 - HUD (CS 1.6 style): amber health cross, armor, money, ammo, round timer bottom-center; green dynamic crosshair
   that spreads with movement, air and recoil (gray while reloading); score and round messages top; N toggles the
   net_graph line; Tab shows the CS scoreboard (per team: score, deaths, latency; dead/bomb marked) (ping is network round trip only, via
@@ -63,7 +68,8 @@ Deadline: playable before 00:00. One weapon, one simple map.
   only notice enemies in a 120° field of view (callouts too), aim with a reaction delay, limited turn speed and angular aim error (~30% accuracy bot vs bot; `src/bot.rs`
   constants are the difficulty knobs).
 - Map: dust, traced from a top-down overview image into an ASCII grid in `src/map.rs` (2 m cells, flat): B site
-  top-left, A bottom-left, CT spawn between them, T spawn bottom-right, tunnels through the middle. Sites tinted red.
+  top-left, A bottom-left, CT spawn between them, T spawn at the back on the right (as far from A as from B),
+  tunnels through the middle. Sites tinted red.
 - Height: a second grid (`DUST2_HEIGHTS`, quarter meters, base 36) gives each cell a floor height: 2 m streets, tunnels
   sunk to 0 with ramps (from the dark areas of the overview), B site and T spawn yard raised 1 m. The floor is
   interpolated between cell corners; you walk up rises under 0.5 m, stay glued going down, and bullets/sight lines

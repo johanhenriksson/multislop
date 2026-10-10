@@ -400,6 +400,7 @@ impl ClientGame for DustClient {
             slot: std::mem::take(&mut self.want_slot),
             reload: std::mem::take(&mut self.want_reload),
             zoom: self.zoom,
+            duck: raw.held(Key::ControlLeft) || raw.held(Key::ControlRight),
             buy: std::mem::take(&mut self.want_buy),
             radio: std::mem::take(&mut self.want_radio),
             ..Default::default()
@@ -656,7 +657,7 @@ impl DustClient {
             return Camera { pos: eye, rot: look_rot(yaw, pitch), fov };
         }
         let (side, up) = punch(&self.pred);
-        Camera { pos: me_pos + Vec3::Y * EYE, rot: look_rot(self.yaw + side, self.pitch + up), fov }
+        Camera { pos: me_pos + Vec3::Y * eye_height(&self.pred), rot: look_rot(self.yaw + side, self.pitch + up), fov }
     }
 
     fn render_remotes(&mut self, others: &[sdk::Interpolated], dt: f32) {
@@ -681,22 +682,22 @@ impl DustClient {
             let alive = alive_now && p.hp > 0 && !v.teleporting;
             let life = if alive { Life::Alive } else if !alive_now { Life::Dead } else { Life::Respawning };
             if alive && spectate.is_none() && Some(p.team) == my_team {
-                spectate = Some((p.id, pos + Vec3::Y * EYE, yaw, pitch));
+                spectate = Some((p.id, pos + Vec3::Y * eye_height(&p.state), yaw, pitch));
             }
             if Some(p.id) == carrier {
                 carrier_pos = Some(pos);
             }
-            seen.insert(p.id, (pos, yaw, pitch, life, p.state.weapon()));
+            seen.insert(p.id, (pos, yaw, pitch, life, p.state.weapon(), p.state.duck));
         }
         self.render_grenades(grenades);
         (self.spectate, self.carrier_pos) = (spectate, carrier_pos);
         // Whoever is under the crosshair, walls permitting, for the "Friend: / Enemy:" line.
-        let (eye, dir) = (self.pred.pos + Vec3::Y * EYE, look_rot(self.yaw, self.pitch) * Vec3::NEG_Z);
+        let (eye, dir) = (eye(&self.pred), look_rot(self.yaw, self.pitch) * Vec3::NEG_Z);
         let wall = trace_world(eye, dir);
         self.aim_target = seen
             .iter()
             .filter(|(_, v)| v.3 == Life::Alive)
-            .filter_map(|(&id, v)| trace_capsule(eye, dir, v.0).filter(|&t| t < wall).map(|t| (id, t)))
+            .filter_map(|(&id, v)| trace_capsule(eye, dir, v.0, height(v.5)).filter(|&t| t < wall).map(|t| (id, t)))
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(id, _)| id);
         // We're looking out of their eyes, so their own model would only block the view.
@@ -707,7 +708,7 @@ impl DustClient {
             let rig = self.rigs.remove(&id).unwrap();
             self.scene.push(Command::Despawn { id: rig.root });
         }
-        for (&id, &(pos, yaw, pitch, life, weapon)) in &seen {
+        for (&id, &(pos, yaw, pitch, life, weapon, duck)) in &seen {
             if !self.rigs.contains_key(&id) {
                 let team = self.teams.get(&id).copied().unwrap_or(Team::T);
                 let rig = spawn_soldier(&mut self.scene, team, Transform::at(pos).rotated(Quat::from_rotation_y(yaw)));
@@ -728,7 +729,9 @@ impl DustClient {
                 }
             };
             let side = if id % 2 == 0 { 1.0 } else { -1.0 };
-            let root = Transform::at(pos + Vec3::Y * 0.13 * fall).rotated(Quat::from_rotation_y(yaw) * Quat::from_rotation_x(side * 1.5 * fall));
+            // Crouched: down on one knee, legs swung back from the hips.
+            let duck = if life == Life::Dead { 0.0 } else { duck };
+            let root = Transform::at(pos + Vec3::Y * (0.13 * fall - 0.42 * duck)).rotated(Quat::from_rotation_y(yaw) * Quat::from_rotation_x(side * 1.5 * fall));
             // Players pass through each other; hide anyone overlapping our camera rather than fill the screen with them.
             // ponytail: no player-player collision. Add it to the shared movement if walking through people matters.
             let overlapping = pos.with_y(0.0).distance(self.pred.pos.with_y(0.0)) < RADIUS * 2.0;
@@ -755,7 +758,8 @@ impl DustClient {
             let out = &mut self.scene.out;
             out.push(Command::Set { id: rig.root, transform: Some(root), visible: Some(shown), light: None });
             for (leg, (x, dir)) in rig.legs.into_iter().zip([(-0.11, 1.0), (0.11, -1.0)]) {
-                out.push(Command::set_transform(leg, Transform::at(Vec3::new(x, 0.92, 0.0)).rotated(Quat::from_rotation_x(swing * dir))));
+                let bend = Quat::from_rotation_x(swing * dir * (1.0 - duck) - 1.0 * duck);
+                out.push(Command::set_transform(leg, Transform::at(Vec3::new(x, 0.92, 0.0)).rotated(bend)));
             }
             out.push(Command::set_transform(rig.arms, Transform::at(Vec3::new(0.0, 1.42, 0.0)).rotated(Quat::from_rotation_x(pitch))));
             let gun = weapon as usize;

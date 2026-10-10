@@ -25,6 +25,8 @@ pub struct Seen {
     pub id: u32,
     pub team: Team,
     pub pos: Vec3,
+    /// Where to look and aim: lower when crouched.
+    pub chest: Vec3,
     pub alive: bool,
 }
 
@@ -44,6 +46,8 @@ pub struct Bot {
     /// CT: spots next to cover that watch where Ts enter the site, and when to move to another one.
     cover: Vec<Vec3>,
     reposition_at: u32,
+    /// T after the plant: where this bot guards the bomb from.
+    guard: Option<Vec3>,
     /// Strafe direction in a fight (-1 or 1) and when to switch it.
     strafe: f32,
     strafe_until: u32,
@@ -72,6 +76,7 @@ impl Bot {
             via: None,
             cover: vec![],
             reposition_at: 0,
+            guard: None,
             strafe: 1.0,
             strafe_until: 0,
             round: 0,
@@ -129,13 +134,25 @@ impl Bot {
             .filter(|&(x, z)| MAP.walkable(x, z) && near_cover(x, z))
             .map(|(x, z)| MAP.ground(x, z))
             .filter(|p| p.distance(center.with_y(p.y)) < 12.0 && p.distance(choke) > 6.0)
-            .filter(|p| can_see(*p + Vec3::Y * EYE, choke))
+            .filter(|p| can_see(*p + Vec3::Y * EYE, choke + Vec3::Y * HEIGHT * (2.0 / 3.0)))
             .collect();
         for i in (1..spots.len()).rev() {
             let j = (self.random() * (i + 1) as f32) as usize;
             spots.swap(i, j.min(i));
         }
         spots
+    }
+
+    /// A random open floor cell 3-9 m from the planted bomb, with a line of sight to it, to guard it from.
+    fn guard_spot(&mut self, bomb: Vec3) -> Vec3 {
+        let spots: Vec<Vec3> = (0..MAP.depth())
+            .flat_map(|z| (0..MAP.width()).map(move |x| (x, z)))
+            .filter(|&(x, z)| MAP.walkable(x, z))
+            .map(|(x, z)| MAP.ground(x, z))
+            .filter(|p| (3.0..9.0).contains(&p.distance(bomb)) && can_see(*p + Vec3::Y * EYE, bomb + Vec3::Y * 0.3))
+            .collect();
+        let pick = (self.random() * spots.len() as f32) as usize;
+        spots.get(pick).copied().unwrap_or(bomb)
     }
 
     /// A random floor cell on a bomb site, near its middle.
@@ -217,10 +234,11 @@ impl Bot {
             self.via = self.pick_via(me.pos, self.spot, detour);
             self.positioned = false;
             self.target = None;
+            self.guard = None;
         }
 
         let eye = eye(me);
-        let visible_enemies = players.iter().filter(|p| p.alive && p.team != team && can_see(eye, p.pos) && in_view(me, p.pos)).count();
+        let visible_enemies = players.iter().filter(|p| p.alive && p.team != team && can_see(eye, p.chest) && in_view(me, p.chest)).count();
         // Our target just went down.
         if self.target.is_some_and(|(t, _)| players.iter().any(|p| p.id == t && !p.alive)) && visible_enemies == 0 {
             self.say(Radio::SectorClear, tick, 0.6);
@@ -228,8 +246,8 @@ impl Bot {
         let enemy = players
             .iter()
             // A new enemy has to be in view; one we're already fighting is tracked while we turn.
-            .filter(|p| p.alive && p.team != team && can_see(eye, p.pos))
-            .filter(|p| in_view(me, p.pos) || self.target.is_some_and(|(t, _)| t == p.id))
+            .filter(|p| p.alive && p.team != team && can_see(eye, p.chest))
+            .filter(|p| in_view(me, p.chest) || self.target.is_some_and(|(t, _)| t == p.id))
             .min_by(|a, b| a.pos.distance(me.pos).total_cmp(&b.pos.distance(me.pos)));
         match (enemy, self.target) {
             (Some(e), Some((t, _))) if e.id == t => {}
@@ -244,7 +262,7 @@ impl Bot {
         if let (Some(e), Some((_, since))) = (enemy, self.target) {
             // Stand and fight: turn towards the target at limited speed, fire once lined up and reacted.
             self.aim_error = (self.aim_error.0 * AIM_SETTLE, self.aim_error.1 * AIM_SETTLE);
-            let (yaw, pitch) = look_at(eye, e.pos + Vec3::Y * 1.2);
+            let (yaw, pitch) = look_at(eye, e.chest);
             let (yaw, pitch) = (yaw + self.aim_error.0, pitch + self.aim_error.1);
             let max = AIM_TURN_SPEED * DT;
             inp.yaw = me.yaw + wrap(yaw - me.yaw).clamp(-max, max);
@@ -344,7 +362,12 @@ impl Bot {
             }
             (Team::T, Bomb::Dropped(p)) => (p, false),
             (_, Bomb::Planted(p)) if team == Team::Ct => (p, me.pos.distance(p) < BOMB_REACH - 0.3),
-            (_, Bomb::Planted(p)) => (p + Vec3::X * 3.0, false),
+            (_, Bomb::Planted(p)) => {
+                if self.guard.is_none() {
+                    self.guard = Some(self.guard_spot(p));
+                }
+                (self.guard.unwrap_or(p), false)
+            }
             _ => (site, false),
         }
     }
@@ -368,15 +391,15 @@ fn path_dir(field: &mut Vec<u16>, field_goal: &mut (usize, usize), pos: Vec3, go
     (target - pos).with_y(0.0).normalize_or_zero()
 }
 
-/// Whether a position is inside this player's field of view (ignores walls).
-pub fn in_view(viewer: &PlayerState, feet: Vec3) -> bool {
-    let to = (feet + Vec3::Y * 1.2 - eye(viewer)).normalize_or_zero();
+/// Whether a point is inside this player's field of view (ignores walls).
+pub fn in_view(viewer: &PlayerState, at: Vec3) -> bool {
+    let to = (at - eye(viewer)).normalize_or_zero();
     aim_dir(viewer).dot(to) > VIEW_HALF_ANGLE.cos()
 }
 
-/// Line of sight from an eye to a player's chest, within sight range.
-pub fn can_see(eye: Vec3, feet: Vec3) -> bool {
-    let to = feet + Vec3::Y * 1.2 - eye;
+/// Line of sight from an eye to a point (a player's chest), within sight range.
+pub fn can_see(eye: Vec3, at: Vec3) -> bool {
+    let to = at - eye;
     to.length() < SIGHT_RANGE && trace_world(eye, to.normalize()) > to.length()
 }
 
@@ -392,4 +415,25 @@ fn look_at(from: Vec3, to: Vec3) -> (f32, f32) {
 
 fn wrap(a: f32) -> f32 {
     (a + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// After a plant, Ts head for their own guard spot: open floor near the bomb that they can actually walk to.
+    #[test]
+    fn guard_spots_are_reachable_floor_near_the_bomb() {
+        let mut bot = Bot::new(7);
+        for bomb in MAP.site_cells().step_by(5) {
+            let bomb = bomb.with_y(MAP.floor_at(bomb));
+            let spot = bot.guard_spot(bomb);
+            let (x, z) = MAP.cell(spot);
+            assert!(MAP.walkable(x, z), "guard spot {spot} for {bomb} is inside something");
+            assert!(spot.distance(bomb) < 9.0);
+            let field = MAP.distance_field(MAP.cell(bomb));
+            let (sx, sz) = MAP.cell(MAP.spawns(Team::T)[0]);
+            assert!(field[z * MAP.width() + x] < field[sz * MAP.width() + sx], "reachable");
+        }
+    }
 }

@@ -177,7 +177,7 @@ impl ServerGame for Dust {
 
     fn info(&mut self) -> GameInfo {
         let bots = self.players.values().filter(|c| c.bot.is_some()).count() as u32;
-        GameInfo { game: "Bomb defusal".into(), map: "dust".into(), players: self.players.len() as u32 - bots, bots }
+        GameInfo { game: "Dust".into(), map: "dust".into(), players: self.players.len() as u32 - bots, bots }
     }
 }
 
@@ -215,12 +215,12 @@ fn run_inputs(
     throws: &mut Vec<Grenade>,
 ) {
     let seen: Vec<Seen> =
-        players.values().map(|c| Seen { id: c.id, team: c.team, pos: c.state.pos, alive: c.hp > 0 }).collect();
+        players.values().map(|c| Seen { id: c.id, team: c.team, pos: c.state.pos, chest: chest(&c.state), alive: c.hp > 0 }).collect();
     // An enemy any living teammate (bot or human) can see right now, so bots can rotate to help.
     let callout = |team: Team| {
         let mut spotters = players.values().filter(|c| c.team == team && c.hp > 0);
         let enemies = || seen.iter().filter(|p| p.alive && p.team != team);
-        spotters.find_map(|c| enemies().find(|p| in_view(&c.state, p.pos) && can_see(eye(&c.state), p.pos)).map(|p| p.pos))
+        spotters.find_map(|c| enemies().find(|p| in_view(&c.state, p.chest) && can_see(eye(&c.state), p.chest)).map(|p| p.pos))
     };
     let callouts = [callout(Team::T), callout(Team::Ct)];
     for c in players.values_mut() {
@@ -315,7 +315,7 @@ fn balance_bots(m: &mut Match, players: &mut Players, next_id: &mut u32) {
 
 fn spawn_state(team: Team, index: usize) -> PlayerState {
     let spawns = MAP.spawns(team);
-    // T spawn is south facing north (-z), CT the other way round.
+    // Ts face north up their corridor, where the routes to both sites branch off; CTs face south.
     let yaw = if team == Team::T { 0.0 } else { std::f32::consts::PI };
     let mut s = PlayerState { pos: spawns[index % spawns.len()], yaw, frozen: true, ..Default::default() };
     s.loadout(None, Weapon::default_pistol(team));
@@ -517,7 +517,7 @@ fn fire(
     let ability = weapon.ability();
     let view_tick = view_tick.clamp(tick as f32 - MAX_REWIND_TICKS, tick as f32);
     let wall = trace_world(o, d).min(ability.range());
-    let mut best: Option<(u32, f32, Vec3)> = None;
+    let mut best: Option<(u32, f32, Vec3, f32)> = None;
     let team = players.values().find(|c| c.id == shooter).map(|c| c.team);
     for c in players.values() {
         // Friendly fire is off: shots pass through teammates.
@@ -525,17 +525,19 @@ fn fire(
             continue;
         }
         let now = Entity { id: c.id, pos: c.state.pos, teleport: c.teleport, ..Default::default() };
-        let Some(pos) = history.rewind(&now, view_tick) else { continue };
-        if let Some(t) = trace_capsule(o, d, pos) {
+        let Some(then) = history.rewind(&now, view_tick) else { continue };
+        let tall = height(NetPlayer::from_entity(&then).map_or(c.state.duck, |p| p.state.duck));
+        if let Some(t) = trace_capsule(o, d, then.pos, tall) {
             if t < wall && best.is_none_or(|b| t < b.1) {
-                best = Some((c.id, t, pos));
+                best = Some((c.id, t, then.pos, tall));
             }
         }
     }
-    let Some((victim, t, feet)) = best else { return (o + d * wall, None) };
+    let Some((victim, t, feet, tall)) = best else { return (o + d * wall, None) };
 
-    let height = (o + d * t).y - feet.y;
-    let (headshot, legs) = (height > HEAD_HEIGHT, height < LEGS_HEIGHT);
+    // Zones scale with the hull, so a crouched head is still a head.
+    let up = ((o + d * t).y - feet.y) / tall * HEIGHT;
+    let (headshot, legs) = (up > HEAD_HEIGHT, up < LEGS_HEIGHT);
     let zone = if headshot { 4.0 } else if legs { 0.75 } else { 1.0 };
     let falloff = match ability.delivery {
         Delivery::Hitscan { falloff, .. } => falloff.powf(t / 12.7),
@@ -814,9 +816,14 @@ mod tests {
         assert!(players.is_empty(), "bots leave with the last human");
     }
 
-    /// Shoots east across the open T spawn yard at player 2, `dist` away, at a given height.
+    /// The big open yard in the south-east, with a long clear line east.
+    fn yard() -> Vec3 {
+        MAP.ground(38, 44)
+    }
+
+    /// Shoots east across the open yard at player 2, `dist` away, at a given height.
     fn shoot_at(players: &mut Players, weapon: Weapon, dist: f32, height: f32) -> Option<Hit> {
-        let start = MAP.spawns(Team::T)[0];
+        let start = yard();
         player_mut(players, 2).state.pos = start + Vec3::X * dist;
         fire(players, &History::new(0), 100, 1, weapon, (start + Vec3::Y * height, Vec3::X), 100.0).1
     }
@@ -849,6 +856,37 @@ mod tests {
         assert!(shoot_at(&mut players, Weapon::Knife, 3.0, 1.2).is_none(), "knife reach is short");
     }
 
+    /// A crouched target is shorter: chest-high shots over it miss, its head is still a head, and the shooter's
+    /// lag compensation uses how crouched it was back then.
+    #[test]
+    fn crouched_targets_are_shorter() {
+        let mut players = Players::new();
+        players.insert(1, client(1, Team::T));
+        players.insert(2, client(2, Team::Ct));
+        player_mut(&mut players, 2).state.duck = 1.0;
+        assert!(shoot_at(&mut players, Weapon::Ak47, 5.0, 1.3).is_none(), "over the head");
+        let head = shoot_at(&mut players, Weapon::Ak47, 5.0, 0.9).unwrap();
+        assert!(head.headshot, "{head:?}");
+
+        // Standing now, but crouched at the tick the shooter saw.
+        let start = yard();
+        let p = player_mut(&mut players, 2);
+        (p.hp, p.state.duck, p.state.pos) = (MAX_HP, 0.0, start + Vec3::X * 5.0);
+        let mut history = History::new(64);
+        let mut crouched = entities(&players);
+        crouched.iter_mut().for_each(|e| {
+            if let Some(mut p) = NetPlayer::from_entity(e).filter(|p| p.id == 2) {
+                p.state.duck = 1.0;
+                *e = p.entity(e.teleport);
+            }
+        });
+        history.record(90, &crouched);
+        history.record(100, &entities(&players));
+        let back_then = fire(&mut players, &history, 100, 1, Weapon::Ak47, (start + Vec3::Y * 1.3, Vec3::X), 90.0).1;
+        assert!(back_then.is_none(), "it was crouched at tick 90");
+        assert!(fire(&mut players, &history, 100, 1, Weapon::Ak47, (start + Vec3::Y * 1.3, Vec3::X), 100.0).1.is_some());
+    }
+
     #[test]
     fn buying_rules_and_round_money() {
         let (mut m, mut players, tick) = live();
@@ -875,11 +913,11 @@ mod tests {
         assert_eq!(player_mut(&mut players, 1).money, 5000 + 2 * LOSS_REWARD + LOSS_BONUS, "loss streak bonus");
     }
 
-    /// Player 1 winds up an HE grenade and lobs it at player 2, 4 m east in the open T spawn yard.
+    /// Player 1 winds up an HE grenade and lobs it at player 2, 4 m east in the open yard.
     #[test]
     fn he_grenade_hurts_enemies_nearby() {
         let (m, mut players, mut tick) = live();
-        let start = MAP.spawns(Team::T)[0];
+        let start = yard();
         let t = player_mut(&mut players, 1);
         (t.state.pos, t.state.grenade, t.state.ammo[2]) = (start, Some(Weapon::He), (1, 0));
         player_mut(&mut players, 2).state.pos = start + Vec3::X * 4.0;

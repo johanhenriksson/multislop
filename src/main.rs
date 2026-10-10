@@ -38,16 +38,13 @@ fn main() {
             let addr = args.get(1).filter(|a| !a.starts_with("--")).map(|a| crate::browser::resolve(a).expect("bad address"));
             let num = |name| flag(name).and_then(|v| v.parse().ok());
             let local = module(None);
-            let game = local.as_ref().map(|bytes| -> client::Game {
-                Box::new(wasm::WasmClient::load(bytes).unwrap_or_else(|e| panic!("can't load the game: {e:?}")))
-            });
             // What "Host a LAN game" in the browser offers: --game, modules next to this program, downloaded ones.
             let mut hostable: Vec<std::path::PathBuf> = flag("--game").map(Into::into).into_iter().collect();
             for dir in [beside().and_then(|p| Some(p.parent()?.to_path_buf())), Some(client::games_dir())].into_iter().flatten() {
                 let wasm = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path());
                 hostable.extend(wasm.filter(|p| p.extension().is_some_and(|e| e == "wasm")));
             }
-            client::run(addr, game, hostable, num("--lag").unwrap_or(0), num("--jitter").unwrap_or(0), num("--interp").unwrap_or(50));
+            client::run(addr, local, hostable, num("--lag").unwrap_or(0), num("--jitter").unwrap_or(0), num("--interp").unwrap_or(50));
         }
         _ => eprintln!(
             "usage: fps16 server [port] [--game game.wasm] [--name name] | fps16 client [host:port] [--game game.wasm] [--lag ms] [--jitter ms] [--interp ms]"

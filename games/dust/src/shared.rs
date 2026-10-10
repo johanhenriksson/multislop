@@ -12,6 +12,13 @@ pub const DT: f32 = 1.0 / TICK_HZ as f32;
 pub const RADIUS: f32 = 0.4;
 pub const HEIGHT: f32 = 1.8;
 pub const EYE: f32 = 1.6;
+/// Crouched (Ctrl): shorter, lower eye, slower and more accurate, taking `DUCK_SECS` to go down or up.
+pub const DUCK_HEIGHT: f32 = 1.0;
+pub const DUCK_EYE: f32 = 0.85;
+const DUCK_SECS: f32 = 0.2;
+/// Crouched speed and spread as fractions of standing (CS 1.6 speed).
+const DUCK_SPEED: f32 = 0.34;
+const DUCK_SPREAD: f32 = 0.7;
 
 // GoldSrc values converted from inches to meters.
 const MAX_SPEED: f32 = 6.35;
@@ -114,6 +121,8 @@ pub struct Input {
     pub walk: bool,
     /// Scoped in (AWP).
     pub zoom: bool,
+    /// Ctrl: crouch.
+    pub duck: bool,
     /// Buy menu item (1-based), 0 for none. Handled by the server; inputs are applied exactly once.
     pub buy: u8,
     /// Radio call from the Z menu (1-based into `Radio::MENU`), 0 for none.
@@ -147,6 +156,8 @@ pub struct PlayerState {
     pub hands: Hands,
     /// Freeze time: can look around but not move or shoot. Part of the state so prediction agrees with the server.
     pub frozen: bool,
+    /// How far crouched, 0 standing to 1 fully down.
+    pub duck: f32,
 }
 
 /// A player as clients see it, carried in an `sdk::Entity`.
@@ -262,8 +273,22 @@ pub struct Hit {
 }
 
 
+/// Height of the player's hull, crouching included.
+pub fn height(duck: f32) -> f32 {
+    HEIGHT - (HEIGHT - DUCK_HEIGHT) * duck
+}
+
+pub fn eye_height(s: &PlayerState) -> f32 {
+    EYE - (EYE - DUCK_EYE) * s.duck
+}
+
 pub fn eye(s: &PlayerState) -> Vec3 {
-    s.pos + Vec3::Y * EYE
+    s.pos + Vec3::Y * eye_height(s)
+}
+
+/// The middle of the chest, where bots look and aim.
+pub fn chest(s: &PlayerState) -> Vec3 {
+    s.pos + Vec3::Y * height(s.duck) * (2.0 / 3.0)
 }
 
 pub fn aim_dir(s: &PlayerState) -> Vec3 {
@@ -352,8 +377,9 @@ fn weapon_tick(s: &mut PlayerState, inp: &Input) -> Option<Fired> {
     s.hands = hands;
     let strength = strength?;
     let speed = s.vel.with_y(0.0).length() / MAX_SPEED;
-    let scope = (weapon == Weapon::Awp && inp.zoom).then_some(AWP_SCOPED_SPREAD);
-    let dir = s.hands.aim(ability, scope, speed, s.on_ground, s.yaw, s.pitch, inp.seq);
+    let base = if weapon == Weapon::Awp && inp.zoom { AWP_SCOPED_SPREAD } else { ability.accuracy.spread };
+    let spread = base * (1.0 - (1.0 - DUCK_SPREAD) * s.duck);
+    let dir = s.hands.aim(ability, Some(spread), speed, s.on_ground, s.yaw, s.pitch, inp.seq);
     // Thrown the last grenade: back to what was in hand before.
     if s.slot == Slot::Grenade && s.ammo[2].0 == 0 {
         s.grenade = None;
@@ -372,6 +398,17 @@ pub fn step_player(s: &mut PlayerState, inp: &Input) -> Option<Fired> {
     let right = Vec3::new(s.yaw.cos(), 0.0, -s.yaw.sin());
     let wish = if s.frozen { Vec3::ZERO } else { (fwd * inp.forward + right * inp.right).normalize_or_zero() };
 
+    // Going down is never blocked; standing up needs headroom.
+    let step = DT / DUCK_SECS;
+    if inp.duck {
+        s.duck = (s.duck + step).min(1.0);
+    } else if s.duck > 0.0 {
+        let up = (s.duck - step).max(0.0);
+        if !MAP.boxes.iter().any(|&(c, h)| overlaps(s.pos, c, h, height(up))) {
+            s.duck = up;
+        }
+    }
+
     if s.on_ground && inp.jump && !s.frozen {
         s.vel.y = JUMP_SPEED;
         s.on_ground = false;
@@ -385,7 +422,7 @@ pub fn step_player(s: &mut PlayerState, inp: &Input) -> Option<Fired> {
         // Lighter weapons in hand run faster; the knife fastest.
         let weapon = s.weapon();
         let scoped = if weapon == Weapon::Awp && inp.zoom { SCOPED_SPEED } else { 1.0 };
-        let scoped = scoped * if inp.walk { WALK_SPEED } else { 1.0 };
+        let scoped = scoped * if inp.walk { WALK_SPEED } else { 1.0 } * (1.0 - (1.0 - DUCK_SPEED) * s.duck);
         accelerate(&mut s.vel, wish, MAX_SPEED * weapon.spec().speed * scoped, ACCEL);
     } else {
         accelerate(&mut s.vel, wish, AIR_CAP, AIR_ACCEL * MAX_SPEED / AIR_CAP);
@@ -405,17 +442,18 @@ fn accelerate(vel: &mut Vec3, wish: Vec3, wish_speed: f32, accel: f32) {
     *vel += wish * (accel * MAX_SPEED * DT).min(add);
 }
 
-/// Overlap with a small skin so resting exactly on a face doesn't count, despite float error.
-fn overlaps(p: Vec3, c: Vec3, h: Vec3) -> bool {
+/// Overlap of a player hull `height` tall with a box, with a small skin so resting exactly on a face doesn't count.
+fn overlaps(p: Vec3, c: Vec3, h: Vec3, height: f32) -> bool {
     const SKIN: f32 = 1e-3;
     (p.x - c.x).abs() < h.x + RADIUS - SKIN
         && (p.z - c.z).abs() < h.z + RADIUS - SKIN
         && p.y < c.y + h.y - SKIN
-        && p.y + HEIGHT > c.y - h.y + SKIN
+        && p.y + height > c.y - h.y + SKIN
 }
 
 // ponytail: player collides with boxes as an AABB, axis-by-axis, and stands on the height field at its center point.
 fn move_and_collide(s: &mut PlayerState) {
+    let tall = height(s.duck);
     let was_on_ground = s.on_ground;
     s.on_ground = false;
     for axis in [0, 2, 1] {
@@ -425,11 +463,11 @@ fn move_and_collide(s: &mut PlayerState) {
             let mut prev = s.pos;
             prev[axis] = before;
             // Only resolve overlaps this axis' move caused; a touching contact on another axis must not teleport us.
-            if !overlaps(s.pos, c, h) || overlaps(prev, c, h) {
+            if !overlaps(s.pos, c, h, tall) || overlaps(prev, c, h, tall) {
                 continue;
             }
             let (lo, hi) = if axis == 1 {
-                (c.y - h.y - HEIGHT, c.y + h.y)
+                (c.y - h.y - tall, c.y + h.y)
             } else {
                 (c[axis] - h[axis] - RADIUS, c[axis] + h[axis] + RADIUS)
             };
@@ -508,9 +546,10 @@ pub fn trace_world_normal(o: Vec3, d: Vec3) -> (f32, Vec3) {
 }
 
 /// Ray vs vertical capsule standing at `feet`. Returns the hit distance.
-pub fn trace_capsule(o: Vec3, d: Vec3, feet: Vec3) -> Option<f32> {
+/// Where a ray enters a player's capsule `height` tall standing at `feet`.
+pub fn trace_capsule(o: Vec3, d: Vec3, feet: Vec3, height: f32) -> Option<f32> {
     let a = feet + Vec3::Y * RADIUS;
-    let b = feet + Vec3::Y * (HEIGHT - RADIUS);
+    let b = feet + Vec3::Y * (height - RADIUS);
     let (t, p) = closest_ray_segment(o, d, a, b);
     let dist2 = (o + d * t).distance_squared(p);
     if dist2 > RADIUS * RADIUS {
@@ -540,14 +579,14 @@ mod tests {
     #[test]
     fn capsule_hits() {
         let feet = Vec3::new(0.0, 0.0, -10.0);
-        let body = trace_capsule(Vec3::new(0.0, 1.0, 0.0), Vec3::NEG_Z, feet).unwrap();
+        let body = trace_capsule(Vec3::new(0.0, 1.0, 0.0), Vec3::NEG_Z, feet, HEIGHT).unwrap();
         assert!((body - 9.6).abs() < 1e-3);
-        assert!(trace_capsule(Vec3::new(0.5, 1.0, 0.0), Vec3::NEG_Z, feet).is_none());
-        assert!(trace_capsule(Vec3::new(0.0, 1.0, 0.0), Vec3::Z, feet).is_none());
-        let down = trace_capsule(Vec3::new(0.0, 5.0, -10.0), Vec3::NEG_Y, feet).unwrap();
+        assert!(trace_capsule(Vec3::new(0.5, 1.0, 0.0), Vec3::NEG_Z, feet, HEIGHT).is_none());
+        assert!(trace_capsule(Vec3::new(0.0, 1.0, 0.0), Vec3::Z, feet, HEIGHT).is_none());
+        let down = trace_capsule(Vec3::new(0.0, 5.0, -10.0), Vec3::NEG_Y, feet, HEIGHT).unwrap();
         assert!((down - 3.2).abs() < 1e-3);
         let diag = Vec3::new(0.0, -1.0, -10.0).normalize();
-        assert!(trace_capsule(Vec3::new(0.0, 2.0, 0.0), diag, feet).is_some());
+        assert!(trace_capsule(Vec3::new(0.0, 2.0, 0.0), diag, feet, HEIGHT).is_some());
     }
 
 
@@ -557,7 +596,7 @@ mod tests {
         let spawns = MAP.spawns(Team::T).iter().chain(MAP.spawns(Team::Ct));
         for (i, sp) in spawns.enumerate() {
             let mut s = PlayerState { pos: *sp, ..Default::default() };
-            assert!(!MAP.boxes.iter().any(|&(c, h)| overlaps(s.pos, c, h)), "spawn {i} inside a box");
+            assert!(!MAP.boxes.iter().any(|&(c, h)| overlaps(s.pos, c, h, HEIGHT)), "spawn {i} inside a box");
             let mut x = 12345u32 + i as u32;
             for t in 0..20000 {
                 x ^= x << 13;
@@ -637,11 +676,36 @@ mod tests {
     }
 
     #[test]
+    fn crouching_is_lower_slower_and_stands_back_up() {
+        // In the open south-east yard, with room to run east.
+        let mut s = PlayerState { pos: MAP.ground(38, 44), on_ground: true, ..Default::default() };
+        s.loadout(None, Weapon::Glock);
+        let crouch = Input { duck: true, right: 1.0, ..Default::default() };
+        for _ in 0..(DUCK_SECS * TICK_HZ as f32) as usize + 1 {
+            step_player(&mut s, &crouch);
+        }
+        assert_eq!(s.duck, 1.0, "fully down after DUCK_SECS");
+        assert!((eye_height(&s) - DUCK_EYE).abs() < 1e-6 && height(s.duck) == DUCK_HEIGHT);
+        for _ in 0..TICK_HZ as usize {
+            step_player(&mut s, &crouch);
+        }
+        let crouched = s.vel.with_y(0.0).length();
+        for _ in 0..TICK_HZ as usize {
+            step_player(&mut s, &Input { right: 1.0, ..Default::default() });
+        }
+        let standing = s.vel.with_y(0.0).length();
+        assert_eq!(s.duck, 0.0, "stands up in the open");
+        assert!((crouched / standing - DUCK_SPEED).abs() < 0.02, "{crouched} vs {standing}");
+        assert!(crouched < 6.35 * WALK_SPEED, "too slow for footsteps");
+    }
+
+    #[test]
     fn walks_down_into_the_tunnel() {
-        // Walk from T spawn (on its platform) to the lowest floor along the bots' path.
+        // Walk from the raised south-east yard to the lowest floor along the bots' path.
         let cells = (0..MAP.depth()).flat_map(|z| (0..MAP.width()).map(move |x| (x, z)));
         let low = cells.filter(|&(x, z)| MAP.walkable(x, z)).map(|(x, z)| MAP.ground(x, z)).find(|g| g.y < 0.1).expect("a tunnel");
-        let mut s = PlayerState { pos: MAP.spawns(Team::T)[0], on_ground: true, ..Default::default() };
+        let yard = MAP.ground(38, 44);
+        let mut s = PlayerState { pos: yard, on_ground: true, ..Default::default() };
         s.loadout(None, Weapon::Glock);
         let field = MAP.distance_field(MAP.cell(low));
         let mut min_y = s.pos.y;
@@ -657,7 +721,7 @@ mod tests {
             min_y = min_y.min(s.pos.y);
         }
         assert!(min_y < 0.3, "got down into the tunnel: {min_y}");
-        assert!(MAP.spawns(Team::T)[0].y > 2.0, "T spawn sits on its platform");
+        assert!(yard.y > 2.0, "the yard is raised");
     }
 
     #[test]

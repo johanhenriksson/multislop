@@ -70,6 +70,13 @@ impl Net {
         out
     }
 
+    /// Forgets the server and anything still queued to or from it.
+    fn leave(&mut self) {
+        self.server = None;
+        self.out_q.clear();
+        self.in_q.clear();
+    }
+
     /// Sends to every server port on the LAN (and this machine), skipping the fake lag.
     pub fn broadcast(&self, data: &[u8]) {
         for port in DISCOVERY_PORTS {
@@ -98,6 +105,13 @@ struct Client {
     fetch: Fetch,
     /// Why the game couldn't be loaded.
     error: Option<String>,
+    /// When we first asked the server which game it runs (clock).
+    asked_at: Option<f64>,
+    /// When we last heard from the server (clock).
+    heard_at: f64,
+    /// The module from `--game`, run instead of the server's.
+    local: Option<Vec<u8>>,
+    interp_ms: u64,
     netcode: NetClient,
     /// Got packets we couldn't decode: the server runs a different build.
     incompatible: bool,
@@ -121,9 +135,34 @@ struct FrameStats {
     since: Option<Instant>,
 }
 
-/// Joins `server` (or lets the player pick one from the LAN), running `game` if given, or else the game the server
-/// runs (downloaded if need be). `hostable` are module files the browser can host a LAN game with.
-pub fn run(server: Option<SocketAddr>, game: Option<Game>, hostable: Vec<std::path::PathBuf>, lag_ms: u64, jitter_ms: u64, interp_ms: u64) {
+/// Seconds without a word from the server before giving up on it, in a game and while connecting.
+const LOST_SECS: f64 = 5.0;
+const NO_ANSWER_SECS: f64 = 10.0;
+
+impl Client {
+    fn new(local: Option<Vec<u8>>, interp_ms: u64) -> Client {
+        let game = local.as_ref().map(|bytes| -> Game {
+            Box::new(crate::wasm::WasmClient::load(bytes).unwrap_or_else(|e| panic!("can't load the game: {e:?}")))
+        });
+        Client {
+            fetch: if game.is_some() { Fetch::Done } else { Fetch::Asking },
+            game,
+            started: false,
+            error: None,
+            asked_at: None,
+            heard_at: 0.0,
+            local,
+            interp_ms,
+            netcode: NetClient::new(interp_ms),
+            incompatible: false,
+            wrong_build: None,
+        }
+    }
+}
+
+/// Joins `server` (or lets the player pick one from the LAN), running the `local` module if given, or else the game
+/// the server runs (downloaded if need be). `hostable` are module files the browser can host a LAN game with.
+pub fn run(server: Option<SocketAddr>, local: Option<Vec<u8>>, hostable: Vec<std::path::PathBuf>, lag_ms: u64, jitter_ms: u64, interp_ms: u64) {
     let sock = UdpSocket::bind("0.0.0.0:0").expect("bind");
     sock.set_nonblocking(true).unwrap();
     sock.set_broadcast(true).unwrap();
@@ -153,20 +192,12 @@ pub fn run(server: Option<SocketAddr>, game: Option<Game>, hostable: Vec<std::pa
             in_q: default(),
         })
         .init_resource::<Clicked>()
-        .insert_resource(Client {
-            fetch: if game.is_some() { Fetch::Done } else { Fetch::Asking },
-            game,
-            started: false,
-            error: None,
-            netcode: NetClient::new(interp_ms),
-            incompatible: false,
-            wrong_build: None,
-        })
+        .insert_resource(Client::new(local, interp_ms))
         .insert_resource(crate::browser::Browser::new(hostable))
         .add_systems(Startup, (setup, crate::browser::setup))
         .add_systems(PreUpdate, receive)
         .add_systems(FixedUpdate, net_tick)
-        .add_systems(Update, (grab_cursor, crate::browser::browse, start, frame, crate::render::anchor_ui, overlays).chain())
+        .add_systems(Update, (grab_cursor, watchdog, crate::browser::browse, start, frame, crate::render::anchor_ui, overlays).chain())
         .add_systems(PostUpdate, debug_shot.run_if(|| std::env::var_os("FPS16_SHOT").is_some()))
         .run();
 }
@@ -197,6 +228,34 @@ fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
         Node { position_type: PositionType::Absolute, left: px(12), top: px(12), ..default() },
         Visibility::Hidden,
     ));
+}
+
+/// Back to the server browser when the server goes quiet, never answers, or runs another build: the game's world,
+/// HUD and sounds go, the netcode starts over, and the mouse is freed.
+fn watchdog(
+    mut client: ResMut<Client>,
+    mut net: ResMut<Net>,
+    mut renderer: Renderer,
+    mut browser: ResMut<crate::browser::Browser>,
+    mut cursor: Single<&mut CursorOptions, With<PrimaryWindow>>,
+) {
+    let Some(server) = net.server else { return };
+    let now = clock();
+    let silent = |secs: f64| now - client.heard_at > secs;
+    let why = match &client.wrong_build {
+        Some(build) => format!("{server} runs build {build}, you have build {BUILD} - restart the game to update"),
+        None if client.started && silent(LOST_SECS) => format!("lost connection to {server}"),
+        None if !client.started && client.asked_at.is_some_and(|t| now - t > NO_ANSWER_SECS) && silent(NO_ANSWER_SECS) => {
+            format!("no answer from {server}")
+        }
+        None => return,
+    };
+    renderer.clear();
+    net.leave();
+    *client = Client::new(client.local.take(), client.interp_ms);
+    browser.show_error(why);
+    cursor.grab_mode = CursorGrabMode::None;
+    cursor.visible = true;
 }
 
 /// Builds the game's world and HUD once it's loaded and a server is picked.
@@ -286,7 +345,11 @@ fn receive(mut net: ResMut<Net>, mut client: ResMut<Client>, mut browser: ResMut
             }
             continue;
         }
-        match decode::<ServerMsg>(&packet) {
+        let msg = decode::<ServerMsg>(&packet);
+        if msg.is_some() {
+            client.heard_at = clock();
+        }
+        match msg {
             Some(ServerMsg::Game { hash, size, cookie }) if matches!(client.fetch, Fetch::Asking) => on_game(&mut client, hash, size, cookie),
             Some(ServerMsg::Chunk { index, data }) => on_chunk(&mut client, index, &data),
             Some(ServerMsg::Game { .. } | ServerMsg::Info { .. }) => {}
@@ -334,6 +397,7 @@ fn net_tick(
         return;
     }
     let mut send = |msg| net.send(encode(&ClientPacket { build: BUILD.into(), msg }));
+    client.asked_at.get_or_insert(clock());
     match &mut client.fetch {
         Fetch::Asking if *ticks % 64 == 1 => send(ClientMsg::Hello { pad: vec![0; HELLO_SIZE] }),
         Fetch::Asking => {}
@@ -442,6 +506,10 @@ fn overlays(
         (true, None, ..) => "SERVER IS A DIFFERENT VERSION - update both".into(),
         _ if c.error.is_some() => c.error.clone().unwrap_or_default(),
         (_, None, _, Fetch::Downloading { have, left, .. }) => format!("downloading the game... {}%", 100 - 100 * left / have.len().max(1)),
+        (_, None, _, Fetch::Asking) if c.asked_at.is_some_and(|t| clock() - t > 3.0) => format!(
+            "no answer from {} - is a server running there, on build {BUILD}?",
+            net.server.map_or(String::new(), |a| a.to_string())
+        ),
         (_, None, ..) => "connecting...".into(),
         _ => String::new(),
     };
@@ -532,15 +600,7 @@ mod tests {
 
     #[test]
     fn download_takes_chunks_in_any_order_and_restarts_on_a_bad_hash() {
-        let mut client = Client {
-            game: None,
-            started: false,
-            fetch: Fetch::Asking,
-            error: None,
-            netcode: NetClient::new(50),
-            incompatible: false,
-            wrong_build: None,
-        };
+        let mut client = Client::new(None, 50);
         let module: Vec<u8> = (0..3000).map(|i| i as u8).collect();
         // The server claims a different hash than the bytes it sends, so nothing gets cached or loaded.
         on_game(&mut client, sha256(b"something else"), module.len() as u32, 7);
