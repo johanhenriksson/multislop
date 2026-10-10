@@ -72,13 +72,10 @@ pub struct GameInfo {
     pub bots: u32,
 }
 
-/// Who a player is, the same in every game: the name and color they picked on their machine. Games show the color on
-/// the player's model, nametag and so on, so people are recognisable from one game to the next.
+/// Who a player is, the same in every game: their name on their machine.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Profile {
     pub name: String,
-    /// sRGB, one of `PALETTE` unless someone hand-edited it.
-    pub color: [u8; 3],
 }
 
 /// Player colors: bright, and far enough apart to tell at a glance.
@@ -101,18 +98,17 @@ pub const PALETTE: [[u8; 3]; 16] = [
     [200, 160, 40],
 ];
 
-impl Profile {
-    pub fn color(&self) -> client::Color {
-        let [r, g, b] = self.color.map(|c| c as f32 / 255.0);
-        client::Color::srgb(r, g, b)
-    }
+/// The color for someone joining: the first of `PALETTE` nobody in `taken` has, so everyone's is unique. Past 16
+/// players, the least used.
+pub fn free_color(taken: impl IntoIterator<Item = [u8; 3]>) -> [u8; 3] {
+    let taken: Vec<[u8; 3]> = taken.into_iter().collect();
+    PALETTE.into_iter().min_by_key(|c| taken.iter().filter(|t| *t == c).count()).unwrap()
 }
 
-/// A name with a palette color picked from it, the same every time: for bots, and tests.
+/// For bots, and tests.
 impl From<&str> for Profile {
     fn from(name: &str) -> Profile {
-        let hash = name.bytes().fold(2166136261u32, |h, b| (h ^ b as u32).wrapping_mul(16777619));
-        Profile { name: name.into(), color: PALETTE[hash as usize % PALETTE.len()] }
+        Profile { name: name.into() }
     }
 }
 
@@ -287,4 +283,23 @@ macro_rules! export_server {
             }
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn colors_stay_unique_until_the_palette_runs_out() {
+        let mut taken = vec![];
+        for _ in 0..PALETTE.len() {
+            let c = free_color(taken.clone());
+            assert!(!taken.contains(&c));
+            taken.push(c);
+        }
+        taken.remove(5);
+        assert_eq!(free_color(taken.clone()), PALETTE[5], "a freed color is reused");
+        taken.push(PALETTE[5]);
+        assert_eq!(free_color(taken), PALETTE[0], "past 16, the least used");
+    }
 }

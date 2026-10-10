@@ -114,8 +114,8 @@ impl ArenaClient {
 }
 
 impl ClientGame for ArenaClient {
-    // ponytail: one map, so `map` picks nothing yet.
-    fn start(&mut self, _map: &str) -> Vec<Command> {
+    fn start(&mut self, map: &str) -> Vec<Command> {
+        crate::map::load(map);
         let s = &mut self.scene;
         let mut sound = |wav: Vec<u8>| {
             let id = s.id();
@@ -200,7 +200,7 @@ impl ClientGame for ArenaClient {
             let o = eye(&self.pred);
             let muzzle = o + look_rot(self.yaw, self.pitch) * Vec3::new(0.2, -0.18, -0.92);
             self.beam(p.id, muzzle, o + d * trace_world(o, d).0);
-            self.sound(self.sounds.rail, 0.7);
+            self.sound(self.sounds.rail, 0.9);
             self.kick = 1.0;
         }
         if step.launched {

@@ -161,11 +161,6 @@ fn label(text: &str) -> impl Bundle {
     (Text::new(text), ui_font(12.0, FontWeight::BOLD), LetterSpacing::Px(4.0), TextColor(DIM), Pickable::IGNORE)
 }
 
-fn accent(me: &Me) -> Color {
-    let [r, g, b] = me.0.color;
-    Color::srgb_u8(r, g, b)
-}
-
 /// Lights up under the pointer: `hot` instead of `base`, and a little bigger when `grow`.
 #[derive(Component, Clone, Copy)]
 struct Hover {
@@ -221,19 +216,6 @@ pub struct ErrorText;
 /// The games to pick from, under the host button.
 #[derive(Component)]
 pub struct HostList;
-
-/// Lit in the player's color.
-#[derive(Component)]
-pub struct Title;
-
-#[derive(Component)]
-pub struct NameText;
-
-#[derive(Component)]
-pub struct NameDot;
-
-#[derive(Component)]
-pub struct Swatches;
 
 #[derive(Component)]
 pub struct StatusDot;
@@ -298,7 +280,7 @@ fn scan(paths: Vec<std::path::PathBuf>) -> Arc<Mutex<Option<Vec<Game>>>> {
 }
 
 pub fn setup(mut commands: Commands, me: Res<Me>) {
-    let you = accent(&me);
+    let you = HOT_PINK;
     let full = Node { position_type: PositionType::Absolute, width: percent(100), height: percent(100), overflow: Overflow::clip(), ..default() };
     let backdrop = LinearGradient::degrees(160.0, vec![
         ColorStop::auto(Color::srgb(0.09, 0.03, 0.16)),
@@ -324,7 +306,7 @@ pub fn setup(mut commands: Commands, me: Res<Me>) {
         ChildOf(left),
         Node { flex_direction: FlexDirection::Column, ..default() },
         children![
-            (Title, Text::new("MULTISLOP"), display_font(88.0), LineHeight::RelativeToFont(0.95), TextColor(INK), TextShadow { offset: Vec2::new(6.0, 6.0), color: you }),
+            (Text::new("MULTISLOP"), display_font(88.0), LineHeight::RelativeToFont(0.95), TextColor(INK), TextShadow { offset: Vec2::new(6.0, 6.0), color: you }),
             (Text::new("LAN GAMES, MADE OF SLOP"), ui_font(13.0, FontWeight::BOLD), LetterSpacing::Px(6.0), TextColor(DIM)),
         ],
     ));
@@ -343,12 +325,10 @@ pub fn setup(mut commands: Commands, me: Res<Me>) {
         ChildOf(profile),
         Node { column_gap: px(14), align_items: AlignItems::Center, ..default() },
         children![
-            (NameDot, dot, BackgroundColor(you), BoxShadow::new(you, px(0), px(0), px(2), px(14))),
-            (NameText, Text::new(me.0.name.clone()), ui_font(32.0, FontWeight::BOLD), TextColor(you)),
+            (dot, BackgroundColor(you), BoxShadow::new(you, px(0), px(0), px(2), px(14))),
+            (Text::new(me.0.name.clone()), ui_font(32.0, FontWeight::BOLD), TextColor(you)),
         ],
     ));
-    commands.spawn((ChildOf(profile), Swatches, Node { width: px(351), flex_wrap: FlexWrap::Wrap, column_gap: px(9), row_gap: px(9), ..default() }));
-    commands.spawn((ChildOf(profile), Text::new("Your color, in every game."), ui_font(13.0, FontWeight::MEDIUM), TextColor(FAINT)));
 
     let button = Node {
         padding: UiRect::axes(px(24), px(16)),
@@ -411,53 +391,14 @@ pub fn setup(mut commands: Commands, me: Res<Me>) {
     commands.spawn((ChildOf(right), Text::new(hint), ui_font(13.0, FontWeight::MEDIUM), TextColor(FAINT)));
 }
 
-/// Drifts the glows, pulses the scanning light, and restyles everything in the player's color when they pick another.
-pub fn animate(
-    mut commands: Commands,
-    me: Res<Me>,
-    mut b: ResMut<Browser>,
-    mut orbs: Query<(&Orb, &mut UiTransform, &mut BackgroundGradient)>,
-    mut status: Single<&mut BackgroundColor, With<StatusDot>>,
-    mut title: Single<&mut TextShadow, With<Title>>,
-    mut name: Single<&mut TextColor, With<NameText>>,
-    mut dot: Single<(&mut BackgroundColor, &mut BoxShadow), (With<NameDot>, Without<StatusDot>)>,
-    swatches: Single<Entity, With<Swatches>>,
-) {
+/// Drifts the glows and pulses the scanning light.
+pub fn animate(mut orbs: Query<(&Orb, &mut UiTransform)>, mut status: Single<&mut BackgroundColor, With<StatusDot>>) {
     let t = clock() as f32;
-    for (orb, mut transform, _) in &mut orbs {
+    for (orb, mut transform) in &mut orbs {
         let phase = orb.0 as f32 * 1.9;
         transform.translation = Val2::px((t * 0.13 + phase).sin() * 90.0, (t * 0.11 + phase * 1.3).cos() * 70.0);
     }
     status.0 = Color::srgb(0.2, 1.0, 0.5).with_alpha(0.45 + 0.55 * (t * 3.0).sin().abs());
-    if !me.is_changed() {
-        return;
-    }
-    let you = accent(&me);
-    title.color = you;
-    name.0 = you;
-    dot.0.0 = you;
-    *dot.1 = BoxShadow::new(you, px(0), px(0), px(2), px(14));
-    for (orb, _, mut gradient) in &mut orbs {
-        if orb.0 == 0 {
-            *gradient = glow(you, 0.22);
-        }
-    }
-    b.dirty = true;
-    commands.entity(*swatches).despawn_children();
-    for color in sdk::PALETTE {
-        let [r, g, bl] = color;
-        let c = Color::srgb_u8(r, g, bl);
-        let picked = color == me.0.color;
-        let node = Node { width: px(36), height: px(36), border_radius: BorderRadius::all(px(10)), ..default() };
-        let mut swatch = commands.spawn((ChildOf(*swatches), node));
-        if picked {
-            swatch.insert((Outline { width: px(3), offset: px(3), color: Color::WHITE }, BoxShadow::new(c, px(0), px(0), px(2), px(16))));
-        }
-        hoverable(swatch, c, c, true).observe(move |_: On<PointerClick>, mut me: ResMut<Me>| {
-            me.0.color = color;
-            Me::save(color);
-        });
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -480,7 +421,7 @@ pub fn browse(
         return;
     }
     **panel = Visibility::Inherited;
-    let you = accent(&me);
+    let you = HOT_PINK;
     let now = clock();
     if now - b.asked > 1.0 {
         b.asked = now;

@@ -1,11 +1,14 @@
-//! The arena: 80 x 80 m, four-way symmetric. Raised corner balconies reached by stairs, wall-side perches and a central
-//! tower reached by jump pads, pillars and low crates for cover.
+//! The maps, all four-way symmetric. Arena: 80 x 80 m. Raised corner balconies reached by stairs, wall-side perches and a central
+//! tower reached by jump pads, pillars and low crates for cover. Foundry (`maps/foundry*.txt`, 72 x 72 m): the floor
+//! at 1 m around a sunken crucible with a pillar in it, furnace towers and catwalks in the corners. Spire
+//! (`maps/spire*.txt`, 80 x 80 m): a ziggurat climbable up all four faces, under corner towers only pads reach.
 //!
 //! Layout: `#` wall, `J` jump pad, `S` spawn, `.` open. Heights: floor per cell in half meters (base 36), so `4` is a
 //! 2 m platform and `8` a 4 m one; raised cells are solid blocks, and a rise of one step (0.5 m) is walked up.
 // ponytail: one floor per cell (a height field of blocks), so no bridges or roofs. Add layers if a map needs them.
 
 use glam::Vec3;
+use std::cell::Cell;
 use std::sync::LazyLock;
 
 /// Meters per grid cell.
@@ -99,10 +102,44 @@ const HEIGHTS: &str = "\
 0444444400000000000000000000000044444440
 0000000000000000000000000000000000000000";
 
-pub static MAP: LazyLock<Map> = LazyLock::new(|| Map::parse(LAYOUT, HEIGHTS));
-
 /// The maps this game can play.
-pub const MAPS: [&str; 1] = ["arena"];
+pub const MAPS: [&str; 3] = ["arena", "foundry", "spire"];
+
+static PARSED: [LazyLock<Map>; 3] = [
+    LazyLock::new(|| Map::parse(LAYOUT, HEIGHTS)),
+    LazyLock::new(|| Map::parse(include_str!("maps/foundry.txt"), include_str!("maps/foundry_heights.txt"))),
+    LazyLock::new(|| Map::parse(include_str!("maps/spire.txt"), include_str!("maps/spire_heights.txt"))),
+];
+
+thread_local! {
+    static CURRENT: Cell<usize> = const { Cell::new(0) };
+}
+
+/// The map being played: the arena until `load` picks another. A game module plays one map at a time, so it's a
+/// global rather than threaded through everything that looks at the map.
+pub static MAP: Current = Current;
+
+pub struct Current;
+
+impl std::ops::Deref for Current {
+    type Target = Map;
+
+    fn deref(&self) -> &Map {
+        &PARSED[CURRENT.with(Cell::get)]
+    }
+}
+
+/// Makes `name`, one of `MAPS`, the map; false for any other name.
+pub fn load(name: &str) -> bool {
+    let Some(i) = MAPS.iter().position(|m| *m == name) else { return false };
+    CURRENT.with(|c| c.set(i));
+    true
+}
+
+/// The name of the map being played.
+pub fn name() -> &'static str {
+    MAPS[CURRENT.with(Cell::get)]
+}
 
 pub struct Map {
     rows: Vec<Vec<u8>>,
@@ -155,7 +192,7 @@ impl Map {
     }
 
     /// Top of whatever fills a cell: a wall, a platform, or 0 for open floor.
-    fn top(&self, x: usize, z: usize) -> f32 {
+    pub fn top(&self, x: usize, z: usize) -> f32 {
         if self.is_wall(x, z) { WALL_TOP } else { self.heights[z][x] }
     }
 
@@ -248,6 +285,26 @@ mod tests {
         assert_eq!((m.spawns.len(), m.pads.len()), (20, 8));
         assert!(m.boxes.len() < 120, "merge should keep box count low: {}", m.boxes.len());
         assert!(m.spawns.iter().any(|s| s.y > 1.0), "some spawns are up on the balconies");
+    }
+
+    #[test]
+    fn every_map_parses_and_never_traps_anyone() {
+        for name in MAPS {
+            assert!(load(name));
+            let m = &*MAP;
+            assert!(m.rows.iter().all(|r| r.len() == m.width()), "{name}: ragged rows");
+            assert!(m.heights.len() == m.depth() && m.heights.iter().all(|r| r.len() == m.width()), "{name}: height grid size");
+            assert!(m.spawns.len() >= 16 && !m.pads.is_empty(), "{name}: {} spawns, {} pads", m.spawns.len(), m.pads.len());
+            assert!(m.boxes.len() < 160, "{name}: merge should keep box count low: {}", m.boxes.len());
+            // Everywhere you can stand, you can walk back to the floor everyone spawns on.
+            let floor = m.spawns.iter().map(|&s| m.cell(s)).min_by(|a, b| m.height(a.0, a.1).total_cmp(&m.height(b.0, b.1))).unwrap();
+            let field = m.distance_field(floor);
+            for z in 0..m.depth() {
+                for x in (0..m.width()).filter(|&x| !m.is_wall(x, z)) {
+                    assert!(field[z * m.width() + x] < u16::MAX, "{name}: stuck at ({x}, {z})");
+                }
+            }
+        }
     }
 
     #[test]

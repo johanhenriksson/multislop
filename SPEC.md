@@ -25,11 +25,11 @@ Deadline: playable before 00:00. One weapon, one simple map.
   ping. Servers on another build answer with their build and are listed grayed out. Entries vanish after 3.5 s of
   silence. Click a server, or arrow keys and Enter, or type an address (remembered in
   `~/Library/Application Support/fps16/host`) and press Enter.
-- The menu is titled Multislop (so is the window). It shows who you're playing as: the logged-in user (`$USER`) and
-  a color from the 16 of `sdk::PALETTE`, picked at random on first run and changed by clicking a swatch, kept in
-  `~/Library/Application Support/fps16/color` (hex). Name and color travel as an `sdk::Profile` in every input
-  packet and reach the game through `ServerGame::connect`, so a player keeps their color from game to game; Instaslop
-  and Raceslop show it on the player's model, names and effects (Counterslop keeps team looks). Bots get a palette color picked from their name (`Profile::from`).
+- The menu is titled Multislop (so is the window). It shows who you're playing as: the logged-in user (`$USER`). The
+  name travels as an `sdk::Profile` in every input packet and reaches the game through `ServerGame::connect`.
+- Colors are assigned, not picked: Instaslop and Raceslop give every player and bot joining the first of the 16
+  `sdk::PALETTE` colors nobody in the game has (`sdk::free_color`; past 16 players, the least used), so colors are
+  unique, and show it on the player's model, names and effects (Counterslop and Rocketball keep team looks).
 - Esc in a game (or while loading) opens the Esc menu: Resume (grabs the mouse again), Disconnect (back to the
   browser) and Quit game. The game keeps running underneath but gets no input while it's open; Esc closes it.
 - Back to the browser, with the reason shown, when the server goes quiet for 5 s in a game, never answers for 10 s,
@@ -194,9 +194,13 @@ Deadline: playable before 00:00. One weapon, one simple map.
 Grenades, dropped/pickup weapons, match end, team switching, map height (ramps, stairs), anti-cheat, encryption, connection handshake/timeouts beyond the basics.
 
 ## Instaslop (`games/arena`)
-- A second game module: instagib free-for-all on one 80 x 80 m map, "arena" (four-way symmetric: corner balconies up
-  stairs, wall-side perches and a central tower reached by jump pads, pillars and low crates). Blocks on a height grid
-  in half meters; a 0.5 m rise is walked up as a stair.
+- A second game module: instagib free-for-all on three four-way symmetric maps, each with its own sky, colors and trim:
+  "arena" (80 x 80 m, dusk: corner balconies up stairs, wall-side perches and a central tower reached by jump pads,
+  pillars and low crates), "foundry" (72 x 72 m, smoky steelworks: the floor at 1 m around a sunken crucible of
+  glowing molten metal with a 4 m pillar in it that pads reach, corner furnace towers with catwalks, perches up stairs)
+  and "spire" (80 x 80 m, neon night: a stepped ziggurat climbable up all four faces, 5 m corner towers only pads
+  reach, ledges up stairs along the walls). Blocks on a height grid in half meters; a 0.5 m rise is walked up as a
+  stair. Glowing trim only along real ledges, not where blocks of equal height meet.
 - Movement: Quake style, faster (9 m/s) and floatier (gravity 12 m/s², jumps 1.75 m), hold space (or backspace) to keep hopping,
   strafe jumping builds speed. Jump pads throw you ~7 m up, carrying up to 6.5 m/s of your run.
 - Railgun only: hitscan, lag-compensated, one-shot frag through everyone along the beam, 1 s recharge (coils on the gun
@@ -359,4 +363,85 @@ health). It comes back after its respawn time; clients learn whether each is up 
 
 - Run: `cargo build -p rocketball --release --target wasm32-unknown-unknown`, then
   `cargo run --release -- server --game target/wasm32-unknown-unknown/release/rocketball.wasm`. Shipped in releases next to
+  the others.
+
+## Minigolf (`games/minigolf`)
+Minigolf in the style of Golf With Your Friends. Everyone plays the same hole at the same time, each at their own
+pace: no turns, and balls pass through each other. You see the others as ghosts.
+
+### Course
+- One map, "random": a 9-hole course dealt from a seed, named `random-<seed>` like Raceslop's courses, so server and
+  client build it from the name and nothing else goes over the wire. Hole `i` comes from the seed and `i`. A new
+  course (new seed) every time the last one is over.
+- All 9 holes are built at start and laid side by side, 200 m apart along x, floating in the sky, so changing holes
+  only moves the camera and nothing is torn down. The hole being played is in the match state.
+- Grid: 1 m cells, floor heights in 0.25 m steps, interpolated between cell corners (as in dust), so a ramp is a
+  smooth slope the ball rolls down. Rails (`#`) are 0.3 m bumpers around the fairway. Off the fairway is the void.
+- A hole is a tee, a path of 4-8 pieces, and a green with the cup. Pieces, picked and shaped by the seed:
+  - straight (6-14 m), 90° turns, a doglegged corner with a bank to bounce off
+  - a ramp up or down (1-2 m), a hill or a dip in the middle of the fairway
+  - a slope across the fairway that pulls the ball to one side
+  - bumpers: posts, wedges, a row of blocks with gaps
+  - a windmill: a spinning bar across the fairway (on the hole clock, like Raceslop's lasers, so client and server
+    agree on it)
+  - a gap over the void, with a kicker ramp before it
+  - a split: two routes around a wall, the short one narrower or with a hazard
+  - water: a pool beside or across part of the fairway
+- Par from the path: 2 + one per 12 m of path + one per gap or windmill, at most 5. A hole a bot can't sink within
+  par + 3 is redealt from the next seed (as Raceslop does with courses).
+- Three looks, picked from the seed: meadow (green felt, wooden rails, blue sky), candy (pastel felt, striped rails,
+  pink sky), neon (dark felt with glowing rail edges, night sky). Each hole has a flag over its cup and a mat at its tee.
+
+### Ball
+- A sphere, radius 0.15 m. Simulated by a shared `step_ball`, run by the server and predicted by the client from the
+  same inputs, so your own ball moves without lag (the shot and everything after it is deterministic).
+- Gravity 9.8 m/s², rolling friction ~1.2 m/s² (more on the green's fringe), slopes accelerate it along the floor's
+  gradient. Bounces off rails and bumpers keep 0.7 of the speed, off the floor 0.35. Sphere against box by closest
+  point in substeps (rocketball's `bounce`). Top speed 20 m/s.
+- At rest when under 0.05 m/s for 0.25 s on a flat enough floor; only then can you shoot. Its rest spot is
+  remembered.
+- Cup: radius 0.2 m. A ball over it going under 2.5 m/s drops in; faster, it lips out (rolls on, deflected).
+- Out: into the void (below the hole's lowest floor - 2 m) or into water: +1 stroke, back to the last rest spot after
+  a short splash/fall.
+- Balls never touch each other.
+
+### Shooting
+- Third-person orbit camera around your ball: the mouse turns it (yaw, and pitch between 10° and 70° down), W/S zoom
+  between 2 and 10 m.
+- Hold the left button and pull the mouse back to set power (up to 1.0 = 16 m/s; the view stops turning while you
+  pull), release to shoot along the camera's yaw. Right click cancels. An arrow on the ground shows direction and
+  power, no trajectory preview.
+- The shot is one input (yaw, power), applied by `step_ball` on the server and in prediction. A shot while not at
+  rest is ignored.
+- Max 10 strokes per hole: then you're picked up and score 10 (the cap is what you write down).
+
+### Hole flow
+- 3 s on the tee, frozen, showing the hole from above (camera flies tee to cup), with the hole number and par.
+- Then everyone plays. Sinking it: a cup rattle, your name and score ("Birdie!", "Par", "+2") to everyone, and you
+  watch the others still playing (click cycles who; their ghost becomes solid for you).
+- The hole ends when everyone is in or picked up, or 2:30 after it started (the rest score 10). A 30 s warning when
+  the first one is in. Then 5 s of the scorecard and the next hole.
+- After hole 9: 10 s of the final card (total strokes, lowest wins, ties share), then a new course. Rotation: 1
+  course per turn.
+- Joining mid-course: you start the current hole from the tee with the time that's left; holes you missed score 10.
+- Bots fill up to 4 players. They aim along a distance field over the hole (reverse from the cup, over the fairway
+  cells), pick the shot by simulating a few candidates with `step_ball` and taking the one that ends nearest the cup
+  on that field, then add aim and power error (the difficulty knobs). They wait 1-3 s before each shot.
+
+### Ghosts
+- Every other ball is an entity, interpolated as usual, drawn as a translucent sphere in its player's color with a
+  short fading trail and a name tag above it. Faded out when within 1 m of the camera, so ghosts never block a shot.
+- Your own ball is solid, in your color, with your name hidden.
+- A ghost in the cup is gone; the flag lists who's in.
+
+### Look and sound
+- Felt with a subtle grain, rails with a highlight on top, the cup a dark hole with a white rim, a flag on a pole.
+  Clouds below the holes, the next holes visible far off.
+- Sounds: putter tock (louder for harder shots), rail clink, cup rattle, splash, whoosh into the void, a soft crowd
+  cheer for under par.
+- HUD: hole number, par and your strokes top left, the hole clock top center, power bar while pulling, a scorecard
+  on Tab (players by hole, total, relative to par), centered messages.
+
+- Run: `cargo build -p minigolf --release --target wasm32-unknown-unknown`, then
+  `cargo run --release -- server --game target/wasm32-unknown-unknown/release/minigolf.wasm`. Shipped in releases next to
   the others.

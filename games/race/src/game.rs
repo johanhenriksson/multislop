@@ -40,8 +40,9 @@ struct Player {
 }
 
 impl Player {
-    fn new(id: u32, who: sdk::Profile, bot: Option<Bot>) -> Player {
-        let (state, name, color) = (PlayerState::default(), who.name, who.color);
+    /// `color` should be one nobody else has: `sdk::free_color`.
+    fn new(id: u32, name: String, color: [u8; 3], bot: Option<Bot>) -> Player {
+        let state = PlayerState::default();
         Player { id, state, checkpoint: 0, respawn: Vec3::ZERO, finish: None, wins: 0, inputs: vec![], teleport: 0, bot, name, color, ping: 0 }
     }
 
@@ -118,7 +119,7 @@ impl ServerGame for Gauntlet {
             self.new_course();
         }
         log(&format!("{name} (player {id}) joined"));
-        let mut p = Player::new(id, sdk::Profile { name, ..who.clone() }, None);
+        let mut p = Player::new(id, name, sdk::free_color(self.players.values().map(|p| p.color)), None);
         self.line_up(&mut p);
         self.players.insert(id, p);
         id
@@ -306,7 +307,7 @@ impl Gauntlet {
         for _ in bots.len()..want {
             let id = self.next_id;
             self.next_id += 1;
-            let mut p = Player::new(id, bot_name(id).as_str().into(), Some(Bot::new(id)));
+            let mut p = Player::new(id, bot_name(id), sdk::free_color(self.players.values().map(|p| p.color)), Some(Bot::new(id)));
             self.line_up(&mut p);
             log(&format!("{} joined", p.name));
             self.players.insert(id, p);

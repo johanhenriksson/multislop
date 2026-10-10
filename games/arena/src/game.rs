@@ -39,8 +39,8 @@ struct Player {
 }
 
 impl Player {
-    fn new(id: u32, who: sdk::Profile, bot: Option<Bot>) -> Player {
-        let (name, color) = (who.name, who.color);
+    /// `color` should be one nobody else has: `sdk::free_color`.
+    fn new(id: u32, name: String, color: [u8; 3], bot: Option<Bot>) -> Player {
         Player { id, state: PlayerState::default(), alive: false, died_at: 0, frags: 0, deaths: 0, inputs: vec![], teleport: 0, bot, name, color, ping: 0 }
     }
 }
@@ -94,7 +94,7 @@ impl ServerGame for Arena {
         let (id, name) = (self.next_id, clean_name(&who.name));
         self.next_id += 1;
         log(&format!("{name} (player {id}) joined"));
-        let mut p = Player::new(id, sdk::Profile { name, ..who.clone() }, None);
+        let mut p = Player::new(id, name, sdk::free_color(self.players.values().map(|p| p.color)), None);
         spawn(&mut p, &self.players, self.tick);
         self.players.insert(id, p);
         id
@@ -137,10 +137,15 @@ impl ServerGame for Arena {
     }
 
     fn set_map(&mut self, map: &str) {
-        if !MAPS.contains(&map) {
+        if !crate::map::load(map) {
             return log(&format!("no map called {map}; playing {}", self.map));
         }
+        log(&format!("map {map}"));
         (self.map, self.played) = (map.into(), 0);
+        // Bots learn the new map from scratch; their paths were for the old one.
+        for p in self.players.values_mut().filter(|p| p.bot.is_some()) {
+            p.bot = Some(Bot::new(p.id));
+        }
         self.restart();
     }
 
@@ -290,7 +295,7 @@ fn fill_bots(players: &mut Players, next_id: &mut u32, tick: u32, min_players: u
     for _ in bots.len()..want {
         let id = *next_id;
         *next_id += 1;
-        let mut p = Player::new(id, bot_name(id).as_str().into(), Some(Bot::new(id)));
+        let mut p = Player::new(id, bot_name(id), sdk::free_color(players.values().map(|p| p.color)), Some(Bot::new(id)));
         p.state.frozen = players.values().any(|p| p.state.frozen);
         spawn(&mut p, players, tick + id);
         log(&format!("{} joined", p.name));
@@ -335,30 +340,33 @@ mod tests {
         assert!(game.players[&id].alive);
     }
 
-    /// A full arena of bots for a few minutes, no network: they should roam, find each other and frag.
+    /// A full arena of bots for a few minutes on each map, no network: they should roam, find each other and frag.
     #[test]
     fn bots_play_a_match() {
-        let mut game = Arena::new();
-        game.connect(&"observer".into());
-        game.players.values_mut().for_each(|p| p.alive = false);
-        game.players.values_mut().for_each(|p| p.died_at = u32::MAX / 2);
-        let (mut rails, mut frags) = (0, 0);
-        for _ in 0..ticks(180.0) {
-            for e in game.tick().events {
-                match decode::<Event>(&e.data) {
-                    Some(Event::Rail { .. }) => rails += 1,
-                    Some(Event::Frag { .. }) => frags += 1,
-                    None => {}
+        for map in MAPS {
+            let mut game = Arena::new();
+            game.set_map(map);
+            game.connect(&"observer".into());
+            game.players.values_mut().for_each(|p| p.alive = false);
+            game.players.values_mut().for_each(|p| p.died_at = u32::MAX / 2);
+            let (mut rails, mut frags) = (0, 0);
+            for _ in 0..ticks(180.0) {
+                for e in game.tick().events {
+                    match decode::<Event>(&e.data) {
+                        Some(Event::Rail { .. }) => rails += 1,
+                        Some(Event::Frag { .. }) => frags += 1,
+                        None => {}
+                    }
+                }
+                for p in game.players.values() {
+                    assert!(!p.alive || in_bounds(p.state.pos), "{map}: {} at {:?}", p.name, p.state.pos);
                 }
             }
-            for p in game.players.values() {
-                assert!(!p.alive || in_bounds(p.state.pos), "{} at {:?}", p.name, p.state.pos);
-            }
+            let bots = game.players.values().filter(|p| p.bot.is_some()).count();
+            println!("{map}: {bots} bots, 3 min: {rails} rails, {frags} frags ({:.0}% hit)", 100.0 * frags as f32 / rails.max(1) as f32);
+            assert_eq!(bots, FILL - 1);
+            assert!(frags >= 20, "{map}: bots should find and frag each other: {frags}");
         }
-        let bots = game.players.values().filter(|p| p.bot.is_some()).count();
-        println!("{bots} bots, 3 min: {rails} rails, {frags} frags ({:.0}% hit)", 100.0 * frags as f32 / rails.max(1) as f32);
-        assert_eq!(bots, FILL - 1);
-        assert!(frags >= 20, "bots should find and frag each other: {frags}");
     }
 
     #[test]

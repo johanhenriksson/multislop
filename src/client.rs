@@ -678,35 +678,15 @@ fn overlays(
     }
 }
 
-/// Who we are in every game: the logged-in macOS user (also set for apps launched from Finder), in the color kept in
-/// the data folder, a random one from the palette the first time.
+/// Who we are in every game: the logged-in macOS user (also set for apps launched from Finder). Games give everyone a
+/// color of their own.
 #[derive(Resource)]
 pub struct Me(pub sdk::Profile);
 
 impl Me {
-    fn color_path() -> std::path::PathBuf {
-        data_dir().join("color")
-    }
-
     pub fn load() -> Me {
         let name = std::env::var("USER").or_else(|_| std::env::var("LOGNAME")).unwrap_or_else(|_| "player".into());
-        let saved = std::fs::read_to_string(Me::color_path()).ok().and_then(|hex| {
-            let n = u32::from_str_radix(hex.trim(), 16).ok()?;
-            Some([(n >> 16) as u8, (n >> 8) as u8, n as u8])
-        });
-        let color = saved.unwrap_or_else(|| {
-            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-            let color = sdk::PALETTE[now.subsec_nanos() as usize % sdk::PALETTE.len()];
-            Me::save(color);
-            color
-        });
-        Me(sdk::Profile { name, color })
-    }
-
-    pub fn save(color: [u8; 3]) {
-        let [r, g, b] = color;
-        let _ = std::fs::create_dir_all(data_dir());
-        let _ = std::fs::write(Me::color_path(), format!("{r:02x}{g:02x}{b:02x}\n"));
+        Me(sdk::Profile { name })
     }
 }
 

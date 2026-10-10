@@ -339,23 +339,50 @@ mod tests {
 
     #[test]
     fn never_leaves_the_map() {
-        for (i, sp) in MAP.spawns.iter().enumerate() {
-            let mut s = PlayerState { pos: *sp, ..Default::default() };
-            assert!(!blocked(s.pos), "spawn {i} inside a block");
-            let mut x = 12345u32 + i as u32;
-            for t in 0..20000 {
-                x ^= x << 13;
-                x ^= x >> 17;
-                x ^= x << 5;
-                let inp = Input {
-                    forward: (x % 3) as f32 - 1.0,
-                    right: ((x >> 3) % 3) as f32 - 1.0,
-                    yaw: (x >> 8) as f32 * 1e-6,
-                    jump: x & 64 != 0,
-                    ..Default::default()
-                };
-                step_player(&mut s, &inp);
-                assert!(in_bounds(s.pos) && !blocked(s.pos), "spawn {i} tick {t}: {:?}", s.pos);
+        for map in crate::map::MAPS {
+            assert!(crate::map::load(map));
+            for (i, sp) in MAP.spawns.iter().enumerate() {
+                let mut s = PlayerState { pos: *sp, ..Default::default() };
+                assert!(!blocked(s.pos), "{map}: spawn {i} inside a block");
+                let mut x = 12345u32 + i as u32;
+                for t in 0..20000 {
+                    x ^= x << 13;
+                    x ^= x >> 17;
+                    x ^= x << 5;
+                    let inp = Input {
+                        forward: (x % 3) as f32 - 1.0,
+                        right: ((x >> 3) % 3) as f32 - 1.0,
+                        yaw: (x >> 8) as f32 * 1e-6,
+                        jump: x & 64 != 0,
+                        ..Default::default()
+                    };
+                    step_player(&mut s, &inp);
+                    assert!(in_bounds(s.pos) && !blocked(s.pos), "{map}: spawn {i} tick {t}: {:?}", s.pos);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_jump_pad_reaches_somewhere_higher() {
+        for map in crate::map::MAPS {
+            assert!(crate::map::load(map));
+            for &pad in &MAP.pads {
+                // Run over the pad from a few meters back, in any of 16 directions, and hold forward.
+                let lands_high = (0..16).any(|i| {
+                    let yaw = i as f32 * std::f32::consts::TAU / 16.0;
+                    let fwd = Vec3::new(-yaw.sin(), 0.0, -yaw.cos());
+                    let mut s = PlayerState { pos: pad - fwd * 3.0, on_ground: true, ..Default::default() };
+                    if blocked(s.pos) || (floor_below(s.pos + Vec3::Y * 0.1) - pad.y).abs() > 1e-3 {
+                        return false;
+                    }
+                    let inp = Input { forward: 1.0, yaw, ..Default::default() };
+                    (0..3 * TICK_HZ as usize).any(|_| {
+                        step_player(&mut s, &inp);
+                        s.on_ground && s.pos.y > pad.y + 1.9
+                    })
+                });
+                assert!(lands_high, "{map}: the pad at {pad} throws nowhere");
             }
         }
     }

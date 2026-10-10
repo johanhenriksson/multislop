@@ -4,17 +4,37 @@ use std::f32::consts::TAU;
 
 const RATE: u32 = 44100;
 
-/// The rail: a sharp crack, a falling zap and a ringing hum that dies away.
+/// The rail: a heavy boom with a sub-bass kick under it, a saturated zap tearing down from a scream to a growl, a
+/// metallic ring and an electric sizzle trailing off. Soft-clipped hard, so it hits loud.
 pub fn rail() -> Vec<u8> {
-    let mut noise = Noise::new(7);
-    let mut phase = (0.0f32, 0.0f32);
-    render(0.9, move |t| {
-        phase.0 = (phase.0 + (3200.0 * (-t * 9.0).exp() + 180.0) / RATE as f32).fract();
-        phase.1 = (phase.1 + 92.0 / RATE as f32).fract();
-        let crack = noise.next() * (-t * 60.0).exp();
-        let zap = (phase.0 * TAU).sin() * (-t * 7.0).exp() * 0.6;
-        let hum = (phase.1 * TAU).sin().signum() * (-t * 4.0).exp() * 0.12;
-        crack + zap + hum
+    let (mut noise, mut body, mut fizz) = (Noise::new(7), 0.0f32, 0.0f32);
+    let (mut kick, mut zap, mut buzz) = (0.0f32, 0.0f32, 0.0f32);
+    let mut ring = [0.0f32; 3];
+    render(1.2, move |t| {
+        let step = |phase: &mut f32, hz: f32| *phase = (*phase + hz / RATE as f32).fract();
+        // A kick drum's pitch drop, 160 down to 42 Hz.
+        step(&mut kick, 42.0 + 118.0 * (-t * 28.0).exp());
+        let kick = (kick * TAU).sin() * (t * 2000.0).min(1.0) * (-t * 9.0).exp() * 1.4;
+        // Low-passed noise: a blast, not a hiss.
+        let n = noise.next();
+        body += (n - body) * 0.18;
+        let blast = body * 3.0 * (-t * 22.0).exp();
+        let crack = n * (-t * 90.0).exp() * 0.5;
+        // A sawtooth falling from 2.2 kHz to 70 Hz, saturated into a growl.
+        step(&mut zap, 70.0 + 2100.0 * (-t * 16.0).exp());
+        let zap = ((zap * 2.0 - 1.0) * 3.0).tanh() * (-t * 5.5).exp() * 0.55;
+        // Inharmonic partials, like struck metal.
+        let mut metal = 0.0;
+        for (phase, (hz, k)) in ring.iter_mut().zip([(523.0, 0.5), (1397.0, 0.3), (2213.0, 0.2)]) {
+            step(phase, hz);
+            metal += (*phase * TAU).sin() * k;
+        }
+        let metal = metal * (-t * 4.5).exp() * 0.25;
+        // Mains-hum square through crackling noise, dying slowly.
+        step(&mut buzz, 98.0);
+        fizz += (noise.next() - fizz) * 0.6;
+        let sizzle = (buzz * TAU).sin().signum() * (0.5 + fizz.abs()) * (-t * 3.2).exp() * 0.16;
+        ((kick + blast + crack + zap + metal + sizzle) * 1.6).tanh() * 1.9
     })
 }
 
@@ -97,3 +117,4 @@ fn render(secs: f32, mut sample: impl FnMut(f32) -> f32) -> Vec<u8> {
     }
     out
 }
+
