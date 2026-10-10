@@ -662,7 +662,8 @@ mod tests {
     #[test]
     fn knife_runs_faster_than_rifles() {
         let run = |primary: Option<Weapon>, slot: u8| {
-            let mut s = PlayerState { pos: MAP.spawns(Team::T)[0], on_ground: true, ..Default::default() };
+            // In the open south-east yard, with room to run east.
+            let mut s = PlayerState { pos: MAP.ground(38, 44), on_ground: true, ..Default::default() };
             s.loadout(primary, Weapon::Glock);
             step_player(&mut s, &Input { slot, ..Default::default() });
             for _ in 0..TICK_HZ as usize {

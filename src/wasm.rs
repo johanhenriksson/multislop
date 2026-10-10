@@ -241,7 +241,7 @@ mod tests {
                 frame = g.tick();
             }
             let players: Vec<NetPlayer> = frame.entities.iter().filter_map(NetPlayer::from_entity).collect();
-            assert_eq!(players.len(), 12, "6v6 with bots");
+            assert_eq!(players.len(), 32, "16v16 with bots");
             assert!(players.iter().any(|p| p.id == id && p.name == "tester"));
             assert!(players.iter().map(|p| p.kills).sum::<u32>() > 0, "bots fought");
             let round: Round = sdk::decode(&frame.state).unwrap();

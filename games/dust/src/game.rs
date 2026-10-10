@@ -297,7 +297,7 @@ fn smaller_team(players: &Players) -> Team {
 }
 
 /// Teams always have at least this many players; bots fill the gaps.
-const TEAM_SIZE: usize = 6;
+const TEAM_SIZE: usize = 16;
 
 /// Adds or removes bots so both teams are TEAM_SIZE, or the bigger human team if larger. No humans, no bots.
 fn balance_bots(m: &mut Match, players: &mut Players, next_id: &mut u32) {
@@ -772,12 +772,12 @@ mod tests {
         assert_eq!(m.round.phase, Phase::Live, "CT still has to defuse");
     }
 
-    /// 6v6 bots, no network: they should move, fight, plant and finish rounds on their own.
+    /// Full teams of bots, no network: they should move, fight, plant and finish rounds on their own.
     #[test]
     fn bots_play_rounds() {
         let mut players = Players::new();
-        for id in 1..=12 {
-            let team = if id <= 6 { Team::T } else { Team::Ct };
+        for id in 1..=2 * TEAM_SIZE as u32 {
+            let team = if id <= TEAM_SIZE as u32 { Team::T } else { Team::Ct };
             let mut c = client(id, team);
             c.bot = Some(Bot::new(id));
             players.insert(id, c);
@@ -810,20 +810,22 @@ mod tests {
     }
 
     #[test]
-    fn bots_fill_to_six_a_side() {
+    fn bots_fill_both_teams() {
         let mut players = Players::new();
-        let (mut m, mut next_id) = (new_match(), 10);
+        let (mut m, mut next_id) = (new_match(), 100);
         balance_bots(&mut m, &mut players, &mut next_id);
         assert!(players.is_empty(), "no humans, no bots");
         let count = |c: &Players, t: Team| c.values().filter(|c| c.team == t).count();
         players.insert(1, client(1, Team::T));
         balance_bots(&mut m, &mut players, &mut next_id);
-        assert_eq!((count(&players, Team::T), count(&players, Team::Ct)), (6, 6));
-        for i in 2..=8 {
+        assert_eq!((count(&players, Team::T), count(&players, Team::Ct)), (TEAM_SIZE, TEAM_SIZE));
+        // More humans on one side than a full team: the other side gets bots up to the same size.
+        for i in 2..=(TEAM_SIZE + 2) as u32 {
             players.insert(i, client(i, Team::Ct));
         }
         balance_bots(&mut m, &mut players, &mut next_id);
-        assert_eq!((count(&players, Team::T), count(&players, Team::Ct)), (7, 7), "7 human CTs: Ts topped up to 7");
+        let big = TEAM_SIZE + 1;
+        assert_eq!((count(&players, Team::T), count(&players, Team::Ct)), (big, big), "Ts topped up to the human CTs");
         players.retain(|_, c| c.bot.is_some());
         balance_bots(&mut m, &mut players, &mut next_id);
         assert!(players.is_empty(), "bots leave with the last human");

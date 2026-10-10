@@ -101,7 +101,12 @@ impl NetClient {
         }
         let inputs = self.pending.iter().skip(self.pending.len().saturating_sub(REDUNDANCY)).cloned().collect();
         let ping = self.ping_ms.round() as u16;
-        Some(InputPacket { name, ping, time: clock(), inputs })
+        Some(InputPacket { name, ping, time: clock(), inputs, snapshot: self.latest_tick })
+    }
+
+    /// A buffered snapshot, to rebuild a delta against.
+    pub fn snapshot_at(&self, tick: u32) -> Option<&Snapshot> {
+        self.snapshots.iter().rev().find(|s| s.tick == tick)
     }
 
     /// Takes in a snapshot and reconciles our prediction with it. Returns it unless it's older than one we have.

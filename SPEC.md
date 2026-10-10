@@ -62,7 +62,7 @@ Deadline: playable before 00:00. One weapon, one simple map.
 - HUD: HP/armor/money, weapon + ammo, buy menu, kill feed, red flash when hit. Short tracers (AWP longer).
 
 ## Rounds (bomb defusal)
-- Teams T and CT, humans auto-balanced on join, friendly fire off. Server-side bots fill both teams to 6v6 (or to the
+- Teams T and CT, humans auto-balanced on join, friendly fire off. Server-side bots fill both teams to 16v16 (or to the
   bigger human team); they path over the map grid via a random detour point each round (Ts share a random site, some lurk;
   CTs hold spots next to cover that watch the T entrance and move between them, facing the entrance), strafe in
   fights and only shoot once slowed down (counter-strafing), plant/defuse, call out spotted enemies so teammates rotate, and
@@ -138,6 +138,9 @@ Deadline: playable before 00:00. One weapon, one simple map.
 - **Server**: queues each client's inputs and simulates one per tick (two when more than 2 are queued), so bursty
   uplinks don't make players teleport. Prints per-player loss / worst packet gap / buffer stats every 5 s. Sends a snapshot
   every tick with every player's state + the last input seq it processed for the receiving client.
+- **Delta snapshots**: clients report the newest snapshot they have; the server sends each snapshot relative to it
+  (only changed entities and fields, game data as patches of changed bytes, state only when it changed), keeping 2 s
+  of snapshots to diff against and sending whole ones otherwise. A 16v16 snapshot averages ~785 B instead of ~2.8 KB.
 - **Reconciliation**: on snapshot, client resets its own state to the server's and replays all inputs newer than the
   acked seq. Remaining visual error is smoothed out over a few frames.
 - **Entity interpolation**: remote players are rendered in the past, interpolated between buffered snapshots. The delay adapts to the worst recent snapshot gap (min `--interp`, max 150 ms); if it still runs dry, players are extrapolated on velocity for up to 100 ms.

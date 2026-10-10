@@ -28,6 +28,8 @@ struct Client {
     id: u32,
     /// Last input seq handed to the game, acked in snapshots.
     last_seq: u32,
+    /// The newest snapshot the client says it has: the next ones go out relative to it.
+    has_snapshot: u32,
     last_heard: Instant,
     /// Received inputs not yet simulated. Applied one per tick so upstream jitter doesn't make the player teleport.
     queue: VecDeque<InputMsg>,
@@ -48,6 +50,8 @@ struct LinkStats {
 }
 
 const STATS_EVERY: Duration = Duration::from_secs(5);
+/// Snapshots kept to diff against (2 s). A client further behind than that gets a whole one.
+const SNAPSHOT_HISTORY: usize = 64;
 /// Above this many queued inputs, simulate two per tick to catch up. Each queued input is a tick of added latency.
 const QUEUE_CATCH_UP: usize = INPUT_EVERY as usize + 1;
 
@@ -68,6 +72,8 @@ pub fn run(sock: UdpSocket, name: &str, mut game: Box<dyn ServerGame>, module: V
     let mut stats_at = Instant::now() + STATS_EVERY;
     // Events since the last snapshot.
     let mut events: Vec<Event> = Vec::new();
+    // Recent snapshots (all but the per-client parts), to send new ones relative to whichever one a client has.
+    let mut sent: VecDeque<Snapshot> = VecDeque::new();
 
     loop {
         // Wait on the socket until the tick is due, so packets are handled (and timestamped) the moment they land.
@@ -85,7 +91,7 @@ pub fn run(sock: UdpSocket, name: &str, mut game: Box<dyn ServerGame>, module: V
                 continue;
             };
             let cookie = cookies.hash_one(addr);
-            let InputPacket { time, inputs, name, ping } = match msg {
+            let InputPacket { time, inputs, name, ping, snapshot } = match msg {
                 ClientMsg::Hello { .. } if n >= HELLO_SIZE => {
                     let _ = sock.send_to(&encode(&ServerMsg::Game { hash, size, cookie }), addr);
                     continue;
@@ -114,6 +120,7 @@ pub fn run(sock: UdpSocket, name: &str, mut game: Box<dyn ServerGame>, module: V
                 Client {
                     id,
                     last_seq: 0,
+                    has_snapshot: 0,
                     last_heard: Instant::now(),
                     queue: VecDeque::new(),
                     last_queued: 0,
@@ -124,6 +131,7 @@ pub fn run(sock: UdpSocket, name: &str, mut game: Box<dyn ServerGame>, module: V
             let now = Instant::now();
             c.last_heard = now;
             c.echo = (time, now);
+            c.has_snapshot = c.has_snapshot.max(snapshot);
             game.ping(c.id, ping);
             let st = &mut c.stats;
             st.packets += 1;
@@ -186,6 +194,7 @@ pub fn run(sock: UdpSocket, name: &str, mut game: Box<dyn ServerGame>, module: V
 
         if tick % SNAPSHOT_EVERY == 0 {
             for (addr, c) in &clients {
+                let base = sent.iter().find(|s| s.tick == c.has_snapshot);
                 let snap = Snapshot {
                     tick,
                     map: frame.map.clone(),
@@ -197,9 +206,14 @@ pub fn run(sock: UdpSocket, name: &str, mut game: Box<dyn ServerGame>, module: V
                     entities: frame.entities.clone(),
                     events: events.iter().filter(|e| e.to.as_ref().is_none_or(|to| to.contains(&c.id))).map(|e| e.data.clone()).collect(),
                 };
-                let _ = sock.send_to(&encode(&ServerMsg::Snapshot(snap)), addr);
+                let _ = sock.send_to(&encode(&ServerMsg::Snapshot(diff(base, &snap))), addr);
             }
             events.clear();
+            let world = Snapshot { tick, map: frame.map, you: 0, ack: 0, echo: 0.0, echo_held: 0.0, state: frame.state, entities: frame.entities, events: vec![] };
+            sent.push_back(world);
+            if sent.len() > SNAPSHOT_HISTORY {
+                sent.pop_front();
+            }
         }
 
         // Late ticks are caught up rather than dropped: a server ticking slower than its clients makes input queues grow.

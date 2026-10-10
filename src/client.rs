@@ -418,7 +418,10 @@ fn receive(mut net: ResMut<Net>, mut client: ResMut<Client>, mut browser: ResMut
             Some(ServerMsg::Game { hash, size, cookie }) if matches!(client.fetch, Fetch::Asking) => on_game(&mut client, hash, size, cookie),
             Some(ServerMsg::Chunk { index, data }) => on_chunk(&mut client, index, &data),
             Some(ServerMsg::Game { .. } | ServerMsg::Info { .. }) => {}
-            Some(ServerMsg::Snapshot(snap)) => {
+            Some(ServerMsg::Snapshot(delta)) => {
+                let base = delta.base.and_then(|t| client.netcode.snapshot_at(t));
+                // A base we no longer have: skip it; the server falls back to whole snapshots soon enough.
+                let Some(snap) = apply(base, delta) else { continue };
                 let Client { game: Some(game), netcode, map, want_map, deferred, .. } = &mut *client else { continue };
                 let Some(snap) = netcode.snapshot(snap, &mut |e, i, s| game.predict(e, i, s, false)) else { continue };
                 let view = ClientSnapshot { tick: snap.tick, you: snap.you, state: snap.state.clone(), entities: snap.entities.clone(), events: snap.events.clone() };
