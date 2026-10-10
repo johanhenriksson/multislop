@@ -470,7 +470,7 @@ fn setup(
     spawn_world(&mut commands, &mut meshes, &mut mats, &mut images);
     let site_mesh = meshes.add(Plane3d::default().mesh().size(CELL, CELL));
     let site_mat = mats.add(StandardMaterial {
-        base_color: Color::srgba(0.8, 0.15, 0.1, 0.3),
+        base_color: Color::srgba(0.8, 0.15, 0.1, 0.1),
         alpha_mode: AlphaMode::Blend,
         unlit: true,
         ..default()
@@ -1581,11 +1581,18 @@ fn spawn_world(
             let half = Vec3::new(h.x + 0.12, 0.1, h.z + 0.12);
             commands.spawn((Mesh3d(meshes.add(textured_box(cap, half, Vec2::splat(4.0), true))), MeshMaterial3d(shade)));
         } else {
-            // Crates: wooden ones and green ammo boxes, a crate per meter (stacked on the tall ones).
+            // Crates: wooden ones and green ammo boxes, a crate per meter. Tall ones are drawn as two crates stacked,
+            // alternating wood and ammo like the original's crate piles (same footprint, so collision is unchanged).
             let green = (c.x * 7.3 + c.z * 3.1).sin() > 0.2;
-            let tile = Vec2::new(1.0, h.y * 2.0 / (h.y * 2.0).round().max(1.0));
-            let mat = if green { ammo.clone() } else { wood.clone() };
-            commands.spawn((Mesh3d(meshes.add(textured_box(c, h, tile, false))), MeshMaterial3d(mat)));
+            let layers = if h.y > 0.8 { 2 } else { 1 };
+            let layer = h.y / layers as f32;
+            for i in 0..layers {
+                let center = Vec3::new(c.x, c.y - h.y + layer * (2 * i + 1) as f32, c.z);
+                let half = Vec3::new(h.x, layer, h.z);
+                let tile = Vec2::new(1.0, layer * 2.0);
+                let mat = if green ^ (i == 1) { ammo.clone() } else { wood.clone() };
+                commands.spawn((Mesh3d(meshes.add(textured_box(center, half, tile, false))), MeshMaterial3d(mat)));
+            }
         }
     }
 
