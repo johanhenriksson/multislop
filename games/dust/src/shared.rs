@@ -8,6 +8,8 @@ pub use sdk::client::look_rot;
 pub use sdk::{TICK_HZ, decode, encode};
 use sdk::Entity;
 pub const DT: f32 = 1.0 / TICK_HZ as f32;
+/// Rounds per half: then the teams trade sides.
+pub const HALF: u32 = 10;
 
 pub const RADIUS: f32 = 0.4;
 pub const HEIGHT: f32 = 1.8;

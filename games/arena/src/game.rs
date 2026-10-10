@@ -11,6 +11,8 @@ use std::collections::BTreeMap;
 pub const FRAG_LIMIT: i32 = 25;
 const MATCH_SECS: f32 = 600.0;
 const INTERMISSION_SECS: f32 = 8.0;
+/// Matches per turn when the host rotates games.
+const ROTATE_AFTER: u32 = 3;
 /// Players in the arena while any human is, unless the host sets a bot count: bots make up the rest.
 pub const FILL: usize = 8;
 /// Dead for at least this long; fire respawns after it, and you come back on your own after `RESPAWN_AUTO`.
@@ -58,6 +60,8 @@ pub struct Arena {
     events: Vec<Event>,
     /// Bots to play with, set by the host; None fills up to `FILL` players.
     bots: Option<usize>,
+    /// Matches played to the end of their intermission since `set_map`, for rotating games.
+    played: u32,
 }
 
 impl Default for Arena {
@@ -72,6 +76,7 @@ impl Default for Arena {
             winner: None,
             events: vec![],
             bots: None,
+            played: 0,
         }
     }
 }
@@ -120,7 +125,7 @@ impl ServerGame for Arena {
         self.history.record(self.tick, &entities);
         let state = Match { time_left: self.ends.saturating_sub(self.tick) as f32 / TICK_HZ as f32, frag_limit: FRAG_LIMIT, winner: self.winner };
         let events = self.events.drain(..).map(|e| sdk::Event { to: None, data: encode(&e) }).collect();
-        Frame { map: self.map.clone(), state: encode(&state), entities, events }
+        Frame { map: self.map.clone(), state: encode(&state), entities, events, finished: self.played >= ROTATE_AFTER }
     }
 
     fn info(&mut self) -> GameInfo {
@@ -133,7 +138,7 @@ impl ServerGame for Arena {
         if !MAPS.contains(&map) {
             return log(&format!("no map called {map}; playing {}", self.map));
         }
-        self.map = map.into();
+        (self.map, self.played) = (map.into(), 0);
         self.restart();
     }
 
@@ -162,7 +167,10 @@ impl Arena {
                     log(&format!("{} wins with {} frags", w.name, w.frags));
                 }
             }
-            Some(_) if self.tick >= self.ends => self.restart(),
+            Some(_) if self.tick >= self.ends => {
+                self.played += 1;
+                self.restart();
+            }
             _ => {}
         }
     }

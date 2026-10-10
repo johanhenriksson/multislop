@@ -54,6 +54,9 @@ pub struct Frame {
     pub entities: Vec<Entity>,
     /// Events from this tick only.
     pub events: Vec<Event>,
+    /// The game's turn in a rotation is over (its round quota since `set_map` is played): a host rotating games
+    /// moves on to the next one now.
+    pub finished: bool,
 }
 
 /// What a server browser shows about a game.

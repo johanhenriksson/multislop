@@ -94,14 +94,14 @@ impl NetClient {
         }
     }
 
-    /// The packet to send this tick, if it's a sending tick.
-    pub fn packet(&self, name: String) -> Option<InputPacket> {
+    /// The packet to send this tick, if it's a sending tick, for the server's `game`.
+    pub fn packet(&self, name: String, game: u8) -> Option<InputPacket> {
         if self.seq % INPUT_EVERY != 0 {
             return None;
         }
         let inputs = self.pending.iter().skip(self.pending.len().saturating_sub(REDUNDANCY)).cloned().collect();
         let ping = self.ping_ms.round() as u16;
-        Some(InputPacket { name, ping, time: clock(), inputs, snapshot: self.latest_tick })
+        Some(InputPacket { name, ping, time: clock(), inputs, snapshot: self.latest_tick, game })
     }
 
     /// A buffered snapshot, to rebuild a delta against.
@@ -242,10 +242,10 @@ mod tests {
         nc.snapshot(snap(14, 3, 3.0), &mut step).unwrap();
         assert_eq!(nc.pred.as_ref().unwrap().pos.x, 5.0);
         assert!(nc.snapshot(snap(12, 3, 0.0), &mut step).is_none(), "older snapshots are ignored");
-        let sent = nc.packet("me".into()).map(|p| p.inputs.iter().map(|i| i.seq).collect::<Vec<_>>());
+        let sent = nc.packet("me".into(), 0).map(|p| p.inputs.iter().map(|i| i.seq).collect::<Vec<_>>());
         assert_eq!(sent, None, "odd tick, nothing sent");
         nc.input(vec![1], &mut step);
-        let sent = nc.packet("me".into()).unwrap().inputs.iter().map(|i| i.seq).collect::<Vec<_>>();
+        let sent = nc.packet("me".into(), 0).unwrap().inputs.iter().map(|i| i.seq).collect::<Vec<_>>();
         assert_eq!(sent, [4, 5, 6], "every unacked input");
     }
 }

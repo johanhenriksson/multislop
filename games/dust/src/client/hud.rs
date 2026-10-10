@@ -170,6 +170,7 @@ impl DustClient {
             (Phase::End { winner }, Bomb::Exploded(_), _) => format!("{} win - the bomb exploded", winner.name()),
             (Phase::End { winner }, Bomb::Defused(_), _) => format!("{} win - the bomb was defused", winner.name()),
             (Phase::End { winner }, ..) => format!("{} win", winner.name()),
+            (Phase::Freeze, ..) if r.number % HALF == 1 && r.number > 1 => format!("Round {} - teams switched sides", r.number),
             (Phase::Freeze, ..) => format!("Round {} - get ready", r.number),
             (_, _, Some((id, p))) if Some(id) == self.me => {
                 let verb = if matches!(r.bomb, Bomb::Planted(_)) { "Defusing" } else { "Planting" };

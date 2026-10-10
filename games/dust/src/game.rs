@@ -73,7 +73,12 @@ struct Match {
     loss_streak: [u32; 2],
     /// The site the T bots go for this round.
     t_site: char,
+    /// Rounds played to the end of their end pause, for rotating games.
+    played: u32,
 }
+
+/// Rounds per turn when the host rotates games: both halves.
+const ROTATE_AFTER: u32 = 2 * HALF;
 
 const fn ticks(secs: f32) -> u32 {
     (secs * TICK_HZ as f32) as u32
@@ -210,7 +215,8 @@ impl ServerGame for Dust {
             let to = self.players.values().filter(|c| c.team == team).map(|c| c.id).collect();
             events.push(sdk::Event { to: Some(to), data: encode(&Event::Radio(r)) });
         }
-        Frame { map: self.map.clone(), state: encode(&net_round(&self.m, self.tick)), entities, events }
+        let finished = self.m.played >= ROTATE_AFTER;
+        Frame { map: self.map.clone(), state: encode(&net_round(&self.m, self.tick)), entities, events, finished }
     }
 
     fn info(&mut self) -> GameInfo {
@@ -404,7 +410,19 @@ fn new_match() -> Match {
         bomb: Bomb::None,
         progress: None,
     };
-    Match { round, phase_ends: 0, bomb_explodes: 0, progress: None, buy_until: 0, loss_streak: [0, 0], t_site: 'A' }
+    Match { round, phase_ends: 0, bomb_explodes: 0, progress: None, buy_until: 0, loss_streak: [0, 0], t_site: 'A', played: 0 }
+}
+
+/// Teams trade sides: scores go with them, and everyone starts over like round 1, with the pistol and starting money.
+fn halftime(m: &mut Match, players: &mut Players) {
+    for c in players.values_mut() {
+        c.team = if c.team == Team::T { Team::Ct } else { Team::T };
+        // Dead as far as `start_round` is concerned, so nobody keeps their guns or armor.
+        (c.hp, c.money) = (0, START_MONEY);
+    }
+    m.round.score.reverse();
+    m.loss_streak = [0, 0];
+    log(&format!("halftime after round {}: teams switch sides", m.round.number));
 }
 
 fn start_round(m: &mut Match, players: &mut Players, tick: u32) {
@@ -474,6 +492,10 @@ fn update_match(m: &mut Match, players: &mut Players, tick: u32) {
     match m.round.phase {
         Phase::End { .. } => {
             if tick >= m.phase_ends {
+                m.played += (m.round.number > 0) as u32;
+                if m.round.number > 0 && m.round.number % HALF == 0 {
+                    halftime(m, players);
+                }
                 start_round(m, players, tick);
             }
             return;
@@ -954,6 +976,8 @@ mod tests {
             shots.len()
         );
         assert!(t + ct >= rounds, "rounds should finish");
+        assert_eq!(m.played, rounds, "a round counts once its end pause is over, for rotating games");
+        assert_eq!(players[&1].team == Team::Ct, rounds / HALF % 2 == 1, "sides switch every {HALF} rounds");
         assert!(kills >= 10, "bots should fight");
         assert!(plants >= 1, "Ts should plant at least once");
     }

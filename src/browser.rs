@@ -59,6 +59,8 @@ pub struct Browser {
     host_pick: Option<usize>,
     /// Bots for a hosted game; None leaves it to the game.
     bots: Option<u32>,
+    /// Host every game in turn, starting with the picked one.
+    rotate: bool,
     error: String,
     /// The list changed and its rows need rebuilding.
     dirty: bool,
@@ -80,6 +82,7 @@ impl Browser {
             shown_games: None,
             host_pick: None,
             bots: None,
+            rotate: false,
             error: String::new(),
             dirty: true,
         }
@@ -295,6 +298,10 @@ pub fn browse(
                 .spawn((ChildOf(bots), button, BorderColor::all(Color::srgb(0.6, 0.6, 0.6)), children![(Text::new(sign), font.clone())]))
                 .observe(move |_: On<PointerClick>, mut b: ResMut<Browser>| (b.bots, b.shown_games) = (step_bots(b.bots, up), None));
         }
+        let label = if b.rotate { "Rotate games: on (10 rounds, 3 races or 3 matches each)" } else { "Rotate games: off" };
+        commands
+            .spawn((ChildOf(*host_list), row.clone(), children![(Text::new(label), font.clone())]))
+            .observe(|_: On<PointerClick>, mut b: ResMut<Browser>| (b.rotate, b.shown_games) = (!b.rotate, None));
         match &games {
             None => _ = commands.spawn((ChildOf(*host_list), row, children![(Text::new("Finding games..."), font)])),
             Some(list) if list.is_empty() => _ = commands.spawn((ChildOf(*host_list), row, children![(Text::new("No games found to host"), font)])),
@@ -310,7 +317,14 @@ pub fn browse(
     if let Some(game) = b.host_pick.take().and_then(|i| games.as_ref()?.get(i).cloned()) {
         let user = std::env::var("USER").unwrap_or_else(|_| "someone".into());
         crate::client::store(&game.module);
-        match crate::server::host(format!("{user}'s game"), game.module, game.map, b.bots) {
+        let mut modules = vec![game.module];
+        // Rotating: then each other game once, in list order.
+        for other in games.iter().flatten().filter(|_| b.rotate) {
+            if !modules.contains(&other.module) {
+                modules.push(other.module.clone());
+            }
+        }
+        match crate::server::host(format!("{user}'s game"), modules, game.map, b.bots) {
             Ok(port) => join = Some(SocketAddr::from(([127, 0, 0, 1], port))),
             Err(e) => b.error = e,
         }

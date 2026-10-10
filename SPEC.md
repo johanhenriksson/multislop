@@ -7,6 +7,8 @@ Deadline: playable before 00:00. One weapon, one simple map.
   in: servers run a module and clients download it from the server.
 - `cargo run --release -- server [port] [--game game.wasm] [--map map]` (headless, default port 5000; the game defaults to
   `dust.wasm` next to the executable, so in development pass `--game target/wasm32-unknown-unknown/release/dust.wasm`)
+  `--rotate` plays games in turn (see Game rotation): every `--game` given (repeat it), or else every module next to
+  the executable.
 - `cargo run --release -- client [host:port] [--game game.wasm] [--lag ms] [--jitter ms] [--interp ms]` (`--game` uses a local module instead of downloading the server's, `--lag`/`--jitter` fake delay and bursty arrival to test netcode, `--interp` is the minimum remote-player buffer, default 50)
 
 ## Distribution
@@ -87,6 +89,8 @@ Deadline: playable before 00:00. One weapon, one simple map.
   interpolated between cell corners; you walk up rises under 0.5 m, stay glued going down, and bullets/sight lines
   march against the terrain.
 - Round: 5 s freeze (look only, movement frozen via `PlayerState::frozen` so prediction agrees), 1:55 live, 5 s end.
+- Halftime every 10 rounds (`HALF`): teams switch sides with their scores, everyone restarts with the pistol and
+  $800 and loss bonuses reset; the next freeze says "teams switched sides".
 - One random T carries the bomb; it drops where the carrier dies and any T picks it up by walking over it.
 - Plant: hold E on a site for 3 s. Defuse: CT holds E within 1.5 m of the bomb for 5 s. Bomb: 35 s, kills within 20 m.
 - Wins: eliminate the other team (a planted bomb must still be defused), bomb explodes (T), defused (CT),
@@ -128,6 +132,13 @@ Deadline: playable before 00:00. One weapon, one simple map.
 - Maps: games list theirs in `GameInfo::maps`; the host picks one with `ServerGame::set_map` (`--map`, default the
   first), and a game may switch on its own. The current map rides in every `Frame` and snapshot; when it changes the
   client host tears down the world and starts a fresh instance of the client game with `start(map)`.
+- Game rotation (off by default; `--rotate`, or "Rotate games" in "Host a LAN game", which starts with the picked
+  game and then each other one): a game sets `Frame::finished` once its turn is played (dust 20 rounds, race 3
+  races, arena 3 matches, each counted when its end screen is over, reset by `set_map`). The server then disconnects
+  everyone from it, starts the next on its first map and bumps a game counter. All modules are loaded up front, and
+  each game keeps its own tick (lag compensation rewinds by it). Input for an earlier game is answered with
+  `ServerMsg::Game` (hash, size, counter), so clients notice, tear down and load the new game like on connect, then
+  rejoin; snapshots carry the counter so a late one from the old game is dropped.
 - `sdk::client`: the client half. `ClientGame` (start, snapshot, input, predict, frame) returns retained commands the
   host applies: assets (textures, meshes, materials, sounds), environment (sky, sun, fog), a scene tree (node 0 is
   the camera), and a HUD of flexbox-like nodes with text, images, click reporting and world-anchored placement;
@@ -163,7 +174,7 @@ Deadline: playable before 00:00. One weapon, one simple map.
   server rewinds other players to that tick (max 400 ms back) from its position history and raycasts there.
 
 ## Out of scope (for now)
-Grenades, dropped/pickup weapons, halftime/match end, team switching, map height (ramps, stairs), anti-cheat, encryption, connection handshake/timeouts beyond the basics.
+Grenades, dropped/pickup weapons, match end, team switching, map height (ramps, stairs), anti-cheat, encryption, connection handshake/timeouts beyond the basics.
 
 ## Instaslop (`games/arena`)
 - A second game module: instagib free-for-all on one 80 x 80 m map, "arena" (four-way symmetric: corner balconies up

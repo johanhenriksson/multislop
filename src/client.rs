@@ -110,6 +110,8 @@ struct Client {
     /// The newest snapshot that came before the world for its map was built, handed to the game once it is.
     deferred: Option<ClientSnapshot>,
     fetch: Fetch,
+    /// Which of the server's games we're in (`ServerMsg::Game::game`).
+    generation: u8,
     /// Why the game couldn't be loaded.
     error: Option<String>,
     /// When we first asked the server which game it runs (clock).
@@ -153,6 +155,7 @@ impl Client {
         });
         Client {
             fetch: if game.is_some() { Fetch::Done } else { Fetch::Asking },
+            generation: 0,
             game,
             started: false,
             module: local.clone().unwrap_or_default(),
@@ -367,7 +370,8 @@ fn load(client: &mut Client, bytes: &[u8]) {
 }
 
 /// The server's answer to which game it runs: cached already, or to download.
-fn on_game(client: &mut Client, hash: [u8; 32], size: u32, cookie: u64) {
+fn on_game(client: &mut Client, hash: [u8; 32], size: u32, cookie: u64, generation: u8) {
+    client.generation = generation;
     if let Some(bytes) = std::fs::read(cache_path(&hash)).ok().filter(|b| sha256(b) == hash) {
         touch(&cache_path(&hash));
         return load(client, &bytes);
@@ -404,7 +408,7 @@ fn on_chunk(client: &mut Client, index: u32, chunk: &[u8]) {
 }
 
 /// Every frame rather than every tick, so snapshots aren't left waiting in the socket.
-fn receive(mut net: ResMut<Net>, mut client: ResMut<Client>, mut browser: ResMut<crate::browser::Browser>) {
+fn receive(mut net: ResMut<Net>, mut client: ResMut<Client>, mut browser: ResMut<crate::browser::Browser>, mut renderer: Renderer) {
     for (from, packet) in net.recv() {
         if Some(from) != net.server {
             if net.server.is_none() {
@@ -417,9 +421,17 @@ fn receive(mut net: ResMut<Net>, mut client: ResMut<Client>, mut browser: ResMut
             client.heard_at = clock();
         }
         match msg {
-            Some(ServerMsg::Game { hash, size, cookie }) if matches!(client.fetch, Fetch::Asking) => on_game(&mut client, hash, size, cookie),
+            Some(ServerMsg::Game { hash, size, cookie, game }) if matches!(client.fetch, Fetch::Asking) => on_game(&mut client, hash, size, cookie, game),
+            // The server moved on to another game: start over with it, as if we had just connected.
+            Some(ServerMsg::Game { hash, size, cookie, game }) if game != client.generation && matches!(client.fetch, Fetch::Done) => {
+                renderer.clear();
+                *client = Client { heard_at: clock(), ..Client::new(None, client.interp_ms) };
+                on_game(&mut client, hash, size, cookie, game);
+            }
             Some(ServerMsg::Chunk { index, data }) => on_chunk(&mut client, index, &data),
             Some(ServerMsg::Game { .. } | ServerMsg::Info { .. }) => {}
+            // From the game before, overtaken on the way by the news of the next one.
+            Some(ServerMsg::Snapshot(delta)) if delta.game != client.generation => {}
             Some(ServerMsg::Snapshot(delta)) => {
                 let base = delta.base.and_then(|t| client.netcode.snapshot_at(t));
                 // A base we no longer have: skip it; the server falls back to whole snapshots soon enough.
@@ -532,10 +544,10 @@ fn net_tick(
         }
         Fetch::Done => {
             let raw = RawInput { held: held_keys(&keys, &mouse, &pads), captured: captured(&cursor), ..default() };
-            let Client { game: Some(game), netcode, .. } = &mut *client else { return };
+            let Client { game: Some(game), netcode, generation, .. } = &mut *client else { return };
             let input = game.input(&raw);
             netcode.input(input, &mut |e, i, s| game.predict(e, i, s, true));
-            if let Some(packet) = netcode.packet(player_name()) {
+            if let Some(packet) = netcode.packet(player_name(), *generation) {
                 send(ClientMsg::Input(packet));
             }
         }
@@ -726,7 +738,7 @@ mod tests {
         let mut client = Client::new(None, 50);
         let module: Vec<u8> = (0..3000).map(|i| i as u8).collect();
         // The server claims a different hash than the bytes it sends, so nothing gets cached or loaded.
-        on_game(&mut client, sha256(b"something else"), module.len() as u32, 7);
+        on_game(&mut client, sha256(b"something else"), module.len() as u32, 7, 0);
         let Fetch::Downloading { cookie: 7, ref have, .. } = client.fetch else { panic!("should be downloading") };
         assert_eq!(have.len(), 3);
         for i in [2, 0, 0, 2] {

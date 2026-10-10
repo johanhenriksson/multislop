@@ -13,6 +13,8 @@ const COUNTDOWN_SECS: f32 = 4.0;
 const RACE_SECS: f32 = 300.0;
 const CLOSING_SECS: f32 = 30.0;
 const RESULTS_SECS: f32 = 8.0;
+/// Races per turn when the host rotates games.
+const ROTATE_AFTER: u32 = 3;
 /// Runners while any human is on, unless the host sets a bot count: bots make up the rest.
 pub const FILL: usize = 6;
 
@@ -69,6 +71,8 @@ pub struct Gauntlet {
     events: Vec<Event>,
     /// Bots to race, set by the host; None fills up to `FILL` runners.
     bots: Option<usize>,
+    /// Races run to the end of their results since `set_map`, for rotating games.
+    played: u32,
 }
 
 impl Default for Gauntlet {
@@ -83,6 +87,7 @@ impl Default for Gauntlet {
             ends: ticks(COUNTDOWN_SECS),
             events: vec![],
             bots: None,
+            played: 0,
         }
     }
 }
@@ -135,7 +140,7 @@ impl ServerGame for Gauntlet {
         };
         let state = Race { phase: self.phase, clock: self.tick - self.began, time, closing };
         let events = self.events.drain(..).map(|e| sdk::Event { to: None, data: encode(&e) }).collect();
-        Frame { map: self.map.clone(), state: encode(&state), entities, events }
+        Frame { map: self.map.clone(), state: encode(&state), entities, events, finished: self.played >= ROTATE_AFTER }
     }
 
     fn info(&mut self) -> GameInfo {
@@ -148,7 +153,7 @@ impl ServerGame for Gauntlet {
         if !MAPS.contains(&map) {
             return log(&format!("no map called {map}; playing {}", self.map));
         }
-        self.map = map.into();
+        (self.map, self.played) = (map.into(), 0);
         self.restart();
     }
 
@@ -202,7 +207,10 @@ impl Gauntlet {
                     log(&format!("{} wins", w.name));
                 }
             }
-            Phase::Results if self.tick >= self.ends => self.restart(),
+            Phase::Results if self.tick >= self.ends => {
+                self.played += 1;
+                self.restart();
+            }
             _ => {}
         }
     }
@@ -339,7 +347,7 @@ mod tests {
         assert_eq!(game.phase, Phase::Results);
         assert_eq!(game.players[&id].wins, 1);
         race(&mut game, RESULTS_SECS + 0.1);
-        assert_eq!(game.phase, Phase::Countdown);
+        assert_eq!((game.phase, game.played), (Phase::Countdown, 1), "a race counts once its results are over");
         assert!(game.players.values().all(|p| p.finish.is_none() && p.checkpoint == 0 && p.state.frozen));
     }
 

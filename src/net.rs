@@ -19,8 +19,9 @@ pub enum ServerMsg {
     /// A snapshot as the changes from one the client has (see `diff`).
     Snapshot(Delta),
     /// The game this server runs: the sha256 and size of its module. `cookie` must come back with chunk requests, so
-    /// only the real sender of a hello can make the server send chunks.
-    Game { hash: [u8; 32], size: u32, cookie: u64 },
+    /// only the real sender of a hello can make the server send chunks. `game` counts the server's game changes;
+    /// it is also the answer to input for an earlier one, so clients notice the change and load the new game.
+    Game { hash: [u8; 32], size: u32, cookie: u64, game: u8 },
     Chunk { index: u32, data: Vec<u8> },
     /// For server browsers: who we are and what's on, with the query's `time` echoed to measure ping.
     Info { name: String, game: GameInfo, time: f64 },
@@ -96,6 +97,8 @@ pub struct InputPacket {
     pub time: f64,
     /// The newest snapshot we have, which the server sends the next ones relative to.
     pub snapshot: u32,
+    /// Which of the server's games this is for (`ServerMsg::Game::game`); input for another is answered, not played.
+    pub game: u8,
     /// The most recent unacked inputs, oldest first. Redundant on purpose to survive packet loss.
     pub inputs: Vec<InputMsg>,
 }
@@ -111,6 +114,8 @@ pub struct Delta {
     pub ack: u32,
     pub echo: f64,
     pub echo_held: f32,
+    /// Which of the server's games it's from (`ServerMsg::Game::game`).
+    pub game: u8,
     /// None: as in the base.
     pub map: Option<String>,
     pub state: Option<Patch>,
@@ -210,6 +215,7 @@ pub fn diff(base: Option<&Snapshot>, now: &Snapshot) -> Delta {
         ack: now.ack,
         echo: now.echo,
         echo_held: now.echo_held,
+        game: 0,
         map: (b.map != now.map || base.is_none()).then(|| now.map.clone()),
         state: Patch::new(&b.state, &now.state).or_else(|| base.is_none().then(|| Patch::All(now.state.clone()))),
         entities,
