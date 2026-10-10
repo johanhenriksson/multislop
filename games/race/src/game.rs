@@ -16,7 +16,7 @@ const CLOSING_SECS: f32 = 30.0;
 const RESULTS_SECS: f32 = 8.0;
 /// Races per turn when the host rotates games.
 const ROTATE_AFTER: u32 = 3;
-/// Runners while any human is on, unless the host sets a bot count: bots make up the rest.
+/// Runners while any human is on, unless the host sets another count: bots make up the rest.
 pub const FILL: usize = 6;
 
 type Players = BTreeMap<u32, Player>;
@@ -77,7 +77,7 @@ pub struct Gauntlet {
     ends: u32,
     events: Vec<Event>,
     /// Bots to race, set by the host; None fills up to `FILL` runners.
-    bots: Option<usize>,
+    min_players: Option<usize>,
     /// Races run to the end of their results since `set_map`, for rotating games.
     played: u32,
 }
@@ -95,7 +95,7 @@ impl Default for Gauntlet {
             began: 0,
             ends: ticks(COUNTDOWN_SECS),
             events: vec![],
-            bots: None,
+            min_players: None,
             played: 0,
         };
         game.new_course();
@@ -174,9 +174,9 @@ impl ServerGame for Gauntlet {
         self.restart();
     }
 
-    fn set_bots(&mut self, bots: u32) {
-        log(&format!("{bots} bots"));
-        self.bots = Some(bots as usize);
+    fn set_min_players(&mut self, players: u32) {
+        log(&format!("bots fill up to {players} runners"));
+        self.min_players = Some(players as usize);
     }
 }
 
@@ -294,11 +294,11 @@ impl Gauntlet {
         }
     }
 
-    /// Adds or removes bots so there are `bots` of them (default: enough to make `FILL` runners) while any human is
-    /// on, and none without.
+    /// Adds or removes bots so there are `min_players` runners (default `FILL`) while any human is on, and no bots
+    /// without.
     fn fill_bots(&mut self) {
         let humans = self.players.values().filter(|p| p.bot.is_none()).count();
-        let want = if humans == 0 { 0 } else { self.bots.unwrap_or(FILL.saturating_sub(humans)) };
+        let want = if humans == 0 { 0 } else { self.min_players.unwrap_or(FILL).saturating_sub(humans) };
         let mut bots: Vec<u32> = self.players.values().filter(|p| p.bot.is_some()).map(|p| p.id).collect();
         while bots.len() > want {
             self.players.remove(&bots.pop().unwrap());
@@ -356,7 +356,7 @@ mod tests {
     fn lava_sends_you_back_to_the_last_checkpoint() {
         let mut game = Gauntlet::new();
         game.set_map("gauntlet");
-        game.set_bots(0);
+        game.set_min_players(0);
         let id = game.connect(&"a".into());
         race(&mut game, COUNTDOWN_SECS + 0.1);
         let z = (0..course().depth()).rev().find(|&z| course().checkpoint(7, z) == Some(1)).unwrap();
@@ -373,7 +373,7 @@ mod tests {
     #[test]
     fn crossing_the_line_finishes_and_everyone_in_ends_the_race() {
         let mut game = Gauntlet::new();
-        game.set_bots(2);
+        game.set_min_players(3);
         let id = game.connect(&"a".into());
         race(&mut game, COUNTDOWN_SECS + 1.0);
         game.players.get_mut(&id).unwrap().teleport(course().ground(7, 2));
@@ -387,13 +387,13 @@ mod tests {
     }
 
     #[test]
-    fn bot_count_is_settable() {
+    fn bots_fill_up_to_the_runner_count() {
         let mut game = Gauntlet::new();
-        game.set_bots(9);
+        game.set_min_players(9);
         game.connect(&"a".into());
         game.tick();
-        assert_eq!(game.players.values().filter(|p| p.bot.is_some()).count(), 9);
-        game.set_bots(0);
+        assert_eq!(game.players.values().filter(|p| p.bot.is_some()).count(), 8);
+        game.set_min_players(0);
         game.tick();
         assert_eq!(game.players.len(), 1);
     }
@@ -437,7 +437,7 @@ mod tests {
     #[test]
     fn random_deals_a_new_course_every_race() {
         let mut game = Gauntlet::new();
-        game.set_bots(0);
+        game.set_min_players(0);
         let id = game.connect(&"a".into());
         let first = game.map.clone();
         assert!(first.starts_with("random-"), "{first}");

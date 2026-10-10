@@ -113,8 +113,8 @@ pub struct WasmGame {
     tick: TypedFunc<(), u64>,
     info: TypedFunc<(), u64>,
     set_map: TypedFunc<u32, ()>,
-    /// Missing from modules built before bot counts were configurable.
-    set_bots: Option<TypedFunc<u32, ()>>,
+    /// Missing from modules built before player counts were configurable.
+    set_min_players: Option<TypedFunc<u32, ()>>,
 }
 
 impl WasmGame {
@@ -128,7 +128,7 @@ impl WasmGame {
             tick: wasm.func("fps16_tick")?,
             info: wasm.func("fps16_info")?,
             set_map: wasm.func("fps16_set_map")?,
-            set_bots: wasm.func("fps16_set_bots").ok(),
+            set_min_players: wasm.func("fps16_set_min_players").ok(),
             wasm,
         })
     }
@@ -168,9 +168,9 @@ impl ServerGame for WasmGame {
         self.wasm.call(&self.set_map, len)
     }
 
-    fn set_bots(&mut self, bots: u32) {
-        if let Some(f) = self.set_bots.clone() {
-            self.wasm.call(&f, bots)
+    fn set_min_players(&mut self, players: u32) {
+        if let Some(f) = self.set_min_players.clone() {
+            self.wasm.call(&f, players)
         }
     }
 }
@@ -250,7 +250,7 @@ mod tests {
                 frame = g.tick();
             }
             let players: Vec<NetPlayer> = frame.entities.iter().filter_map(NetPlayer::from_entity).collect();
-            assert_eq!(players.len(), 32, "16v16 with bots");
+            assert_eq!(players.len(), 8, "4v4 with bots");
             assert!(players.iter().any(|p| p.id == id && p.name == "tester"));
             assert!(players.iter().map(|p| p.kills).sum::<u32>() > 0, "bots fought");
             let round: Round = sdk::decode(&frame.state).unwrap();

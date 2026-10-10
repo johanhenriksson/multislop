@@ -132,9 +132,9 @@ pub trait ServerGame {
     /// Switches to one of `GameInfo::maps` and starts the match over. The host calls it once before play starts;
     /// a game can also change maps on its own (a rotation), reporting the new one in `Frame::map`.
     fn set_map(&mut self, map: &str);
-    /// How many bots to play with while anyone is on, instead of the game's own choice. The host calls it before play
-    /// starts, if at all.
-    fn set_bots(&mut self, bots: u32);
+    /// Players to have while anyone is on, instead of the game's own choice: bots fill up to it, and leave as people
+    /// join. The host calls it before play starts, if at all.
+    fn set_min_players(&mut self, players: u32);
 }
 
 /// Recent entities, for lag compensation: rewinding others to where (and how, e.g. crouched) a shooter saw them.
@@ -282,8 +282,8 @@ macro_rules! export_server {
             }
 
             #[unsafe(no_mangle)]
-            extern "C" fn fps16_set_bots(bots: u32) {
-                game(|g| g.set_bots(bots))
+            extern "C" fn fps16_set_min_players(players: u32) {
+                game(|g| g.set_min_players(players))
             }
         }
     };

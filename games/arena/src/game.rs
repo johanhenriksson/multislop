@@ -13,7 +13,7 @@ const MATCH_SECS: f32 = 600.0;
 const INTERMISSION_SECS: f32 = 8.0;
 /// Matches per turn when the host rotates games.
 const ROTATE_AFTER: u32 = 3;
-/// Players in the arena while any human is, unless the host sets a bot count: bots make up the rest.
+/// Players in the arena while any human is, unless the host sets another count: bots make up the rest.
 pub const FILL: usize = 8;
 /// Dead for at least this long; fire respawns after it, and you come back on your own after `RESPAWN_AUTO`.
 const RESPAWN_MIN: f32 = 1.0;
@@ -60,8 +60,8 @@ pub struct Arena {
     ends: u32,
     winner: Option<u32>,
     events: Vec<Event>,
-    /// Bots to play with, set by the host; None fills up to `FILL` players.
-    bots: Option<usize>,
+    /// Players for bots to fill up to, set by the host; None is `FILL`.
+    min_players: Option<usize>,
     /// Matches played to the end of their intermission since `set_map`, for rotating games.
     played: u32,
 }
@@ -77,7 +77,7 @@ impl Default for Arena {
             ends: ticks(MATCH_SECS),
             winner: None,
             events: vec![],
-            bots: None,
+            min_players: None,
             played: 0,
         }
     }
@@ -119,7 +119,7 @@ impl ServerGame for Arena {
     }
 
     fn tick(&mut self) -> Frame {
-        fill_bots(&mut self.players, &mut self.next_id, self.tick, self.bots);
+        fill_bots(&mut self.players, &mut self.next_id, self.tick, self.min_players.unwrap_or(FILL));
         run_inputs(&mut self.players, &self.history, self.tick, &mut self.events);
         self.tick += 1;
         self.update_match();
@@ -144,9 +144,9 @@ impl ServerGame for Arena {
         self.restart();
     }
 
-    fn set_bots(&mut self, bots: u32) {
-        log(&format!("{bots} bots"));
-        self.bots = Some(bots as usize);
+    fn set_min_players(&mut self, players: u32) {
+        log(&format!("bots fill up to {players} players"));
+        self.min_players = Some(players as usize);
     }
 }
 
@@ -279,11 +279,10 @@ fn bot_name(id: u32) -> String {
     format!("BOT {}", NAMES[id as usize % NAMES.len()])
 }
 
-/// Adds or removes bots so there are `bots` of them (default: enough to make `FILL` players) while any human is
-/// playing, and none without.
-fn fill_bots(players: &mut Players, next_id: &mut u32, tick: u32, bots: Option<usize>) {
+/// Adds or removes bots so there are `min_players` players while any human is playing, and no bots without.
+fn fill_bots(players: &mut Players, next_id: &mut u32, tick: u32, min_players: usize) {
     let humans = players.values().filter(|p| p.bot.is_none()).count();
-    let want = if humans == 0 { 0 } else { bots.unwrap_or(FILL.saturating_sub(humans)) };
+    let want = if humans == 0 { 0 } else { min_players.saturating_sub(humans) };
     let mut bots: Vec<u32> = players.values().filter(|p| p.bot.is_some()).map(|p| p.id).collect();
     while bots.len() > want {
         players.remove(&bots.pop().unwrap());
@@ -363,15 +362,18 @@ mod tests {
     }
 
     #[test]
-    fn bot_count_is_settable() {
+    fn bots_fill_up_to_the_player_count() {
         let mut game = Arena::new();
-        game.set_bots(12);
+        game.set_min_players(12);
         game.connect(&"a".into());
         game.tick();
-        assert_eq!(game.players.values().filter(|p| p.bot.is_some()).count(), 12);
-        game.set_bots(0);
+        assert_eq!(game.players.values().filter(|p| p.bot.is_some()).count(), 11);
+        game.connect(&"b".into());
         game.tick();
-        assert_eq!(game.players.len(), 1);
+        assert_eq!(game.players.len(), 12, "a bot makes room");
+        game.set_min_players(1);
+        game.tick();
+        assert_eq!(game.players.len(), 2);
     }
 
     #[test]

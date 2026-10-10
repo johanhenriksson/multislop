@@ -6,13 +6,13 @@ use std::collections::{HashMap, VecDeque};
 use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
-/// Hosts games from inside the client: a server on a thread, on the first free LAN port, with `bots` bots (the
-/// game's choice when None). The first module plays `map`; more than one means rotating through them. Returns the port.
-pub fn host(name: String, modules: Vec<Vec<u8>>, map: String, bots: Option<u32>) -> Result<u16, String> {
+/// Hosts games from inside the client: a server on a thread, on the first free LAN port, bots filling up to
+/// `players` (the game's choice when None). The first module plays `map`; more than one means rotating through them. Returns the port.
+pub fn host(name: String, modules: Vec<Vec<u8>>, map: String, players: Option<u32>) -> Result<u16, String> {
     let sock = DISCOVERY_PORTS.clone().find_map(|p| UdpSocket::bind(("0.0.0.0", p)).ok()).ok_or("no free port in 5000-5009")?;
     let port = sock.local_addr().map_err(|e| e.to_string())?.port();
     let (ready, loaded) = std::sync::mpsc::channel();
-    std::thread::spawn(move || match load(modules, Some(&map), bots) {
+    std::thread::spawn(move || match load(modules, Some(&map), players) {
         Ok(games) => {
             let _ = ready.send(Ok(()));
             run(sock, &name, games);
@@ -23,15 +23,16 @@ pub fn host(name: String, modules: Vec<Vec<u8>>, map: String, bots: Option<u32>)
     Ok(port)
 }
 
-/// Loads game modules for `run`, each on its first map (the first one on `map` if given) and with `bots` bots.
-pub fn load(modules: Vec<Vec<u8>>, map: Option<&str>, bots: Option<u32>) -> Result<Vec<(Box<dyn ServerGame>, Vec<u8>)>, String> {
+/// Loads game modules for `run`, each on its first map (the first one on `map` if given), bots filling up
+/// to `players`.
+pub fn load(modules: Vec<Vec<u8>>, map: Option<&str>, players: Option<u32>) -> Result<Vec<(Box<dyn ServerGame>, Vec<u8>)>, String> {
     let mut games: Vec<(Box<dyn ServerGame>, Vec<u8>)> = Vec::new();
     for module in modules {
         let mut game = crate::wasm::WasmGame::load(&module).map_err(|e| format!("can't load the game: {e}"))?;
         let first = game.info().maps.first().cloned().unwrap_or_default();
         game.set_map(map.filter(|_| games.is_empty()).unwrap_or(&first));
-        if let Some(bots) = bots {
-            game.set_bots(bots);
+        if let Some(players) = players {
+            game.set_min_players(players);
         }
         games.push((Box::new(game), module));
     }
@@ -296,7 +297,7 @@ mod tests {
         fn set_map(&mut self, _: &str) {
             self.1 = 0;
         }
-        fn set_bots(&mut self, _: u32) {}
+        fn set_min_players(&mut self, _: u32) {}
     }
 
     /// A client playing along: told the next game when its input is for the one before, then snapshots of that one.

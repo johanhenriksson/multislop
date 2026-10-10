@@ -58,8 +58,8 @@ pub struct Browser {
     shown_games: Option<usize>,
     /// A game picked to host, by index into `games`.
     host_pick: Option<usize>,
-    /// Bots for a hosted game; None leaves it to the game.
-    bots: Option<u32>,
+    /// Players for a hosted game, bots filling the rest; None leaves it to the game.
+    players: Option<u32>,
     /// Host every game in turn, starting with the picked one.
     rotate: bool,
     error: String,
@@ -82,7 +82,7 @@ impl Browser {
             host_open: false,
             shown_games: None,
             host_pick: None,
-            bots: None,
+            players: None,
             rotate: false,
             error: String::new(),
             dirty: true,
@@ -90,15 +90,15 @@ impl Browser {
     }
 }
 
-/// Most bots the host menu offers.
-const MAX_BOTS: u32 = 31;
+/// Most players the host menu offers.
+const MAX_PLAYERS: u32 = 32;
 
-/// One step through the bot counts the host menu offers: the game's default, then 0 to MAX_BOTS.
-fn step_bots(bots: Option<u32>, up: bool) -> Option<u32> {
-    match (bots, up) {
-        (None, true) => Some(0),
-        (None, false) | (Some(0), false) => None,
-        (Some(n), true) => Some((n + 1).min(MAX_BOTS)),
+/// One step through the player counts the host menu offers: the game's default, then 1 to MAX_PLAYERS.
+fn step_players(players: Option<u32>, up: bool) -> Option<u32> {
+    match (players, up) {
+        (None, true) => Some(1),
+        (None, false) | (Some(1), false) => None,
+        (Some(n), true) => Some((n + 1).min(MAX_PLAYERS)),
         (Some(n), false) => Some(n - 1),
     }
 }
@@ -509,12 +509,12 @@ pub fn browse(
         let tile = Node { padding: UiRect::axes(px(16), px(11)), align_items: AlignItems::Center, column_gap: px(12), border_radius: BorderRadius::all(px(12)), ..default() };
         let text = |s: String, size: f32, color: Color| (Text::new(s), ui_font(size, FontWeight::SEMIBOLD), TextColor(color), Pickable::IGNORE);
         let options = commands.spawn((ChildOf(*host_list), Node { column_gap: px(8), ..default() })).id();
-        let label = b.bots.map_or("Bots: auto".to_string(), |n| format!("Bots: {n}"));
-        let bots = commands.spawn((ChildOf(options), tile.clone(), BackgroundColor(CARD), children![(Node { width: px(96), ..default() }, text(label, 15.0, INK))])).id();
+        let label = b.players.map_or("Players: auto".to_string(), |n| format!("Players: {n}"));
+        let bots = commands.spawn((ChildOf(options), tile.clone(), BackgroundColor(CARD), children![(Node { width: px(120), ..default() }, text(label, 15.0, INK))])).id();
         for (sign, up) in [("−", false), ("+", true)] {
             let pill = Node { width: px(28), height: px(28), justify_content: JustifyContent::Center, align_items: AlignItems::Center, border_radius: BorderRadius::MAX, ..default() };
             hoverable(commands.spawn((ChildOf(bots), pill, children![text(sign.into(), 17.0, INK)])), CARD_HOT, you.with_alpha(0.5), true)
-                .observe(move |_: On<PointerClick>, mut b: ResMut<Browser>| (b.bots, b.shown_games) = (step_bots(b.bots, up), None));
+                .observe(move |_: On<PointerClick>, mut b: ResMut<Browser>| (b.players, b.shown_games) = (step_players(b.players, up), None));
         }
         let (label, base) = if b.rotate { ("Rotate: on", you.with_alpha(0.35)) } else { ("Rotate: off", CARD) };
         hoverable(commands.spawn((ChildOf(options), tile.clone(), children![text(label.into(), 15.0, INK)])), base, CARD_HOT, false)
@@ -551,7 +551,7 @@ pub fn browse(
                 modules.push(other.module.clone());
             }
         }
-        match crate::server::host(format!("{}'s game", me.0.name), modules, game.map, b.bots) {
+        match crate::server::host(format!("{}'s game", me.0.name), modules, game.map, b.players) {
             Ok(port) => join = Some(SocketAddr::from(([127, 0, 0, 1], port))),
             Err(e) => b.error = e,
         }
@@ -626,4 +626,92 @@ pub fn browse(
             r.observe(move |_: On<PointerClick>, mut b: ResMut<Browser>| b.clicked = Some(addr));
         }
     }
+}
+
+/// The Esc menu in a game.
+#[derive(Resource, Default)]
+pub struct Paused {
+    pub open: bool,
+    /// A button clicked, acted on next frame (Disconnect by the watchdog, which tears the game down).
+    pub pick: Option<Pick>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum Pick {
+    Resume,
+    Disconnect,
+    Quit,
+}
+
+#[derive(Component)]
+pub struct PauseMenu;
+
+pub fn setup_pause(mut commands: Commands) {
+    let full = Node {
+        position_type: PositionType::Absolute,
+        width: percent(100),
+        height: percent(100),
+        flex_direction: FlexDirection::Column,
+        justify_content: JustifyContent::Center,
+        align_items: AlignItems::Center,
+        row_gap: px(14),
+        ..default()
+    };
+    let shade = RadialGradient::new(UiPosition::CENTER, RadialGradientShape::FarthestCorner, vec![
+        ColorStop::auto(Color::srgba(0.05, 0.02, 0.1, 0.7)),
+        ColorStop::auto(Color::srgba(0.0, 0.0, 0.0, 0.92)),
+    ]);
+    let menu = commands.spawn((PauseMenu, Visibility::Hidden, GlobalZIndex(20), full, BackgroundGradient::from(shade))).id();
+    commands.spawn((ChildOf(menu), Text::new("PAUSED"), display_font(80.0), TextColor(INK), Node { margin: UiRect::bottom(px(18)), ..default() }));
+    let button = Node {
+        width: px(320),
+        padding: UiRect::vertical(px(15)),
+        justify_content: JustifyContent::Center,
+        border_radius: BorderRadius::all(px(14)),
+        ..default()
+    };
+    for (text, pick) in [("RESUME", Pick::Resume), ("DISCONNECT", Pick::Disconnect), ("QUIT GAME", Pick::Quit)] {
+        let label = (Text::new(text), ui_font(18.0, FontWeight::BLACK), LetterSpacing::Px(3.0), TextColor(Color::WHITE), Pickable::IGNORE);
+        let b = commands.spawn((ChildOf(menu), button.clone(), children![label]));
+        let b = match pick {
+            Pick::Resume => {
+                let mut b = hoverable(b, Color::NONE, Color::NONE, true);
+                b.insert((BackgroundGradient::from(LinearGradient::to_right(vec![ColorStop::auto(HOT_PINK), ColorStop::auto(HOT_ORANGE)])), BoxShadow::new(HOT_PINK.with_alpha(0.45), px(0), px(8), px(0), px(28))));
+                b
+            }
+            _ => hoverable(b, CARD_HOT, Color::srgba(1.0, 1.0, 1.0, 0.2), true),
+        };
+        let mut b = b;
+        b.observe(move |_: On<PointerClick>, mut p: ResMut<Paused>| p.pick = Some(pick));
+    }
+    commands.spawn((ChildOf(menu), Text::new("Esc to go back"), ui_font(13.0, FontWeight::MEDIUM), TextColor(FAINT), Node { margin: UiRect::top(px(10)), ..default() }));
+}
+
+/// Esc in a game opens and closes the menu; Resume grabs the mouse again, Quit closes the game.
+pub fn pause(
+    mut paused: ResMut<Paused>,
+    net: Res<Net>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut menu: Single<&mut Visibility, With<PauseMenu>>,
+    mut cursor: Single<&mut bevy::window::CursorOptions, With<bevy::window::PrimaryWindow>>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    if net.server.is_none() {
+        *paused = Paused::default();
+    } else if keys.just_pressed(KeyCode::Escape) {
+        paused.open = !paused.open;
+        if !paused.open {
+            paused.pick = Some(Pick::Resume);
+        }
+    }
+    match paused.pick {
+        Some(Pick::Resume) => {
+            *paused = Paused::default();
+            cursor.grab_mode = bevy::window::CursorGrabMode::Locked;
+            cursor.visible = false;
+        }
+        Some(Pick::Quit) => _ = exit.write(AppExit::Success),
+        _ => {}
+    }
+    **menu = if paused.open { Visibility::Inherited } else { Visibility::Hidden };
 }

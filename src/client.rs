@@ -211,10 +211,11 @@ pub fn run(server: Option<SocketAddr>, local: Option<Vec<u8>>, hostable: Vec<std
         .insert_resource(Client::new(local, interp_ms))
         .insert_resource(crate::browser::Browser::new(hostable))
         .insert_resource(Me::load())
-        .add_systems(Startup, (setup, crate::browser::setup))
+        .init_resource::<crate::browser::Paused>()
+        .add_systems(Startup, (setup, crate::browser::setup, crate::browser::setup_pause))
         .add_systems(PreUpdate, receive)
         .add_systems(FixedUpdate, net_tick)
-        .add_systems(Update, (grab_cursor, watchdog, crate::browser::browse, crate::browser::animate, start, frame, crate::render::anchor_ui, overlays).chain())
+        .add_systems(Update, (grab_cursor, crate::browser::pause, watchdog, crate::browser::browse, crate::browser::animate, start, frame, crate::render::anchor_ui, overlays).chain())
         .add_systems(PostUpdate, debug_shot.run_if(|| std::env::var_os("FPS16_SHOT").is_some()))
         .run();
 }
@@ -247,7 +248,7 @@ fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     ));
 }
 
-/// Back to the server browser when the server goes quiet, never answers, or runs another build: the game's world,
+/// Back to the server browser when the server goes quiet, never answers, runs another build, or we disconnect: the game's world,
 /// HUD and sounds go, the netcode starts over, and the mouse is freed.
 fn watchdog(
     mut client: ResMut<Client>,
@@ -255,11 +256,13 @@ fn watchdog(
     mut renderer: Renderer,
     mut browser: ResMut<crate::browser::Browser>,
     mut cursor: Single<&mut CursorOptions, With<PrimaryWindow>>,
+    mut paused: ResMut<crate::browser::Paused>,
 ) {
     let Some(server) = net.server else { return };
     let now = clock();
     let silent = |secs: f64| now - client.heard_at > secs;
     let why = match &client.wrong_build {
+        _ if paused.pick == Some(crate::browser::Pick::Disconnect) => String::new(),
         Some(build) => format!("{server} runs build {build}, you have build {BUILD} - restart the game to update"),
         None if client.started && silent(LOST_SECS) => format!("lost connection to {server}"),
         None if !client.started && client.asked_at.is_some_and(|t| now - t > NO_ANSWER_SECS) && silent(NO_ANSWER_SECS) => {
@@ -271,6 +274,7 @@ fn watchdog(
     net.leave();
     *client = Client::new(client.local.take(), client.interp_ms);
     browser.show_error(why);
+    *paused = default();
     cursor.grab_mode = CursorGrabMode::None;
     cursor.visible = true;
 }
@@ -516,6 +520,7 @@ fn captured(cursor: &CursorOptions) -> bool {
 
 fn net_tick(
     me: Res<Me>,
+    paused: Res<crate::browser::Paused>,
     mut net: ResMut<Net>,
     mut client: ResMut<Client>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -545,7 +550,7 @@ fn net_tick(
             send(ClientMsg::Chunks { cookie: *cookie, chunks });
         }
         Fetch::Done => {
-            let raw = RawInput { held: held_keys(&keys, &mouse, &pads), captured: captured(&cursor), ..default() };
+            let raw = if paused.open { default() } else { RawInput { held: held_keys(&keys, &mouse, &pads), captured: captured(&cursor), ..default() } };
             let Client { game: Some(game), netcode, generation, .. } = &mut *client else { return };
             let input = game.input(&raw);
             netcode.input(input, &mut |e, i, s| game.predict(e, i, s, true));
@@ -559,6 +564,7 @@ fn net_tick(
 #[allow(clippy::too_many_arguments)]
 fn frame(
     mut client: ResMut<Client>,
+    paused: Res<crate::browser::Paused>,
     mut renderer: Renderer,
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
@@ -576,7 +582,7 @@ fn frame(
     pressed.extend(BUTTONS.iter().filter(|(b, _)| mouse.just_pressed(*b)).map(|(_, k)| *k));
     pressed.extend(pads.iter().flat_map(|p| p.get_just_pressed().filter_map(|b| pad_key(*b))));
     let look = motion.delta + stick_look(&pads, time.delta_secs());
-    let input = RawInput { held: held_keys(&keys, &mouse, &pads), pressed, mouse: if captured { look } else { Vec2::ZERO }, captured };
+    let input = if paused.open { default() } else { RawInput { held: held_keys(&keys, &mouse, &pads), pressed, mouse: if captured { look } else { Vec2::ZERO }, captured } };
     if !client.started {
         return;
     }
@@ -613,10 +619,11 @@ fn grab_cursor(
     pads: Query<&Gamepad>,
     client: Res<Client>,
     net: Res<Net>,
+    paused: Res<crate::browser::Paused>,
 ) {
-    // Not while picking a server or loading: the mouse is for the browser then.
+    // Not while picking a server, loading or in the Esc menu: the mouse is for the menus then.
     let pad = pads.iter().any(|p| p.get_just_pressed().next().is_some());
-    if (mouse.just_pressed(MouseButton::Left) || pad) && client.started && net.server.is_some() {
+    if (mouse.just_pressed(MouseButton::Left) || pad) && client.started && net.server.is_some() && !paused.open {
         cursor.grab_mode = CursorGrabMode::Locked;
         cursor.visible = false;
     }

@@ -100,8 +100,8 @@ pub struct Dust {
     /// Weapons lying around, and the round they were dropped in (all go at the next).
     dropped: Vec<Dropped>,
     dropped_round: u32,
-    /// Bots to play with, set by the host; None fills both teams to `TEAM_SIZE`.
-    bots: Option<usize>,
+    /// Players for bots to fill up to, set by the host; None fills both teams to `TEAM_SIZE`.
+    min_players: Option<usize>,
 }
 
 impl Dust {
@@ -119,7 +119,7 @@ impl Dust {
             grenades: Vec::new(),
             dropped: Vec::new(),
             dropped_round: 0,
-            bots: None,
+            min_players: None,
         }
     }
 }
@@ -160,7 +160,7 @@ impl ServerGame for Dust {
     }
 
     fn tick(&mut self) -> Frame {
-        balance_bots(&mut self.m, &mut self.players, &mut self.next_id, self.bots);
+        balance_bots(&mut self.m, &mut self.players, &mut self.next_id, self.min_players);
         let alive: Vec<u32> = self.players.values().filter(|c| c.hp > 0).map(|c| c.id).collect();
         let (mut throws, mut dropped) = (Vec::new(), Vec::new());
         let (m, players, history, tick) = (&self.m, &mut self.players, &self.history, self.tick);
@@ -235,9 +235,9 @@ impl ServerGame for Dust {
         self.grenades.clear();
     }
 
-    fn set_bots(&mut self, bots: u32) {
-        log(&format!("{bots} bots"));
-        self.bots = Some(bots as usize);
+    fn set_min_players(&mut self, players: u32) {
+        log(&format!("bots fill up to {players} players"));
+        self.min_players = Some(players as usize);
     }
 }
 
@@ -357,14 +357,15 @@ fn smaller_team(players: &Players) -> Team {
 }
 
 /// Teams always have at least this many players; bots fill the gaps.
-const TEAM_SIZE: usize = 16;
+const TEAM_SIZE: usize = 4;
 
-/// Adds or removes bots so there are `bots` of them, each on whichever side is smaller. By default both teams are
-/// filled to TEAM_SIZE, or to the bigger human team if larger. No humans, no bots.
-fn balance_bots(m: &mut Match, players: &mut Players, next_id: &mut u32, bots: Option<usize>) {
+/// Adds or removes bots so there are `min_players` players, each bot on whichever side is smaller. By default both
+/// teams are filled to TEAM_SIZE, or to the bigger human team if larger. No humans, no bots.
+fn balance_bots(m: &mut Match, players: &mut Players, next_id: &mut u32, min_players: Option<usize>) {
     let humans = |team: Team| players.values().filter(|c| c.bot.is_none() && c.team == team).count();
     let (ts, cts) = (humans(Team::T), humans(Team::Ct));
-    let total = if ts + cts == 0 { 0 } else { bots.unwrap_or(2 * ts.max(cts).max(TEAM_SIZE) - ts - cts) };
+    let default = 2 * ts.max(cts).max(TEAM_SIZE);
+    let total = if ts + cts == 0 { 0 } else { min_players.unwrap_or(default).saturating_sub(ts + cts) };
     let mut size = [ts, cts];
     for _ in 0..total {
         size[(size[1] < size[0]) as usize] += 1;
@@ -1003,10 +1004,10 @@ mod tests {
         balance_bots(&mut m, &mut players, &mut next_id, None);
         assert!(players.is_empty(), "bots leave with the last human");
 
-        // A set number of bots, evening out the teams.
+        // A set number of players, bots evening out the teams.
         players.insert(1, client(1, Team::T));
         players.insert(2, client(2, Team::T));
-        balance_bots(&mut m, &mut players, &mut next_id, Some(3));
+        balance_bots(&mut m, &mut players, &mut next_id, Some(5));
         assert_eq!((count(&players, Team::T), count(&players, Team::Ct)), (3, 2));
         balance_bots(&mut m, &mut players, &mut next_id, Some(0));
         assert_eq!(players.len(), 2, "no bots");

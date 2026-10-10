@@ -30,12 +30,16 @@ Deadline: playable before 00:00. One weapon, one simple map.
   `~/Library/Application Support/fps16/color` (hex). Name and color travel as an `sdk::Profile` in every input
   packet and reach the game through `ServerGame::connect`, so a player keeps their color from game to game; Instaslop
   and Raceslop show it on the player's model, names and effects (Counterslop keeps team looks). Bots get a palette color picked from their name (`Profile::from`).
+- Esc in a game (or while loading) opens the Esc menu: Resume (grabs the mouse again), Disconnect (back to the
+  browser) and Quit game. The game keeps running underneath but gets no input while it's open; Esc closes it.
 - Back to the browser, with the reason shown, when the server goes quiet for 5 s in a game, never answers for 10 s,
   or runs another build; the game's scene, HUD, sounds and environment are torn down and the mouse is freed.
 - "Host a LAN game" lists every map of the game modules it can find (`--game`, `.wasm` files next to the binary,
   downloaded ones in `games/`), e.g. "Counterslop on dust", using only the newest file of each game. The scan runs
   in the background from when the browser opens. The picked one runs as a server on a thread in the client, on the
-  first free port of 5000-5009, named "<user>'s game", and the client joins it. Compiled module code is cached in
+  first free port of 5000-5009, named "<user>'s game", and the client joins it. Its Players setting (and a server's
+  `--players n`, `ServerGame::set_min_players`) is a minimum: bots fill up to it while anyone is on and leave as
+  people join; "auto" leaves it to the game. Compiled module code is cached in
   `compiled/` by module hash and wasmtime version; `games/` and `compiled/` keep the 4 most recently used files.
 
 ## Gameplay
@@ -79,7 +83,7 @@ Deadline: playable before 00:00. One weapon, one simple map.
 - HUD: HP/armor/money, weapon + ammo, buy menu, kill feed, red flash when hit. Short tracers (AWP longer).
 
 ## Rounds (bomb defusal)
-- Teams T and CT, humans auto-balanced on join, friendly fire off. Server-side bots fill both teams to 16v16 (or to the
+- Teams T and CT, humans auto-balanced on join, friendly fire off. Server-side bots fill both teams to 4v4 (or to the
   bigger human team); they path over the map grid via a random detour point each round (Ts share a random site, some lurk;
   CTs hold spots next to cover that watch the T entrance and move between them, facing the entrance), strafe in
   fights and only shoot once slowed down (counter-strafing), plant/defuse, call out spotted enemies so teammates rotate, and
@@ -206,11 +210,21 @@ Grenades, dropped/pickup weapons, match end, team switching, map height (ramps, 
 - Look: a sunset sky dome over slowly drifting lava, basalt spires standing in it, glass walls with posts and a glowing
   rail, platforms colored by height (a color per meter) with glowing edges, green gates over checkpoints, a gold one
   over the finish.
-- Movement as in Instaslop (fast, floaty, strong air control), no weapons. Lava or a laser bar sends you back to the
-  last of 3 checkpoints; R does it on purpose. The lasers run on the race clock, so client and server agree on them.
+- Runners: rounded figures built from scaled spheres, a white suit with jersey, sleeves, belt, helmet crest and shoes
+  in the player's color, a dark visor. They lean into a run with arms and legs swinging (knees kick up on the back
+  swing), tuck with arms up going up, flail coming down and squash on landing.
+- Movement: 9 m/s runs, platformer jumps, no weapons. Full speed in ~0.15 s, a stop in ~0.3 s. Gravity 13 m/s² going
+  up and 21 coming down; holding space jumps 1.9 m, a tap ~0.6 m (letting go while rising triples gravity). A jump
+  still works 0.1 s after running off a ledge, and a press up to 0.125 s before landing jumps on touchdown; held, you
+  hop on every landing. Air control: Quake-style sharp corrections and braking plus a slow build towards full speed
+  (18 m/s²). Pads throw you 7 m up. The camera eases over step-ups and dips on landing, with a thud. All movement
+  state (jump held, coyote and buffer ticks) is in `PlayerState`, so prediction matches the server.
+- Lava or a laser bar sends you back to the last of 3 checkpoints; R does it on purpose. The lasers run on the race
+  clock, so client and server agree on them.
 - Races: 4 s countdown frozen on the line, then go. Ends when every person is over the line, 30 s after the first
   finisher, or after 5 min; 8 s of standings (place, time, wins), then the next race. Bots fill up to 6 runners and run
-  the course along a distance field over walk, jump and pad moves, jumping at ledges and over incoming bars.
+  the course along a distance field over walk, jump and pad moves, jumping at ledges and over incoming bars, holding
+  jump while rising.
 - Run: `cargo build -p race --release --target wasm32-unknown-unknown`, then
   `cargo run --release -- server --game target/wasm32-unknown-unknown/release/race.wasm`. Shipped in releases next to
   `dust.wasm`, so it shows up under "Host a LAN game".

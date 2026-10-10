@@ -49,10 +49,10 @@ fn main() {
                 paths.extend(beside());
             }
             let modules = paths.iter().map(|p| std::fs::read(p).unwrap_or_else(|e| panic!("can't read the game {}: {e} (pass --game file.wasm)", p.display()))).collect();
-            // --map picks one of the (first) game's maps, its first by default; --bots plays with that many bots
-            // instead of the game's default.
-            let bots = flag("--bots").map(|b| b.parse().expect("--bots takes a number"));
-            let games = server::load(modules, flag("--map").map(String::as_str), bots).unwrap_or_else(|e| panic!("{e}"));
+            // --map picks one of the (first) game's maps, its first by default; --players has bots fill up to that
+            // many players instead of the game's default.
+            let players = flag("--players").map(|b| b.parse().expect("--players takes a number"));
+            let games = server::load(modules, flag("--map").map(String::as_str), players).unwrap_or_else(|e| panic!("{e}"));
             let name = flag("--name").cloned().unwrap_or(format!("{}'s server", user()));
             let sock = std::net::UdpSocket::bind(("0.0.0.0", port)).unwrap_or_else(|e| panic!("can't use port {port}: {e}"));
             server::run(sock, &name, games)
@@ -70,7 +70,7 @@ fn main() {
             client::run(addr, local, hostable, num("--lag").unwrap_or(0), num("--jitter").unwrap_or(0), num("--interp").unwrap_or(50));
         }
         _ => eprintln!(
-            "usage: fps16 server [port] [--game game.wasm]... [--rotate] [--map map] [--name name] [--bots n] | fps16 client [host:port] [--game game.wasm] [--lag ms] [--jitter ms] [--interp ms]"
+            "usage: fps16 server [port] [--game game.wasm]... [--rotate] [--map map] [--name name] [--players n] | fps16 client [host:port] [--game game.wasm] [--lag ms] [--jitter ms] [--interp ms]"
         ),
     }
 }
