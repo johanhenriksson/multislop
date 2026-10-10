@@ -112,6 +112,7 @@ pub struct WasmGame {
     input: TypedFunc<(u32, u32, f32, u32), ()>,
     tick: TypedFunc<(), u64>,
     info: TypedFunc<(), u64>,
+    set_map: TypedFunc<u32, ()>,
 }
 
 impl WasmGame {
@@ -124,6 +125,7 @@ impl WasmGame {
             input: wasm.func("fps16_input")?,
             tick: wasm.func("fps16_tick")?,
             info: wasm.func("fps16_info")?,
+            set_map: wasm.func("fps16_set_map")?,
             wasm,
         })
     }
@@ -157,6 +159,11 @@ impl ServerGame for WasmGame {
         let out = self.wasm.call(&self.info, ());
         decode(self.wasm.ret(out)).unwrap_or_default()
     }
+
+    fn set_map(&mut self, map: &str) {
+        let len = self.wasm.arg(map.as_bytes());
+        self.wasm.call(&self.set_map, len)
+    }
 }
 
 pub struct WasmClient {
@@ -183,8 +190,8 @@ impl WasmClient {
 }
 
 impl ClientGame for WasmClient {
-    fn start(&mut self) -> Vec<Command> {
-        decode(&self.wasm.bytes(&self.start, &[])).unwrap_or_default()
+    fn start(&mut self, map: &str) -> Vec<Command> {
+        decode(&self.wasm.bytes(&self.start, map.as_bytes())).unwrap_or_default()
     }
 
     fn snapshot(&mut self, snap: &ClientSnapshot) {

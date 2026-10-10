@@ -28,7 +28,11 @@ fn main() {
         Some("server") => {
             let port = args.get(1).and_then(|p| p.parse().ok()).unwrap_or(5000);
             let module = module(beside()).expect("no game");
-            let game = wasm::WasmGame::load(&module).unwrap_or_else(|e| panic!("can't load the game: {e:?}"));
+            let mut game = wasm::WasmGame::load(&module).unwrap_or_else(|e| panic!("can't load the game: {e:?}"));
+            // --map picks one of the game's maps, its first by default.
+            let maps = sdk::ServerGame::info(&mut game).maps;
+            let map = flag("--map").cloned().or_else(|| maps.first().cloned()).unwrap_or_default();
+            sdk::ServerGame::set_map(&mut game, &map);
             let name = flag("--name").cloned().unwrap_or(format!("{}'s server", user()));
             let sock = std::net::UdpSocket::bind(("0.0.0.0", port)).unwrap_or_else(|e| panic!("can't use port {port}: {e}"));
             server::run(sock, &name, Box::new(game), module)
@@ -47,7 +51,7 @@ fn main() {
             client::run(addr, local, hostable, num("--lag").unwrap_or(0), num("--jitter").unwrap_or(0), num("--interp").unwrap_or(50));
         }
         _ => eprintln!(
-            "usage: fps16 server [port] [--game game.wasm] [--name name] | fps16 client [host:port] [--game game.wasm] [--lag ms] [--jitter ms] [--interp ms]"
+            "usage: fps16 server [port] [--game game.wasm] [--map map] [--name name] | fps16 client [host:port] [--game game.wasm] [--lag ms] [--jitter ms] [--interp ms]"
         ),
     }
 }

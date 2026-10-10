@@ -215,7 +215,7 @@ mod tests {
 
     fn snap(tick: u32, ack: u32, x: f32) -> Snapshot {
         let me = Entity { id: 7, pos: Vec3::new(x, 0.0, 0.0), ..Default::default() };
-        Snapshot { tick, you: 7, ack, echo: 0.0, echo_held: 0.0, state: vec![], entities: vec![me], events: vec![] }
+        Snapshot { tick, map: "test".into(), you: 7, ack, echo: 0.0, echo_held: 0.0, state: vec![], entities: vec![me], events: vec![] }
     }
 
     /// Each input moves the entity by its one byte along x.

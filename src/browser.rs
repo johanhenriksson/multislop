@@ -50,8 +50,8 @@ pub struct Browser {
     /// Module files "Host a LAN game" offers.
     hostable: Vec<std::path::PathBuf>,
     host_clicked: bool,
-    /// The games found in `hostable`: label and module. Filled in by a background scan.
-    games: Arc<Mutex<Option<Vec<(String, Vec<u8>)>>>>,
+    /// The games and maps found in `hostable`. Filled in by a background scan.
+    games: Arc<Mutex<Option<Vec<Game>>>>,
     /// The game list is open (the host button was clicked), and what it shows, so it's redrawn when that changes.
     host_open: bool,
     shown_games: Option<usize>,
@@ -141,9 +141,17 @@ pub struct HostButton;
 #[derive(Component)]
 pub struct HostList;
 
-/// Asks each module what it is, keeping only the newest file of each game: (label, module), by name.
-fn find_games(paths: &[std::path::PathBuf]) -> Vec<(String, Vec<u8>)> {
-    let mut newest: BTreeMap<String, (std::time::SystemTime, String, Vec<u8>)> = BTreeMap::new();
+/// Something "Host a LAN game" can start: a game module and one of its maps.
+#[derive(Clone)]
+struct Game {
+    label: String,
+    module: Vec<u8>,
+    map: String,
+}
+
+/// Asks each module what it is, keeping only the newest file of each game, and lists every map of each.
+fn find_games(paths: &[std::path::PathBuf]) -> Vec<Game> {
+    let mut newest: BTreeMap<String, (std::time::SystemTime, Vec<String>, Vec<u8>)> = BTreeMap::new();
     for path in paths {
         let Ok(bytes) = std::fs::read(path) else { continue };
         let modified = path.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
@@ -154,14 +162,18 @@ fn find_games(paths: &[std::path::PathBuf]) -> Vec<(String, Vec<u8>)> {
         let info = sdk::ServerGame::info(&mut game);
         let name = if info.game.is_empty() { "Unnamed game".to_string() } else { info.game };
         if newest.get(&name).is_none_or(|(at, ..)| modified > *at) {
-            newest.insert(name.clone(), (modified, format!("{name} on {}", info.map), bytes));
+            let maps = if info.maps.is_empty() { vec![info.map] } else { info.maps };
+            newest.insert(name, (modified, maps, bytes));
         }
     }
-    newest.into_values().map(|(_, label, bytes)| (label, bytes)).collect()
+    let games = newest.into_iter().flat_map(|(name, (_, maps, module))| {
+        maps.into_iter().map(move |map| Game { label: format!("{name} on {map}"), module: module.clone(), map })
+    });
+    games.collect()
 }
 
 /// Finds the games in `paths` on a thread (each takes a compile the first time), into the returned slot.
-fn scan(paths: Vec<std::path::PathBuf>) -> Arc<Mutex<Option<Vec<(String, Vec<u8>)>>>> {
+fn scan(paths: Vec<std::path::PathBuf>) -> Arc<Mutex<Option<Vec<Game>>>> {
     let slot = Arc::new(Mutex::new(None));
     let out = slot.clone();
     std::thread::spawn(move || {
@@ -262,18 +274,18 @@ pub fn browse(
             None => _ = commands.spawn((ChildOf(*host_list), row, children![(Text::new("Finding games..."), font)])),
             Some(list) if list.is_empty() => _ = commands.spawn((ChildOf(*host_list), row, children![(Text::new("No games found to host"), font)])),
             Some(list) => {
-                for (i, (label, _)) in list.iter().enumerate() {
+                for (i, game) in list.iter().enumerate() {
                     commands
-                        .spawn((ChildOf(*host_list), row.clone(), children![(Text::new(label.clone()), font.clone())]))
+                        .spawn((ChildOf(*host_list), row.clone(), children![(Text::new(game.label.clone()), font.clone())]))
                         .observe(move |_: On<PointerClick>, mut b: ResMut<Browser>| b.host_pick = Some(i));
                 }
             }
         }
     }
-    if let Some((_, module)) = b.host_pick.take().and_then(|i| games.as_ref()?.get(i).cloned()) {
+    if let Some(game) = b.host_pick.take().and_then(|i| games.as_ref()?.get(i).cloned()) {
         let user = std::env::var("USER").unwrap_or_else(|_| "someone".into());
-        crate::client::store(&module);
-        match crate::server::host(format!("{user}'s game"), module) {
+        crate::client::store(&game.module);
+        match crate::server::host(format!("{user}'s game"), game.module, game.map) {
             Ok(port) => join = Some(SocketAddr::from(([127, 0, 0, 1], port))),
             Err(e) => b.error = e,
         }

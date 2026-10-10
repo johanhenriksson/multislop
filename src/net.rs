@@ -60,6 +60,8 @@ pub enum ClientMsg {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Snapshot {
     pub tick: u32,
+    /// The map being played; clients rebuild their world when it changes.
+    pub map: String,
     /// The receiving player's entity id.
     pub you: u32,
     /// Last input seq the server processed for the receiving client.

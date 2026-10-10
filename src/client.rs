@@ -102,6 +102,11 @@ struct Client {
     game: Option<Game>,
     /// `start` has been called and applied.
     started: bool,
+    /// The game module's bytes, for a fresh instance when the map changes.
+    module: Vec<u8>,
+    /// The map the world is built for, and the one the server says it's on.
+    map: Option<String>,
+    want_map: Option<String>,
     fetch: Fetch,
     /// Why the game couldn't be loaded.
     error: Option<String>,
@@ -148,6 +153,9 @@ impl Client {
             fetch: if game.is_some() { Fetch::Done } else { Fetch::Asking },
             game,
             started: false,
+            module: local.clone().unwrap_or_default(),
+            map: None,
+            want_map: None,
             error: None,
             asked_at: None,
             heard_at: 0.0,
@@ -260,13 +268,22 @@ fn watchdog(
 
 /// Builds the game's world and HUD once it's loaded and a server is picked.
 fn start(mut client: ResMut<Client>, mut renderer: Renderer, net: Res<Net>) {
-    if client.started || net.server.is_none() {
+    let Some(want) = client.want_map.clone() else { return };
+    if net.server.is_none() || client.game.is_none() || client.map.as_ref() == Some(&want) {
         return;
     }
+    if client.map.is_some() {
+        // Another map: a fresh instance of the game, and its world from scratch.
+        renderer.clear();
+        match crate::wasm::WasmClient::load(&client.module) {
+            Ok(game) => client.game = Some(Box::new(game)),
+            Err(e) => return client.error = Some(format!("can't restart the game: {e}")),
+        }
+    }
     let Some(game) = &mut client.game else { return };
-    let cmds = game.start();
+    let cmds = game.start(&want);
     renderer.apply(cmds);
-    client.started = true;
+    (client.map, client.started) = (Some(want), true);
 }
 
 /// Most downloaded (or compiled) games kept; the least recently used go first.
@@ -333,6 +350,7 @@ fn load(client: &mut Client, bytes: &[u8]) {
         Ok(game) => {
             println!("loaded the server's game ({} KB)", bytes.len() / 1024);
             client.game = Some(Box::new(game));
+            client.module = bytes.to_vec();
         }
         Err(e) => client.error = Some(format!("can't load the server's game: {e}")),
     }
@@ -394,8 +412,13 @@ fn receive(mut net: ResMut<Net>, mut client: ResMut<Client>, mut browser: ResMut
             Some(ServerMsg::Chunk { index, data }) => on_chunk(&mut client, index, &data),
             Some(ServerMsg::Game { .. } | ServerMsg::Info { .. }) => {}
             Some(ServerMsg::Snapshot(snap)) => {
-                let Client { game: Some(game), netcode, .. } = &mut *client else { continue };
+                let Client { game: Some(game), netcode, map, want_map, .. } = &mut *client else { continue };
                 let Some(snap) = netcode.snapshot(snap, &mut |e, i, s| game.predict(e, i, s, false)) else { continue };
+                // The world isn't built for this map yet: `start` does that first.
+                if map.as_ref() != Some(&snap.map) {
+                    *want_map = Some(snap.map.clone());
+                    continue;
+                }
                 let snap = ClientSnapshot { tick: snap.tick, you: snap.you, state: snap.state.clone(), entities: snap.entities.clone(), events: snap.events.clone() };
                 game.snapshot(&snap);
             }

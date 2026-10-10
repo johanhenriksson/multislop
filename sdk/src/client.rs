@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 pub const CAMERA: u32 = 0;
 
 pub trait ClientGame {
-    /// First call: assets, the world and the HUD.
-    fn start(&mut self) -> Vec<Command>;
+    /// First call: assets, the world for `map` and the HUD. A map change starts a fresh instance of the game.
+    fn start(&mut self, map: &str) -> Vec<Command>;
     /// A snapshot the netcode accepted (newer than any before).
     fn snapshot(&mut self, snap: &ClientSnapshot);
     /// Once per tick: the input to send, from the keys held now.
@@ -436,8 +436,9 @@ macro_rules! export_client {
             }
 
             #[unsafe(no_mangle)]
-            extern "C" fn fps16_client_start(_len: usize) -> u64 {
-                $crate::wasm_ret(encode(&client(|c| c.start())))
+            extern "C" fn fps16_client_start(len: usize) -> u64 {
+                let map = $crate::wasm_arg(len, |b| String::from_utf8_lossy(b).into_owned());
+                $crate::wasm_ret(encode(&client(|c| c.start(&map))))
             }
 
             #[unsafe(no_mangle)]

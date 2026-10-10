@@ -46,6 +46,8 @@ pub struct Event {
 /// The game world after a tick: what the host snapshots for clients.
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
 pub struct Frame {
+    /// The map being played. When it changes, clients rebuild their world for the new one.
+    pub map: String,
     /// Game-wide state (score, round, timers), sent as is.
     pub state: Vec<u8>,
     pub entities: Vec<Entity>,
@@ -56,9 +58,11 @@ pub struct Frame {
 /// What a server browser shows about a game.
 #[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq)]
 pub struct GameInfo {
-    /// What kind of game it is, e.g. "Bomb defusal".
+    /// The game's name, e.g. "Counterslop".
     pub game: String,
+    /// The map being played, and every map the game can play.
     pub map: String,
+    pub maps: Vec<String>,
     /// People playing.
     pub players: u32,
     pub bots: u32,
@@ -77,6 +81,9 @@ pub trait ServerGame {
     /// Advances the game by one tick (1 / `TICK_HZ` seconds).
     fn tick(&mut self) -> Frame;
     fn info(&mut self) -> GameInfo;
+    /// Switches to one of `GameInfo::maps` and starts the match over. The host calls it once before play starts;
+    /// a game can also change maps on its own (a rotation), reporting the new one in `Frame::map`.
+    fn set_map(&mut self, map: &str);
 }
 
 /// Recent entities, for lag compensation: rewinding others to where (and how, e.g. crouched) a shooter saw them.
@@ -215,6 +222,12 @@ macro_rules! export_server {
             #[unsafe(no_mangle)]
             extern "C" fn fps16_info() -> u64 {
                 $crate::wasm_ret($crate::encode(&game(|g| g.info())))
+            }
+
+            #[unsafe(no_mangle)]
+            extern "C" fn fps16_set_map(len: usize) {
+                let map = $crate::wasm_arg(len, |b| String::from_utf8_lossy(b).into_owned());
+                game(|g| g.set_map(&map))
             }
         }
     };

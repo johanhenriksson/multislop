@@ -123,7 +123,11 @@ const DUST2_HEIGHTS: &str = "\
 88888888888888888888888888888889aaaaaaaaaaaaaaaaaaaaaaaa
 88888888888888888888888888888889999999999999999999999999";
 
+// ponytail: one map, so one global. Make the map part of the game's state (server and client) when a second arrives.
 pub static MAP: LazyLock<Map> = LazyLock::new(|| Map::parse(DUST2, DUST2_HEIGHTS));
+
+/// The maps this game can play.
+pub const MAPS: [&str; 1] = ["dust"];
 
 /// Walls go from below the lowest floor to well above the highest one.
 const WALL_BOTTOM: f32 = -1.0;

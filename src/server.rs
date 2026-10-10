@@ -6,13 +6,14 @@ use std::collections::{HashMap, VecDeque};
 use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
-/// Hosts a game from inside the client: a server on a thread, on the first free LAN port. Returns the port.
-pub fn host(name: String, module: Vec<u8>) -> Result<u16, String> {
+/// Hosts a game on `map` from inside the client: a server on a thread, on the first free LAN port. Returns the port.
+pub fn host(name: String, module: Vec<u8>, map: String) -> Result<u16, String> {
     let sock = DISCOVERY_PORTS.clone().find_map(|p| UdpSocket::bind(("0.0.0.0", p)).ok()).ok_or("no free port in 5000-5009")?;
     let port = sock.local_addr().map_err(|e| e.to_string())?.port();
     let (ready, loaded) = std::sync::mpsc::channel();
     std::thread::spawn(move || match crate::wasm::WasmGame::load(&module) {
-        Ok(game) => {
+        Ok(mut game) => {
+            game.set_map(&map);
             let _ = ready.send(Ok(()));
             run(sock, &name, Box::new(game), module);
         }
@@ -187,6 +188,7 @@ pub fn run(sock: UdpSocket, name: &str, mut game: Box<dyn ServerGame>, module: V
             for (addr, c) in &clients {
                 let snap = Snapshot {
                     tick,
+                    map: frame.map.clone(),
                     you: c.id,
                     ack: c.last_seq,
                     echo: c.echo.0,

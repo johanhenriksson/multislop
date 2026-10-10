@@ -1,8 +1,8 @@
-//! Bomb defusal: rounds, economy, bots and lag-compensated hitscan. The host owns the network and calls in through
+//! Counterslop, bomb defusal: rounds, economy, bots and lag-compensated hitscan. The host owns the network and calls in through
 //! `ServerGame`.
 
 use crate::bot::{Bot, Seen, can_see, in_view};
-use crate::map::MAP;
+use crate::map::{MAP, MAPS};
 use crate::shared::*;
 use crate::weapons::*;
 use glam::Vec3;
@@ -77,6 +77,7 @@ const fn ticks(secs: f32) -> u32 {
 }
 
 pub struct Dust {
+    map: String,
     m: Match,
     players: Players,
     /// Positions of every player per tick, for lag compensation.
@@ -93,6 +94,7 @@ pub struct Dust {
 impl Dust {
     pub fn new() -> Dust {
         Dust {
+            map: MAPS[0].into(),
             m: new_match(),
             players: Players::new(),
             history: History::new(MAX_REWIND_TICKS as usize + 8),
@@ -172,12 +174,23 @@ impl ServerGame for Dust {
             let to = self.players.values().filter(|c| c.team == team).map(|c| c.id).collect();
             events.push(sdk::Event { to: Some(to), data: encode(&Event::Radio(r)) });
         }
-        Frame { state: encode(&net_round(&self.m, self.tick)), entities, events }
+        Frame { map: self.map.clone(), state: encode(&net_round(&self.m, self.tick)), entities, events }
     }
 
     fn info(&mut self) -> GameInfo {
         let bots = self.players.values().filter(|c| c.bot.is_some()).count() as u32;
-        GameInfo { game: "Dust".into(), map: "dust".into(), players: self.players.len() as u32 - bots, bots }
+        let maps = MAPS.map(String::from).to_vec();
+        GameInfo { game: "Counterslop".into(), map: self.map.clone(), maps, players: self.players.len() as u32 - bots, bots }
+    }
+
+    fn set_map(&mut self, map: &str) {
+        if !MAPS.contains(&map) {
+            return log(&format!("no map called {map}; playing {}", self.map));
+        }
+        log(&format!("map {map}"));
+        // A new match: round 1 starts next tick with everyone respawned and money reset.
+        (self.map, self.m) = (map.into(), new_match());
+        self.grenades.clear();
     }
 }
 
