@@ -10,7 +10,7 @@ use crate::game::RESPAWN_SECS;
 use crate::map::GOAL_LINE;
 use crate::shared::*;
 use glam::{Quat, Vec3};
-use model::{BARREL, Rig, VIEWMODEL};
+use model::{BARREL, Rig, VIEWMODEL, VIEWMODEL_SCALE};
 use sdk::Interpolated;
 use sdk::client::*;
 use sdk::scene::Scene;
@@ -25,7 +25,7 @@ pub const NEUTRAL: [f32; 3] = [0.85, 0.92, 1.0];
 /// Effects alive at once. Smoke and ball trails are skipped beyond this, so a rocket barrage can't flood the scene;
 /// explosions and goals always show.
 const MAX_FX: usize = 300;
-/// Puffs along a rocket's flight and behind a fast ball, this far apart.
+/// Puffs along a rocket's flight, and ball trail segments, this far apart.
 const SMOKE_EVERY: f32 = 0.7;
 /// The ball leaves a trail above this speed.
 const TRAIL_SPEED: f32 = 16.0;
@@ -90,12 +90,16 @@ struct Fx {
     size: f32,
     /// Grows to `1 + grow` times `size` over its life (shrinks when negative).
     grow: f32,
+    /// A streak this long along its local Y, only its thickness following `size` and `grow`.
+    length: Option<f32>,
 }
 
 /// Meshes and materials effects share.
 #[derive(Default)]
 struct Assets {
     puff: u32,
+    /// A unit cylinder, stretched into ball trail segments.
+    streak: u32,
     confetti: u32,
     /// Confetti in the scoring team's color, white and gold, by team.
     confetti_colors: [[u32; 3]; 2],
@@ -214,6 +218,7 @@ impl ClientGame for BallClient {
         let confetti_colors = [ORANGE, BLUE].map(|team| [team, [1.0, 1.0, 1.0], [1.0, 0.8, 0.2]].map(|c| s.material(flat(c))));
         self.assets = Assets {
             puff: s.mesh(MeshData::Sphere { radius: 1.0, ico: Some(2) }),
+            streak: s.mesh(MeshData::Cylinder { radius: 1.0, height: 1.0 }),
             confetti: s.mesh(MeshData::Cuboid(Vec3::new(0.22, 0.01, 0.15))),
             confetti_colors,
             rocket: s.mesh(MeshData::Cylinder { radius: 0.06, height: 0.6 }),
@@ -221,7 +226,7 @@ impl ClientGame for BallClient {
             sleeve: s.material(Material { color: Color::srgb(0.12, 0.12, 0.14), roughness: 0.5, metallic: 0.5, ..Default::default() }),
             sleeve_team: None,
         };
-        self.viewmodel = model::spawn_launcher(&mut self.scene, CAMERA, Transform::at(VIEWMODEL), Some(self.assets.sleeve));
+        self.viewmodel = model::spawn_launcher(&mut self.scene, CAMERA, Transform::at(VIEWMODEL).scaled(VIEWMODEL_SCALE), Some(self.assets.sleeve));
         self.spawn_ball();
         self.build_hud();
         std::mem::take(&mut self.scene.out)
@@ -333,7 +338,7 @@ impl ClientGame for BallClient {
 fn muzzle(o: Vec3, d: Vec3) -> Vec3 {
     let right = d.cross(Vec3::Y).normalize_or_zero();
     let up = right.cross(d);
-    o + right * VIEWMODEL.x + up * VIEWMODEL.y + d * (BARREL - VIEWMODEL.z)
+    o + right * VIEWMODEL.x + up * VIEWMODEL.y + d * (BARREL * VIEWMODEL_SCALE - VIEWMODEL.z)
 }
 
 impl BallClient {
@@ -545,10 +550,12 @@ impl BallClient {
             }
         }
         let speed = vel.length();
-        if shown && speed > TRAIL_SPEED && pos.distance(b.trail_from) > SMOKE_EVERY * 1.5 && self.fx.len() < MAX_FX {
+        if !shown || speed <= TRAIL_SPEED {
             b.trail_from = pos;
+        } else if pos.distance(b.trail_from) > SMOKE_EVERY * 1.5 && self.fx.len() < MAX_FX {
             let k = ((speed - TRAIL_SPEED) / 15.0).min(1.0);
-            self.fading(pos - vel / speed * 0.6, Color::srgba(c[0], c[1], c[2], 0.25 + 0.3 * k), BALL_RADIUS * 0.9, 0.4, -0.8);
+            let from = std::mem::replace(&mut b.trail_from, pos);
+            self.streak(from, pos, Color::srgba(c[0], c[1], c[2], 0.2 + 0.25 * k), BALL_RADIUS * 0.7);
         }
     }
 
@@ -627,7 +634,7 @@ impl BallClient {
         let at = VIEWMODEL + bob + Vec3::new(0.0, -0.15 * dip, 0.07 * self.kick);
         let rot = Quat::from_rotation_x(-0.6 * dip + 0.2 * self.kick);
         let shown = self.alive && self.me.is_some();
-        self.scene.push(Command::Set { id: self.viewmodel, transform: Some(Transform::at(at).rotated(rot)), visible: Some(shown), light: None });
+        self.scene.push(Command::Set { id: self.viewmodel, transform: Some(Transform::at(at).rotated(rot).scaled(VIEWMODEL_SCALE)), visible: Some(shown), light: None });
     }
 
     /// A puff that grows to `1 + grow` times its size (shrinks when negative) and fades out over `life`.
@@ -637,13 +644,25 @@ impl BallClient {
         let material = Material { color, unlit: true, blend: Blend::Blend, ..Default::default() };
         let id = self.scene.material(material);
         let node = self.scene.spawn(None, NodeKind::Mesh { mesh: self.assets.puff, material: id, shadows: false }, Transform::at(at).scaled(size), true);
-        self.fx.push(Fx { node, pos: at, vel: None, rot: Quat::IDENTITY, spin: Vec3::ZERO, material: Some((id, material)), light: None, age: 0.0, life, size, grow });
+        self.fx.push(Fx { node, pos: at, vel: None, rot: Quat::IDENTITY, spin: Vec3::ZERO, material: Some((id, material)), light: None, age: 0.0, life, size, grow, length: None });
+    }
+
+    /// A segment of a glowing tail from `from` to `to`, thinning to nothing. Consecutive ones join into one streak.
+    fn streak(&mut self, from: Vec3, to: Vec3, color: Color, radius: f32) {
+        let material = Material { color, unlit: true, blend: Blend::Blend, ..Default::default() };
+        let id = self.scene.material(material);
+        let rot = Quat::from_rotation_arc(Vec3::Y, (to - from).normalize_or(Vec3::Y));
+        let (pos, length) = ((from + to) / 2.0, from.distance(to));
+        let transform = Transform { pos, rot, scale: Vec3::new(radius, length, radius) };
+        let node = self.scene.spawn(None, NodeKind::Mesh { mesh: self.assets.streak, material: id, shadows: false }, transform, true);
+        let fx = Fx { node, pos, vel: None, rot, spin: Vec3::ZERO, material: Some((id, material)), light: None, age: 0.0, life: 0.45, size: radius, grow: -1.0, length: Some(length) };
+        self.fx.push(fx);
     }
 
     /// A point light that dims to nothing over `life`.
     fn flash(&mut self, at: Vec3, color: Color, intensity: f32, range: f32, life: f32) {
         let node = self.scene.spawn(None, NodeKind::PointLight { color, intensity, range }, Transform::at(at), true);
-        self.fx.push(Fx { node, pos: at, vel: None, rot: Quat::IDENTITY, spin: Vec3::ZERO, material: None, light: Some(intensity), age: 0.0, life, size: 1.0, grow: 0.0 });
+        self.fx.push(Fx { node, pos: at, vel: None, rot: Quat::IDENTITY, spin: Vec3::ZERO, material: None, light: Some(intensity), age: 0.0, life, size: 1.0, grow: 0.0, length: None });
     }
 
     fn muzzle_flash(&mut self, at: Vec3) {
@@ -677,7 +696,7 @@ impl BallClient {
             let material = colors[if i % 2 == 0 { 0 } else { 1 + i / 2 % 2 }];
             let node = self.scene.spawn(None, NodeKind::Mesh { mesh: self.assets.confetti, material, shadows: false }, Transform::at(at), true);
             let life = 3.0 + self.random() * 1.5;
-            self.fx.push(Fx { node, pos: at, vel: Some(vel), rot: Quat::IDENTITY, spin, material: None, light: None, age: 0.0, life, size: 1.0, grow: 0.0 });
+            self.fx.push(Fx { node, pos: at, vel: Some(vel), rot: Quat::IDENTITY, spin, material: None, light: None, age: 0.0, life, size: 1.0, grow: 0.0, length: None });
         }
     }
 
@@ -710,7 +729,8 @@ impl BallClient {
                 }
                 scale = fx.size * (1.0 - ((k - 0.8) / 0.2).max(0.0));
             }
-            out.push(Command::set_transform(fx.node, Transform { pos: fx.pos, rot: fx.rot, scale: Vec3::splat(scale) }));
+            let scale = fx.length.map_or(Vec3::splat(scale), |l| Vec3::new(scale, l, scale));
+            out.push(Command::set_transform(fx.node, Transform { pos: fx.pos, rot: fx.rot, scale }));
             if let Some((id, mut material)) = fx.material {
                 material.color = material.color.with_alpha(material.color.0[3] * (1.0 - k));
                 out.push(Command::Material { id, material });

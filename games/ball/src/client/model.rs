@@ -57,8 +57,10 @@ fn hands() -> Vec<(Shape, Finish)> {
 
 /// Where the barrel tip is, ahead of the grip.
 pub const BARREL: f32 = 0.61;
-/// First-person position of the grip, relative to the camera.
-pub const VIEWMODEL: Vec3 = Vec3::new(0.23, -0.21, -0.26);
+/// First-person position of the grip, relative to the camera, and the model's size there: far enough out that the
+/// tube's back end, which reaches behind the grip, doesn't fill a quarter of the screen.
+pub const VIEWMODEL: Vec3 = Vec3::new(0.2, -0.19, -0.46);
+pub const VIEWMODEL_SCALE: f32 = 0.75;
 
 /// A launcher under `parent`; first person also gets hands holding it, their sleeves in `sleeve`.
 pub fn spawn_launcher(scene: &mut Scene, parent: u32, at: Transform, sleeve: Option<u32>) -> u32 {
