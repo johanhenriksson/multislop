@@ -123,6 +123,8 @@ pub struct Input {
     pub zoom: bool,
     /// Ctrl: crouch.
     pub duck: bool,
+    /// G: drop the weapon in hand (not the knife).
+    pub drop: bool,
     /// Buy menu item (1-based), 0 for none. Handled by the server; inputs are applied exactly once.
     pub buy: u8,
     /// Radio call from the Z menu (1-based into `Radio::MENU`), 0 for none.
@@ -184,6 +186,8 @@ pub enum EntityData {
     Player(NetPlayer),
     /// A thrown grenade.
     Grenade(Weapon),
+    /// A weapon lying on the ground.
+    Dropped(Weapon),
 }
 
 impl NetPlayer {
@@ -307,12 +311,56 @@ impl PlayerState {
     }
 
     /// Something is in this slot.
+    /// The pistol slot holds the knife when empty (after dropping the pistol).
     pub fn has(&self, slot: Slot) -> bool {
         match slot {
             Slot::Primary => self.primary.is_some(),
+            Slot::Secondary => self.secondary != Weapon::Knife,
             Slot::Grenade => self.grenade.is_some(),
-            Slot::Secondary | Slot::Knife => true,
+            Slot::Knife => true,
         }
+    }
+
+    /// The best thing to have in hand: a primary, else the pistol, else the knife.
+    fn best_slot(&self) -> Slot {
+        [Slot::Primary, Slot::Secondary].into_iter().find(|&s| self.has(s)).unwrap_or(Slot::Knife)
+    }
+
+    /// The weapon in hand and its ammo, unless it's the knife, which can't be dropped.
+    pub fn droppable(&self) -> Option<(Weapon, (u8, u16))> {
+        (self.slot != Slot::Knife && self.has(self.slot)).then(|| (self.weapon(), self.ammo().unwrap_or((0, 0))))
+    }
+
+    /// Lets go of the weapon in hand and takes out the best one left.
+    pub fn drop_held(&mut self) {
+        match self.slot {
+            Slot::Primary => (self.primary, self.ammo[0]) = (None, (0, 0)),
+            Slot::Secondary => (self.secondary, self.ammo[1]) = (Weapon::Knife, (0, 0)),
+            Slot::Grenade => (self.grenade, self.ammo[2]) = (None, (0, 0)),
+            Slot::Knife => return,
+        }
+        self.slot = self.best_slot();
+        self.hands.draw(DRAW_SECS);
+    }
+
+    /// Takes a weapon off the ground if its slot is empty. Returns whether it did.
+    pub fn pick_up(&mut self, weapon: Weapon, ammo: (u8, u16)) -> bool {
+        let slot = weapon.spec().slot;
+        if self.has(slot) || slot == Slot::Knife {
+            return false;
+        }
+        match slot {
+            Slot::Primary => (self.primary, self.ammo[0]) = (Some(weapon), ammo),
+            Slot::Secondary => (self.secondary, self.ammo[1]) = (weapon, ammo),
+            Slot::Grenade => (self.grenade, self.ammo[2]) = (Some(weapon), ammo),
+            Slot::Knife => {}
+        }
+        // Holding a worse weapon (or the knife), switch to the better one picked up.
+        if self.slot == Slot::Knife || (slot == Slot::Primary && self.slot != Slot::Primary) {
+            (self.last_slot, self.slot) = (self.slot, slot);
+            self.hands.draw(DRAW_SECS);
+        }
+        true
     }
 
     /// Magazine and reserve of the weapon in hand; None for the knife.
@@ -355,6 +403,9 @@ pub struct Fired {
 
 /// Switching, reloading and firing. Returns the use that went off, if any.
 fn weapon_tick(s: &mut PlayerState, inp: &Input) -> Option<Fired> {
+    if inp.drop {
+        s.drop_held();
+    }
     let want = match inp.slot {
         1 => Some(Slot::Primary),
         2 => Some(Slot::Secondary),
@@ -368,7 +419,7 @@ fn weapon_tick(s: &mut PlayerState, inp: &Input) -> Option<Fired> {
         s.hands.draw(DRAW_SECS);
     }
     if !s.has(s.slot) {
-        s.slot = Slot::Secondary;
+        s.slot = s.best_slot();
     }
     let weapon = s.weapon();
     let ability = weapon.ability();
@@ -383,7 +434,7 @@ fn weapon_tick(s: &mut PlayerState, inp: &Input) -> Option<Fired> {
     // Thrown the last grenade: back to what was in hand before.
     if s.slot == Slot::Grenade && s.ammo[2].0 == 0 {
         s.grenade = None;
-        s.slot = if s.has(s.last_slot) && s.last_slot != Slot::Grenade { s.last_slot } else { Slot::Secondary };
+        s.slot = if s.has(s.last_slot) && s.last_slot != Slot::Grenade { s.last_slot } else { s.best_slot() };
         s.hands.draw(DRAW_SECS);
     }
     Some(Fired { weapon, dir, strength })

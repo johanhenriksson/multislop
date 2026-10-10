@@ -89,6 +89,9 @@ pub struct Dust {
     hits: Vec<Hit>,
     radio: Vec<RadioCall>,
     grenades: Vec<Grenade>,
+    /// Weapons lying around, and the round they were dropped in (all go at the next).
+    dropped: Vec<Dropped>,
+    dropped_round: u32,
 }
 
 impl Dust {
@@ -104,6 +107,8 @@ impl Dust {
             hits: Vec::new(),
             radio: Vec::new(),
             grenades: Vec::new(),
+            dropped: Vec::new(),
+            dropped_round: 0,
         }
     }
 }
@@ -145,8 +150,10 @@ impl ServerGame for Dust {
 
     fn tick(&mut self) -> Frame {
         balance_bots(&mut self.m, &mut self.players, &mut self.next_id);
-        let mut throws = Vec::new();
-        run_inputs(&self.m, &mut self.players, &self.history, self.tick, &mut self.shots, &mut self.hits, &mut self.radio, &mut throws);
+        let alive: Vec<u32> = self.players.values().filter(|c| c.hp > 0).map(|c| c.id).collect();
+        let (mut throws, mut dropped) = (Vec::new(), Vec::new());
+        let (m, players, history, tick) = (&self.m, &mut self.players, &self.history, self.tick);
+        run_inputs(m, players, history, tick, &mut self.shots, &mut self.hits, &mut self.radio, &mut throws, &mut dropped);
         for mut g in throws {
             (g.id, self.next_id) = (self.next_id, self.next_id + 1);
             self.grenades.push(g);
@@ -155,6 +162,18 @@ impl ServerGame for Dust {
         update_grenades(&mut self.grenades, &mut self.players, self.tick, &mut self.hits, &mut booms);
         self.tick += 1;
         update_match(&mut self.m, &mut self.players, self.tick);
+        drop_from_the_dead(&mut self.players, &alive, &mut dropped);
+        if self.m.round.number != self.dropped_round {
+            (self.dropped_round, self.dropped) = (self.m.round.number, Vec::new());
+        }
+        for mut d in dropped {
+            (d.id, self.next_id) = (self.next_id, self.next_id + 1);
+            self.dropped.push(d);
+        }
+        if self.dropped.len() > MAX_DROPPED {
+            self.dropped.drain(..self.dropped.len() - MAX_DROPPED);
+        }
+        update_dropped(&mut self.dropped, &mut self.players, self.tick);
         let mut entities = entities(&self.players);
         self.history.record(self.tick, &entities);
         entities.extend(self.grenades.iter().map(|g| Entity {
@@ -162,6 +181,13 @@ impl ServerGame for Dust {
             pos: g.pos,
             vel: g.vel,
             data: encode(&EntityData::Grenade(g.weapon)),
+            ..Default::default()
+        }));
+        entities.extend(self.dropped.iter().map(|d| Entity {
+            id: d.id,
+            pos: d.pos,
+            yaw: d.id as f32 * 2.4,
+            data: encode(&EntityData::Dropped(d.weapon)),
             ..Default::default()
         }));
 
@@ -226,6 +252,7 @@ fn run_inputs(
     hits: &mut Vec<Hit>,
     radio: &mut Vec<RadioCall>,
     throws: &mut Vec<Grenade>,
+    dropped: &mut Vec<Dropped>,
 ) {
     let seen: Vec<Seen> =
         players.values().map(|c| Seen { id: c.id, team: c.team, pos: c.state.pos, chest: chest(&c.state), alive: c.hp > 0 }).collect();
@@ -262,6 +289,11 @@ fn run_inputs(
                     radio.push(RadioCall { from: c.id, call });
                     c.radio_quiet_until = tick + ticks(2.0);
                 }
+            }
+            // G: what's in hand goes on the ground, tossed a little forward (the step itself empties the slot).
+            if let Some((weapon, ammo)) = inp.drop.then(|| c.state.droppable()).flatten() {
+                let vel = aim_dir(&c.state) * 6.0 + Vec3::Y * 2.5 + c.state.vel;
+                dropped.push(Dropped { id: 0, weapon, ammo, pos: eye(&c.state) - Vec3::Y * 0.3, vel, owner: c.id, mine_until: tick + ticks(0.6) });
             }
             let Some(Fired { weapon, dir, strength }) = step_player(&mut c.state, &inp) else { continue };
             let (shooter, from) = (c.id, eye(&c.state));
@@ -586,6 +618,49 @@ fn hurt(players: &mut Players, attacker: u32, victim: u32, weapon: Weapon, damag
     Hit { attacker, victim, weapon, damage: damage.min(255) as u8, headshot, killed }
 }
 
+/// Weapons on the ground at once; the oldest go first.
+const MAX_DROPPED: usize = 48;
+
+/// A weapon on the ground, with the ammo it had.
+pub struct Dropped {
+    id: u32,
+    weapon: Weapon,
+    ammo: (u8, u16),
+    pos: Vec3,
+    vel: Vec3,
+    /// Whoever dropped it can't pick it straight back up before this tick.
+    owner: u32,
+    mine_until: u32,
+}
+
+/// Those who died this tick (alive before it) drop their best gun and grenade where they fell, keeping the knife.
+fn drop_from_the_dead(players: &mut Players, alive: &[u32], dropped: &mut Vec<Dropped>) {
+    for c in players.values_mut().filter(|c| c.hp <= 0 && alive.contains(&c.id)) {
+        let s = &mut c.state;
+        let gun = s.primary.map(|w| (w, s.ammo[0])).or((s.secondary != Weapon::Knife).then_some((s.secondary, s.ammo[1])));
+        let grenade = s.grenade.map(|w| (w, s.ammo[2]));
+        for (i, (weapon, ammo)) in gun.into_iter().chain(grenade).enumerate() {
+            let vel = Vec3::new(i as f32 - 0.5, 1.5, 0.0) + s.vel * 0.5;
+            dropped.push(Dropped { id: 0, weapon, ammo, pos: s.pos + Vec3::Y * 0.8, vel, owner: c.id, mine_until: 0 });
+        }
+        (s.primary, s.secondary, s.grenade, s.slot) = (None, Weapon::Knife, None, Slot::Knife);
+    }
+}
+
+/// Lets dropped weapons fall and settle, and hands them to the living who walk over them with that slot empty.
+fn update_dropped(dropped: &mut Vec<Dropped>, players: &mut Players, tick: u32) {
+    for d in dropped.iter_mut() {
+        step_projectile(&mut d.pos, &mut d.vel, 20.3, 0.25, trace_world_normal);
+    }
+    dropped.retain(|d| {
+        let near = |c: &&mut Player| {
+            let to = d.pos - c.state.pos;
+            c.hp > 0 && to.with_y(0.0).length() < 1.0 && (-0.5..1.5).contains(&to.y) && (c.id != d.owner || tick >= d.mine_until)
+        };
+        !players.values_mut().filter(near).any(|c| c.state.pick_up(d.weapon, d.ammo))
+    });
+}
+
 /// A thrown grenade on its way.
 struct Grenade {
     id: u32,
@@ -803,7 +878,7 @@ mod tests {
         // FPS16_ROUNDS plays a longer match, for tuning bots without the noise of 10 rounds.
         let rounds = std::env::var("FPS16_ROUNDS").ok().and_then(|r| r.parse().ok()).unwrap_or(10);
         while m.round.number <= rounds && tick < ticks(rounds as f32 * 3.0 * 60.0) {
-            run_inputs(&m, &mut players, &history, tick, &mut shots, &mut hits, &mut radio, &mut vec![]);
+            run_inputs(&m, &mut players, &history, tick, &mut shots, &mut hits, &mut radio, &mut vec![], &mut vec![]);
             tick += 1;
             update_match(&mut m, &mut players, tick);
             history.record(tick, &entities(&players));
@@ -904,7 +979,7 @@ mod tests {
             let mut boom_tick = None;
             for inp in script {
                 player_mut(&mut players, 1).inputs.push(inp);
-                run_inputs(&m, &mut players, &history, tick, &mut vec![], &mut hits, &mut vec![], &mut rockets);
+                run_inputs(&m, &mut players, &history, tick, &mut vec![], &mut hits, &mut vec![], &mut rockets, &mut vec![]);
                 update_grenades(&mut rockets, &mut players, tick, &mut hits, &mut booms);
                 if !booms.is_empty() && boom_tick.is_none() {
                     boom_tick = Some(tick);
@@ -921,6 +996,59 @@ mod tests {
         let (_, booms, after) = fire_rocket(0.0, None);
         assert_eq!(booms.len(), 1, "into the wall to the north");
         assert!(after.unwrap() < ticks(1.0));
+    }
+
+    /// G drops the gun in hand (never the knife); someone with that slot empty walks over it and has it, ammo and
+    /// all. The dropper can't take it straight back.
+    #[test]
+    fn drop_and_pick_up() {
+        let (m, mut players, mut tick) = live();
+        let start = yard();
+        let t = player_mut(&mut players, 1);
+        t.state.pos = start;
+        t.state.loadout(Some(Weapon::Ak47), Weapon::Glock);
+        t.state.ammo[0] = (17, 60);
+        let mut dropped = vec![];
+        // Drop the AK, then the pistol it falls back to, then keep pressing G with just the knife left.
+        let drop = Input { drop: true, ..Default::default() };
+        for inp in [drop, Input::default()].into_iter().chain(std::iter::repeat_n(drop, 70)) {
+            player_mut(&mut players, 1).inputs.push(inp);
+            run_inputs(&m, &mut players, &History::new(0), tick, &mut vec![], &mut vec![], &mut vec![], &mut vec![], &mut dropped);
+            tick += 1;
+        }
+        let weapons: Vec<(Weapon, (u8, u16))> = dropped.iter().map(|d| (d.weapon, d.ammo)).collect();
+        assert_eq!(weapons, [(Weapon::Ak47, (17, 60)), (Weapon::Glock, (20, 120))], "the AK, then the pistol, never the knife");
+        let t = &player_mut(&mut players, 1).state;
+        assert_eq!((t.primary, t.has(Slot::Secondary), t.slot), (None, false, Slot::Knife));
+
+        // Let them land with player 1 gone off east, then player 2 (no primary) walks over the AK.
+        player_mut(&mut players, 1).state.pos = start + Vec3::X * 15.0;
+        for _ in 0..ticks(1.0) {
+            update_dropped(&mut dropped, &mut players, tick);
+            tick += 1;
+        }
+        let ak = dropped.iter().find(|d| d.weapon == Weapon::Ak47).unwrap().pos;
+        let ct = player_mut(&mut players, 2);
+        (ct.state.pos, ct.state.primary) = (ak.with_y(MAP.floor_at(ak)), None);
+        update_dropped(&mut dropped, &mut players, tick);
+        let ct = &player_mut(&mut players, 2).state;
+        assert_eq!((ct.primary, ct.ammo[0], ct.slot), (Some(Weapon::Ak47), (17, 60), Slot::Primary));
+        assert_eq!(dropped.len(), 1, "the pistol is still there");
+    }
+
+    #[test]
+    fn the_dead_drop_their_guns() {
+        let mut players = Players::new();
+        players.insert(1, client(1, Team::T));
+        let p = player_mut(&mut players, 1);
+        p.state.loadout(Some(Weapon::Awp), Weapon::Glock);
+        (p.state.grenade, p.state.ammo[2], p.hp) = (Some(Weapon::He), (1, 0), 0);
+        let mut dropped = vec![];
+        drop_from_the_dead(&mut players, &[1], &mut dropped);
+        let weapons: Vec<Weapon> = dropped.iter().map(|d| d.weapon).collect();
+        assert_eq!(weapons, [Weapon::Awp, Weapon::He], "best gun and the grenade");
+        drop_from_the_dead(&mut players, &[1], &mut dropped);
+        assert_eq!(dropped.len(), 2, "nothing left to drop twice");
     }
 
     /// A crouched target is shorter: chest-high shots over it miss, its head is still a head, and the shooter's
@@ -996,7 +1124,7 @@ mod tests {
         let (history, mut grenades, mut hits, mut booms) = (History::new(0), vec![], vec![], vec![]);
         for inp in script {
             player_mut(&mut players, 1).inputs.push(inp);
-            run_inputs(&m, &mut players, &history, tick, &mut vec![], &mut hits, &mut vec![], &mut grenades);
+            run_inputs(&m, &mut players, &history, tick, &mut vec![], &mut hits, &mut vec![], &mut grenades, &mut vec![]);
             update_grenades(&mut grenades, &mut players, tick, &mut hits, &mut booms);
             tick += 1;
         }

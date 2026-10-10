@@ -51,6 +51,9 @@ Deadline: playable before 00:00. One weapon, one simple map.
 - Rocket launcher (primary, 4 + 16 rockets, one every 0.7 s, 3 s reload, 75% move speed): a straight 35 m/s rocket
   that explodes on touching a wall, the floor or an enemy, up to 250 damage within 7 m; smoke trail, launch flash and sound for all,
   fireball and smoke on impact (explosions from grenades too).
+- Dropping: G tosses the weapon in hand (not the knife) a few meters forward, with its ammo; the dead drop their
+  primary (or pistol) and grenade. Walking over a weapon picks it up if that slot is empty (not your own drop for
+  0.6 s). Weapons on the ground are cleared each round, at most 48 at once.
 - Slots: 1 primary, 2 pistol, 3 knife, 4 grenade, Q last; R reload (auto when empty), draw delay on switch, semi-auto needs a
   click per shot. Mag + reserve ammo, refilled at round start.
 - 100 HP. Damage by zone (head x4, legs x0.75), falls off with distance, armor absorbs per weapon penetration.

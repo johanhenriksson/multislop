@@ -211,6 +211,9 @@ pub struct DustClient {
     want_slot: u8,
     want_buy: u8,
     want_reload: bool,
+    want_drop: bool,
+    /// Weapons on the ground: entity id to the scene node holding the model.
+    dropped: HashMap<u32, u32>,
     kill_feed: VecDeque<KillLine>,
     feed_dirty: bool,
     hurt_at: Option<f64>,
@@ -273,6 +276,8 @@ impl Default for DustClient {
             want_slot: 0,
             want_buy: 0,
             want_reload: false,
+            want_drop: false,
+            dropped: HashMap::new(),
             kill_feed: VecDeque::new(),
             feed_dirty: false,
             hurt_at: None,
@@ -414,6 +419,7 @@ impl ClientGame for DustClient {
             fire: raw.captured && !self.menu && raw.held(Key::MouseLeft),
             slot: std::mem::take(&mut self.want_slot),
             reload: std::mem::take(&mut self.want_reload),
+            drop: std::mem::take(&mut self.want_drop),
             zoom: self.zoom,
             duck: raw.held(Key::ControlLeft) || raw.held(Key::ControlRight),
             buy: std::mem::take(&mut self.want_buy),
@@ -673,6 +679,9 @@ impl DustClient {
         if raw.pressed(Key::R) {
             self.want_reload = true;
         }
+        if raw.pressed(Key::G) {
+            self.want_drop = true;
+        }
         self.tab = raw.held(Key::Tab);
         if raw.pressed(Key::MouseRight) && self.pred.weapon() == Weapon::Awp {
             self.zoom = !self.zoom;
@@ -700,10 +709,18 @@ impl DustClient {
         let (mut spectate, mut carrier_pos) = (None, None);
         let mut seen = HashMap::new();
         let mut grenades = HashMap::new();
+        let mut dropped = HashMap::new();
         for v in others {
-            if let Some(EntityData::Grenade(weapon)) = decode(&v.entity.data) {
-                grenades.insert(v.entity.id, (v.entity.pos, v.entity.vel, weapon == Weapon::Rocket));
-                continue;
+            match decode(&v.entity.data) {
+                Some(EntityData::Grenade(weapon)) => {
+                    grenades.insert(v.entity.id, (v.entity.pos, v.entity.vel, weapon == Weapon::Rocket));
+                    continue;
+                }
+                Some(EntityData::Dropped(weapon)) => {
+                    dropped.insert(v.entity.id, (v.entity.pos, v.entity.yaw, weapon));
+                    continue;
+                }
+                _ => {}
             }
             let Some(p) = NetPlayer::from_entity(&v.entity) else { continue };
             let (pos, yaw, pitch) = (p.state.pos, p.state.yaw, p.state.pitch);
@@ -721,6 +738,7 @@ impl DustClient {
             seen.insert(p.id, (pos, yaw, pitch, life, p.state.weapon(), p.state.duck, p.team));
         }
         self.render_grenades(grenades);
+        self.render_dropped(dropped);
         (self.spectate, self.carrier_pos) = (spectate, carrier_pos);
         // Whoever is under the crosshair, walls permitting, for the "Friend: / Enemy:" line.
         let (eye, dir) = (eye(&self.pred), look_rot(self.yaw, self.pitch) * Vec3::NEG_Z);
@@ -804,6 +822,27 @@ impl DustClient {
                 let sound = self.sounds.steps[variant % 4];
                 self.sound(sound, volume);
             }
+        }
+    }
+
+    /// Weapons on the ground, as their own models lying on their side.
+    fn render_dropped(&mut self, mut now: HashMap<u32, (Vec3, f32, Weapon)>) {
+        let lying = |pos: Vec3, yaw: f32| Transform::at(pos + Vec3::Y * 0.06).rotated(Quat::from_rotation_y(yaw) * Quat::from_rotation_z(std::f32::consts::FRAC_PI_2));
+        let gone: Vec<u32> = self.dropped.keys().filter(|id| !now.contains_key(id)).copied().collect();
+        for id in gone {
+            let node = self.dropped.remove(&id).unwrap();
+            self.scene.push(Command::Despawn { id: node });
+        }
+        for (&id, &node) in &self.dropped {
+            if let Some((pos, yaw, _)) = now.remove(&id) {
+                self.scene.out.push(Command::set_transform(node, lying(pos, yaw)));
+            }
+        }
+        for (id, (pos, yaw, weapon)) in now {
+            let holder = self.scene.empty(None, lying(pos, yaw), true);
+            let model = spawn_weapon(&mut self.scene, holder, weapon, Transform::default(), false);
+            self.scene.push(Command::set_visible(model, true));
+            self.dropped.insert(id, holder);
         }
     }
 
