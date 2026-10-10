@@ -17,7 +17,7 @@ const GOAL_SECS: f32 = 3.0;
 const END_SECS: f32 = 8.0;
 /// Matches per turn when the host rotates games.
 const ROTATE_AFTER: u32 = 2;
-const RESPAWN_SECS: f32 = 3.0;
+pub const RESPAWN_SECS: f32 = 3.0;
 /// How near a pickup's spot you have to walk to take it.
 const PICKUP_REACH: f32 = 1.2;
 
