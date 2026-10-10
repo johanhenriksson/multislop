@@ -141,6 +141,18 @@ pub const VOICE_DEFUSED: &[u8] = include_bytes!("../assets/voice/defused.wav");
 pub const VOICE_GO: &[u8] = include_bytes!("../assets/voice/go.wav");
 pub const VOICE_ENEMY_DOWN: &[u8] = include_bytes!("../assets/voice/enemy_down.wav");
 
+/// Team radio lines, same voice.
+pub fn radio_line(call: crate::shared::Radio) -> &'static [u8] {
+    use crate::shared::Radio::*;
+    match call {
+        EnemySpotted => include_bytes!("../assets/voice/enemy_spotted.wav"),
+        NeedBackup => include_bytes!("../assets/voice/need_backup.wav"),
+        InPosition => include_bytes!("../assets/voice/in_position.wav"),
+        SectorClear => include_bytes!("../assets/voice/sector_clear.wav"),
+        CoverMe => include_bytes!("../assets/voice/cover_me.wav"),
+    }
+}
+
 /// Makes a clean voice recording sound like CS radio: telephone band, a little grit, and a click either side.
 pub fn radio(wav_bytes: &[u8]) -> Vec<u8> {
     let rate = wav_bytes.get(24..28).map_or(RATE, |b| u32::from_le_bytes(b.try_into().unwrap()));

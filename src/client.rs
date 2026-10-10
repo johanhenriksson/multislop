@@ -136,6 +136,8 @@ struct Game {
     players: Vec<NetPlayer>,
     /// Distance run since the last footstep.
     stride: f32,
+    /// Radio chat lines and when they were said.
+    chat: VecDeque<(String, Instant)>,
     /// Big centered announcement and when it was made.
     announce: Option<(String, Instant)>,
     /// Viewmodel kick from the last shot, 1 right after firing and decaying to 0.
@@ -158,7 +160,12 @@ enum Sound {
     Step(u32),
     Impact,
     Voice(Announce),
+    Radio(Radio),
 }
+
+/// Radio chat lines, bottom left.
+#[derive(Component)]
+struct ChatText;
 
 /// Announcer lines, CS style.
 #[derive(Clone, Copy, PartialEq)]
@@ -222,6 +229,7 @@ struct Sounds {
     steps: Vec<Handle<AudioSource>>,
     impact: Handle<AudioSource>,
     voices: Vec<(Announce, Handle<AudioSource>)>,
+    radio: Vec<(Radio, Handle<AudioSource>)>,
 }
 
 /// First-person model of one weapon.
@@ -358,7 +366,7 @@ pub fn run(server: SocketAddr, lag_ms: u64, jitter_ms: u64, interp_ms: u64) {
                 look,
                 controls,
                 (render_remotes, render_self, viewmodel, render_bomb, draw_tracers, bomb_beep, play_sounds, spawn_fx, update_fx),
-                (hud, scoreboard, ammo_hud, buy_menu_hud, kill_feed, death_fade, hurt_flash, crosshair, scope, score_panel, announce),
+                (hud, scoreboard, ammo_hud, buy_menu_hud, kill_feed, death_fade, hurt_flash, crosshair, scope, score_panel, announce, chat),
             )
                 .chain(),
         )
@@ -397,6 +405,10 @@ fn setup(
         .into_iter()
         .map(|(a, wav)| (a, sound(sfx::radio(wav))))
         .collect(),
+        radio: [Radio::EnemySpotted, Radio::NeedBackup, Radio::InPosition, Radio::SectorClear, Radio::CoverMe]
+            .into_iter()
+            .map(|r| (r, sound(sfx::radio(sfx::radio_line(r)))))
+            .collect(),
     });
     commands.insert_resource(Decals::default());
     // First-person weapons; each barrel tip lines up with `muzzle`.
@@ -528,6 +540,14 @@ fn setup(
     commands.spawn((
         Node { position_type: PositionType::Absolute, top: percent(26), width: percent(100), justify_content: JustifyContent::Center, ..default() },
         children![(AnnounceText, Text::new(""), TextFont { font_size: FontSize::Px(40.0), ..default() }, TextShadow::default())],
+    ));
+    commands.spawn((
+        ChatText,
+        Text::new(""),
+        TextColor(Color::srgb(1.0, 0.85, 0.35)),
+        TextFont { font_size: FontSize::Px(16.0), ..default() },
+        TextShadow::default(),
+        Node { position_type: PositionType::Absolute, left: px(20), bottom: px(70), ..default() },
     ));
     commands.spawn((
         NetGraphText,
@@ -772,6 +792,14 @@ fn on_snapshot(g: &mut Game, snap: Snapshot) {
         g.teams.insert(p.id, p.team);
         if g.names.get(&p.id) != Some(&p.name) {
             g.names.insert(p.id, p.name.clone());
+        }
+    }
+    for r in &snap.radio {
+        g.sounds.push((Sound::Radio(r.call), 0.75));
+        let line = format!("{} (RADIO): {}", name(g, r.from), r.call.text());
+        g.chat.push_back((line, Instant::now()));
+        if g.chat.len() > 4 {
+            g.chat.pop_front();
         }
     }
     for h in &snap.hits {
@@ -1202,6 +1230,7 @@ fn play_sounds(mut commands: Commands, mut g: ResMut<Game>, sounds: Res<Sounds>)
             Sound::Step(v) => &sounds.steps[v as usize % 4],
             Sound::Impact => &sounds.impact,
             Sound::Voice(a) => &sounds.voices.iter().find(|(v, _)| *v == a).unwrap().1,
+            Sound::Radio(r) => &sounds.radio.iter().find(|(v, _)| *v == r).unwrap().1,
         };
         commands.spawn((
             AudioPlayer::new(handle.clone()),
@@ -1798,4 +1827,9 @@ fn announce(mut text: Single<&mut Text, With<AnnounceText>>, g: Res<Game>) {
         Some((line, at)) if at.elapsed().as_secs_f32() < 3.5 => line.clone(),
         _ => String::new(),
     };
+}
+
+fn chat(mut text: Single<&mut Text, With<ChatText>>, mut g: ResMut<Game>) {
+    g.chat.retain(|(_, at)| at.elapsed().as_secs_f32() < 7.0);
+    text.0 = g.chat.iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>().join("\n");
 }

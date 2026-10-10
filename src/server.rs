@@ -85,7 +85,7 @@ pub fn run(port: u16) {
     let mut game = new_match();
 
     // Shots and damage since the last snapshot.
-    let (mut shots, mut hits) = (Vec::new(), Vec::new());
+    let (mut shots, mut hits, mut radio) = (Vec::new(), Vec::new(), Vec::new());
     loop {
         // Wait on the socket until the tick is due, so packets are handled (and timestamped) the moment they land.
         loop {
@@ -151,7 +151,7 @@ pub fn run(port: u16) {
         }
 
         balance_bots(&mut game, &mut clients, &mut next_id);
-        run_inputs(&game, &mut clients, &history, tick, &mut shots, &mut hits);
+        run_inputs(&game, &mut clients, &history, tick, &mut shots, &mut hits, &mut radio);
 
         if Instant::now() >= stats_at {
             stats_at += STATS_EVERY;
@@ -204,6 +204,7 @@ pub fn run(port: u16) {
                 })
                 .collect();
             let round = net_round(&game, tick);
+            let teams: HashMap<u32, Team> = clients.values().map(|c| (c.id, c.team)).collect();
             for (addr, c) in clients.iter().filter(|(_, c)| c.bot.is_none()) {
                 let snap = Snapshot {
                     tick,
@@ -213,12 +214,15 @@ pub fn run(port: u16) {
                     round,
                     shots: shots.clone(),
                     hits: hits.clone(),
+                    // Team radio only reaches the caller's team.
+                    radio: radio.iter().filter(|r: &&RadioCall| teams.get(&r.from) == Some(&c.team)).copied().collect(),
                     echo: c.echo.0,
                     echo_held: c.echo.1.elapsed().as_secs_f32(),
                 };
                 let _ = sock.send_to(&encode(&ServerMsg::Snapshot(snap)), addr);
             }
             shots.clear();
+            radio.clear();
             hits.clear();
         }
 
@@ -239,6 +243,7 @@ fn run_inputs(
     tick: u32,
     shots: &mut Vec<Shot>,
     hits: &mut Vec<Hit>,
+    radio: &mut Vec<RadioCall>,
 ) {
     let seen: Vec<Seen> =
         clients.values().map(|c| Seen { id: c.id, team: c.team, pos: c.state.pos, alive: c.hp > 0 }).collect();
@@ -252,6 +257,9 @@ fn run_inputs(
     for c in clients.values_mut() {
         if let Some(bot) = &mut c.bot {
             let inp = bot.think(c.id, &c.state, c.team, &game.round, &seen, callouts[c.team as usize], game.t_site, tick);
+            if let Some(call) = bot.radio.take() {
+                radio.push(RadioCall { from: c.id, call });
+            }
             (c.last_queued, c.last_heard) = (inp.seq, Instant::now());
             c.queue.push_back(inp);
         }
@@ -784,12 +792,12 @@ mod tests {
             c.bot = Some(Bot::new(id));
             clients.insert(SocketAddr::from(([0, 0, 0, 0], id as u16)), c);
         }
-        let (mut m, mut history, mut shots, mut hits) = (new_match(), VecDeque::new(), vec![], vec![]);
+        let (mut m, mut history, mut shots, mut hits, mut radio) = (new_match(), VecDeque::new(), vec![], vec![], vec![]);
         let (mut tick, mut plants, mut planted) = (1, 0, false);
         // FPS16_ROUNDS plays a longer match, for tuning bots without the noise of 10 rounds.
         let rounds = std::env::var("FPS16_ROUNDS").ok().and_then(|r| r.parse().ok()).unwrap_or(10);
         while m.round.number <= rounds && tick < ticks(rounds as f32 * 3.0 * 60.0) {
-            run_inputs(&m, &mut clients, &history, tick, &mut shots, &mut hits);
+            run_inputs(&m, &mut clients, &history, tick, &mut shots, &mut hits, &mut radio);
             tick += 1;
             update_match(&mut m, &mut clients, tick);
             record(&mut history, &clients, tick);

@@ -184,6 +184,8 @@ pub struct Snapshot {
     pub shots: Vec<Shot>,
     /// Damage dealt since the last snapshot.
     pub hits: Vec<Hit>,
+    /// Radio calls from the receiver's own team since the last snapshot.
+    pub radio: Vec<RadioCall>,
     /// Latest `InputPacket::time` from this client, and how long the server held it before sending this snapshot.
     pub echo: f64,
     pub echo_held: f32,
@@ -195,6 +197,34 @@ pub struct Shot {
     pub weapon: Weapon,
     pub from: Vec3,
     pub to: Vec3,
+}
+
+/// Team radio, CS style.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Radio {
+    EnemySpotted,
+    NeedBackup,
+    InPosition,
+    SectorClear,
+    CoverMe,
+}
+
+impl Radio {
+    pub fn text(self) -> &'static str {
+        match self {
+            Radio::EnemySpotted => "Enemy spotted!",
+            Radio::NeedBackup => "Need backup!",
+            Radio::InPosition => "I'm in position.",
+            Radio::SectorClear => "Sector clear.",
+            Radio::CoverMe => "Cover me!",
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+pub struct RadioCall {
+    pub from: u32,
+    pub call: Radio,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug)]

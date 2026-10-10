@@ -28,6 +28,12 @@ pub struct Seen {
 }
 
 pub struct Bot {
+    /// A radio call this bot makes this tick, picked up by the server.
+    pub radio: Option<Radio>,
+    /// No more radio from this bot before this tick.
+    radio_quiet_until: u32,
+    /// Said "in position" this round already.
+    positioned: bool,
     seq: u32,
     /// The site this bot heads for this round, and the spot on it to plant at or hold.
     site: char,
@@ -77,6 +83,17 @@ impl Bot {
             last_pos: Vec3::ZERO,
             stuck_ticks: 0,
             rng: seed.wrapping_mul(0x9E37_79B9) | 1,
+            radio: None,
+            radio_quiet_until: 0,
+            positioned: false,
+        }
+    }
+
+    /// Radio a call with some probability, at most every few seconds.
+    fn say(&mut self, call: Radio, tick: u32, chance: f32) {
+        if tick >= self.radio_quiet_until && self.random() < chance {
+            self.radio = Some(call);
+            self.radio_quiet_until = tick + secs(8.0);
         }
     }
 
@@ -196,10 +213,16 @@ impl Bot {
             // Ts detour less so they still arrive roughly together.
             let detour = if team == Team::T { 128 } else { 135 };
             self.via = self.pick_via(me.pos, self.spot, detour);
+            self.positioned = false;
             self.target = None;
         }
 
         let eye = eye(me);
+        let visible_enemies = players.iter().filter(|p| p.alive && p.team != team && can_see(eye, p.pos) && in_view(me, p.pos)).count();
+        // Our target just went down.
+        if self.target.is_some_and(|(t, _)| players.iter().any(|p| p.id == t && !p.alive)) && visible_enemies == 0 {
+            self.say(Radio::SectorClear, tick, 0.6);
+        }
         let enemy = players
             .iter()
             // A new enemy has to be in view; one we're already fighting is tracked while we turn.
@@ -211,6 +234,7 @@ impl Bot {
             (Some(e), _) => {
                 self.target = Some((e.id, tick));
                 self.aim_error = self.roll_aim_error(1.0);
+                self.say(if visible_enemies >= 2 { Radio::NeedBackup } else { Radio::EnemySpotted }, tick, 0.7);
             }
             (None, _) => self.target = None,
         }
@@ -257,6 +281,9 @@ impl Bot {
         let (goal, use_bomb) = self.goal(id, me, team, round, callout);
         let at_goal = me.pos.with_y(0.0).distance(goal.with_y(0.0)) < 0.8;
         if use_bomb {
+            if team == Team::T {
+                self.say(Radio::CoverMe, tick, 1.0);
+            }
             inp.use_key = true;
             return inp;
         }
@@ -270,6 +297,10 @@ impl Bot {
         let enemy_spawn = MAP.spawns(if team == Team::T { Team::Ct } else { Team::T })[0];
         let watch = path_dir(&mut self.watch, &mut self.watch_goal, me.pos, enemy_spawn);
         if at_goal {
+            if team == Team::Ct && !self.positioned {
+                self.positioned = true;
+                self.say(Radio::InPosition, tick, 0.5);
+            }
             let (yaw, _) = look_at(Vec3::ZERO, watch);
             inp.yaw = me.yaw + wrap(yaw - me.yaw).clamp(-4.0 * DT, 4.0 * DT);
             return inp;
