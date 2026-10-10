@@ -436,4 +436,14 @@ mod tests {
             assert!(field[z * MAP.width() + x] < field[sz * MAP.width() + sx], "reachable");
         }
     }
+
+    /// The crates across mid keep T spawn from looking straight down it to the CT side.
+    #[test]
+    fn t_spawn_cannot_see_down_mid() {
+        for s in MAP.spawns(Team::T) {
+            for (x, z) in (0..MAP.depth()).flat_map(|z| (0..30).map(move |x| (x, z))).filter(|&(x, z)| MAP.walkable(x, z)) {
+                assert!(!can_see(*s + Vec3::Y * EYE, MAP.ground(x, z) + Vec3::Y * 1.2), "T spawn {s} sees cell ({x}, {z})");
+            }
+        }
+    }
 }

@@ -73,7 +73,8 @@ Deadline: playable before 00:00. One weapon, one simple map.
   constants are the difficulty knobs).
 - The game is Counterslop; its one map is dust, traced from a top-down overview image into an ASCII grid in `src/map.rs` (2 m cells, flat): B site
   top-left, A bottom-left, CT spawn between them, T spawn at the back on the right (as far from A as from B),
-  tunnels through the middle. Sites tinted red.
+  tunnels through the middle. A stack of tall crates
+  across mid keeps T spawn from seeing down it to the CT side (a test checks the line of sight). Sites tinted red.
 - Height: a second grid (`DUST2_HEIGHTS`, quarter meters, base 36) gives each cell a floor height: 2 m streets, tunnels
   sunk to 0 with ramps (from the dark areas of the overview), B site and T spawn yard raised 1 m. The floor is
   interpolated between cell corners; you walk up rises under 0.5 m, stay glued going down, and bullets/sight lines
