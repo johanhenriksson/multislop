@@ -178,6 +178,28 @@ pub fn radio(wav_bytes: &[u8]) -> Vec<u8> {
     wav_at(&out, rate)
 }
 
+/// Desert wind for the background: low-passed noise with slow gusts, 12 s, seamless when looped.
+pub fn wind() -> Vec<u8> {
+    const SECS: f32 = 12.0;
+    let (mut rng, mut low, mut lower) = (0x77u32, 0.0f32, 0.0f32);
+    let raw = samples(SECS, |t| {
+        low += (noise(&mut rng) - low) * 0.02;
+        lower += (low - lower) * 0.05;
+        // Gusts: a few slow swells that repeat exactly every SECS.
+        let gust = 0.55 + 0.25 * (t / SECS * std::f32::consts::TAU * 2.0).sin() + 0.2 * (t / SECS * std::f32::consts::TAU * 5.0).sin();
+        (low * 0.6 + lower * 2.5) * gust * 3.0
+    });
+    // Crossfade the tail into the head so the loop point is inaudible.
+    let n = raw.0.len();
+    let fade = RATE as usize;
+    let mut out: Vec<f32> = raw.0[..n - fade].to_vec();
+    for i in 0..fade {
+        let k = i as f32 / fade as f32;
+        out[i] = out[i] * k + raw.0[n - fade + i] * (1.0 - k);
+    }
+    wav(&out)
+}
+
 /// A footstep on sand and stone; four variants so a run doesn't sound like a metronome.
 pub fn footstep(variant: u32) -> Vec<u8> {
     let (mut rng, mut low, mut phase) = (0xF00Du32 + variant * 7919, 0.0f32, 0.0f32);
@@ -297,7 +319,7 @@ mod tests {
             let guns = [Weapon::Glock, Weapon::Usp, Weapon::Deagle, Weapon::Mp5, Weapon::Ak47, Weapon::M4a1, Weapon::Awp];
             let named = guns.map(|g| (g.spec().name, super::gunshot(g)));
             let extra = [("knife", super::knife()), ("reload", super::reload()), ("buy", super::buy()), ("headshot", super::headshot())];
-            let extra = extra.into_iter().chain([("radio_go", super::radio(super::VOICE_GO)), ("radio_t_win", super::radio(super::VOICE_T_WIN))]);
+            let extra = extra.into_iter().chain([("radio_go", super::radio(super::VOICE_GO)), ("radio_t_win", super::radio(super::VOICE_T_WIN)), ("wind", super::wind())]);
             for (name, wav) in named.into_iter().chain(extra).chain([("hit", super::hit()), ("death", w)]) {
                 std::fs::write(std::path::Path::new(&dir).join(format!("{name}.wav")), wav).unwrap();
             }

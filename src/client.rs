@@ -428,6 +428,10 @@ fn setup(
             .collect(),
     });
     commands.insert_resource(Decals::default());
+    commands.spawn((
+        AudioPlayer::new(audio.add(AudioSource { bytes: sfx::wind().into() })),
+        PlaybackSettings { volume: Volume::Linear(0.18), ..PlaybackSettings::LOOP },
+    ));
     // First-person weapons; each barrel tip lines up with `muzzle`.
     let viewmodels: Vec<Entity> = ALL_WEAPONS
         .into_iter()
