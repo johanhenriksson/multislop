@@ -66,9 +66,26 @@ impl Net {
     }
 }
 
+/// Biggest game module we'll download.
+const MAX_MODULE: u32 = 64 << 20;
+
+/// Getting the game the server runs.
+enum Fetch {
+    /// Asking the server which game it runs.
+    Asking,
+    Downloading { hash: [u8; 32], cookie: u64, data: Vec<u8>, have: Vec<bool>, left: usize, cursor: usize },
+    Done,
+}
+
 #[derive(Resource)]
 struct Client {
-    game: Game,
+    /// Loaded once the server has said which game it runs (or from `--game`).
+    game: Option<Game>,
+    /// `start` has been called and applied.
+    started: bool,
+    fetch: Fetch,
+    /// Why the game couldn't be loaded.
+    error: Option<String>,
     netcode: NetClient,
     /// Got packets we couldn't decode: the server runs a different build.
     incompatible: bool,
@@ -92,7 +109,8 @@ struct FrameStats {
     since: Option<Instant>,
 }
 
-pub fn run(server: SocketAddr, game: Game, lag_ms: u64, jitter_ms: u64, interp_ms: u64) {
+/// Joins `server`, running `game` if given, or else the game the server runs (downloaded if need be).
+pub fn run(server: SocketAddr, game: Option<Game>, lag_ms: u64, jitter_ms: u64, interp_ms: u64) {
     let sock = UdpSocket::bind("0.0.0.0:0").expect("bind");
     sock.set_nonblocking(true).unwrap();
     App::new()
@@ -121,11 +139,19 @@ pub fn run(server: SocketAddr, game: Game, lag_ms: u64, jitter_ms: u64, interp_m
             in_q: default(),
         })
         .init_resource::<Clicked>()
-        .insert_resource(Client { game, netcode: NetClient::new(interp_ms), incompatible: false, wrong_build: None })
-        .add_systems(Startup, (setup, start).chain())
+        .insert_resource(Client {
+            fetch: if game.is_some() { Fetch::Done } else { Fetch::Asking },
+            game,
+            started: false,
+            error: None,
+            netcode: NetClient::new(interp_ms),
+            incompatible: false,
+            wrong_build: None,
+        })
+        .add_systems(Startup, setup)
         .add_systems(PreUpdate, receive)
         .add_systems(FixedUpdate, net_tick)
-        .add_systems(Update, (grab_cursor, frame, crate::render::anchor_ui, overlays).chain())
+        .add_systems(Update, (grab_cursor, start, frame, crate::render::anchor_ui, overlays).chain())
         .add_systems(PostUpdate, debug_shot.run_if(|| std::env::var_os("FPS16_SHOT").is_some()))
         .run();
 }
@@ -158,23 +184,95 @@ fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     ));
 }
 
+/// Builds the game's world and HUD once it's loaded.
 fn start(mut client: ResMut<Client>, mut renderer: Renderer) {
-    let cmds = client.game.start();
+    if client.started {
+        return;
+    }
+    let Some(game) = &mut client.game else { return };
+    let cmds = game.start();
     renderer.apply(cmds);
+    client.started = true;
+}
+
+/// Where downloaded game modules are kept, by hash.
+fn cache_path(hash: &[u8; 32]) -> std::path::PathBuf {
+    let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    std::path::Path::new(&home).join("Library/Application Support/fps16/games").join(format!("{hex}.wasm"))
+}
+
+fn sha256(bytes: &[u8]) -> [u8; 32] {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes).into()
+}
+
+/// Loads a downloaded or cached module as the game.
+fn load(client: &mut Client, bytes: &[u8]) {
+    match crate::wasm::WasmClient::load(bytes) {
+        Ok(game) => {
+            println!("loaded the server's game ({} KB)", bytes.len() / 1024);
+            client.game = Some(Box::new(game));
+        }
+        Err(e) => client.error = Some(format!("can't load the server's game: {e}")),
+    }
+    client.fetch = Fetch::Done;
+}
+
+/// The server's answer to which game it runs: cached already, or to download.
+fn on_game(client: &mut Client, hash: [u8; 32], size: u32, cookie: u64) {
+    if let Some(bytes) = std::fs::read(cache_path(&hash)).ok().filter(|b| sha256(b) == hash) {
+        return load(client, &bytes);
+    }
+    if size > MAX_MODULE {
+        client.error = Some(format!("the server's game is too big ({} MB)", size >> 20));
+        client.fetch = Fetch::Done;
+        return;
+    }
+    let chunks = (size as usize).div_ceil(CHUNK);
+    client.fetch = Fetch::Downloading { hash, cookie, data: vec![0; size as usize], have: vec![false; chunks], left: chunks, cursor: 0 };
+}
+
+fn on_chunk(client: &mut Client, index: u32, chunk: &[u8]) {
+    let Fetch::Downloading { hash, data, have, left, .. } = &mut client.fetch else { return };
+    let i = index as usize;
+    let at = i * CHUNK;
+    if have.get(i) != Some(&false) || at + chunk.len() > data.len() {
+        return;
+    }
+    data[at..at + chunk.len()].copy_from_slice(chunk);
+    (have[i], *left) = (true, *left - 1);
+    if *left > 0 {
+        return;
+    }
+    if sha256(data) != *hash {
+        // Corrupt or the server changed games: start over.
+        client.fetch = Fetch::Asking;
+        return;
+    }
+    let (hash, data) = (*hash, std::mem::take(data));
+    let path = cache_path(&hash);
+    if let Err(e) = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| std::fs::write(&path, &data)) {
+        eprintln!("can't cache the game at {}: {e}", path.display());
+    }
+    load(client, &data);
 }
 
 /// Every frame rather than every tick, so snapshots aren't left waiting in the socket.
 fn receive(mut net: ResMut<Net>, mut client: ResMut<Client>) {
-    let Client { game, netcode, incompatible, wrong_build } = &mut *client;
     for packet in net.recv() {
         match decode::<ServerMsg>(&packet) {
+            Some(ServerMsg::Game { hash, size, cookie }) if matches!(client.fetch, Fetch::Asking) => on_game(&mut client, hash, size, cookie),
+            Some(ServerMsg::Chunk { index, data }) => on_chunk(&mut client, index, &data),
+            Some(ServerMsg::Game { .. }) => {}
             Some(ServerMsg::Snapshot(snap)) => {
+                let Client { game: Some(game), netcode, .. } = &mut *client else { continue };
                 let Some(snap) = netcode.snapshot(snap, &mut |e, i, s| game.predict(e, i, s, false)) else { continue };
                 let snap = ClientSnapshot { tick: snap.tick, you: snap.you, state: snap.state.clone(), entities: snap.entities.clone(), events: snap.events.clone() };
                 game.snapshot(&snap);
             }
-            Some(ServerMsg::WrongBuild { server }) => *wrong_build = Some(server),
-            None => *incompatible = true,
+            Some(ServerMsg::WrongBuild { server }) => client.wrong_build = Some(server),
+            None => client.incompatible = true,
         }
     }
 }
@@ -204,13 +302,33 @@ fn net_tick(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     cursor: Single<&CursorOptions, With<PrimaryWindow>>,
+    mut ticks: Local<u32>,
 ) {
-    let raw = RawInput { held: held_keys(&keys, &mouse), captured: captured(&cursor), ..default() };
-    let Client { game, netcode, .. } = &mut *client;
-    let input = game.input(&raw);
-    netcode.input(input, &mut |e, i, s| game.predict(e, i, s, true));
-    if let Some(packet) = netcode.packet(player_name()) {
-        net.send(encode(&packet));
+    *ticks += 1;
+    let mut send = |msg| net.send(encode(&ClientPacket { build: BUILD.into(), msg }));
+    match &mut client.fetch {
+        Fetch::Asking if *ticks % 64 == 1 => send(ClientMsg::Hello { pad: vec![0; HELLO_SIZE] }),
+        Fetch::Asking => {}
+        // Ask for the next missing chunks every tick; lost ones come round again when the cursor wraps.
+        Fetch::Downloading { cookie, have, cursor, .. } => {
+            let chunks: Vec<u32> = (0..have.len())
+                .map(|i| (*cursor + i) % have.len())
+                .filter(|&i| !have[i])
+                .take(CHUNKS_PER_REQUEST)
+                .map(|i| i as u32)
+                .collect();
+            *cursor = chunks.last().map_or(0, |&i| i as usize + 1);
+            send(ClientMsg::Chunks { cookie: *cookie, chunks });
+        }
+        Fetch::Done => {
+            let raw = RawInput { held: held_keys(&keys, &mouse), captured: captured(&cursor), ..default() };
+            let Client { game: Some(game), netcode, .. } = &mut *client else { return };
+            let input = game.input(&raw);
+            netcode.input(input, &mut |e, i, s| game.predict(e, i, s, true));
+            if let Some(packet) = netcode.packet(player_name()) {
+                send(ClientMsg::Input(packet));
+            }
+        }
     }
 }
 
@@ -232,7 +350,7 @@ fn frame(
     let mut pressed: Vec<Key> = KEYS.iter().filter(|(code, _)| keys.just_pressed(*code)).map(|(_, k)| *k).collect();
     pressed.extend(BUTTONS.iter().filter(|(b, _)| mouse.just_pressed(*b)).map(|(_, k)| *k));
     let input = RawInput { held: held_keys(&keys, &mouse), pressed, mouse: if captured { motion.delta } else { Vec2::ZERO }, captured };
-    let Client { game, netcode, .. } = &mut *client;
+    let Client { game: Some(game), netcode, .. } = &mut *client else { return };
     let f = FrameIn {
         dt: time.delta_secs(),
         time: clock(),
@@ -279,10 +397,12 @@ fn overlays(
     mut stats: Local<FrameStats>,
 ) {
     let c = &mut *client;
-    status.0 = match (c.incompatible, c.netcode.me, &c.wrong_build) {
-        (_, None, Some(server)) => format!("SERVER IS ON BUILD {server}, YOU HAVE BUILD {BUILD} - restart the game to update"),
-        (true, None, _) => "SERVER IS A DIFFERENT VERSION - update both".into(),
-        (_, None, _) => "connecting...".into(),
+    status.0 = match (c.incompatible, c.netcode.me, &c.wrong_build, &c.fetch) {
+        (_, None, Some(server), _) => format!("SERVER IS ON BUILD {server}, YOU HAVE BUILD {BUILD} - restart the game to update"),
+        (true, None, ..) => "SERVER IS A DIFFERENT VERSION - update both".into(),
+        _ if c.error.is_some() => c.error.clone().unwrap_or_default(),
+        (_, None, _, Fetch::Downloading { have, left, .. }) => format!("downloading the game... {}%", 100 - 100 * left / have.len().max(1)),
+        (_, None, ..) => "connecting...".into(),
         _ => String::new(),
     };
     let (mut text, mut vis) = graph.into_inner();
@@ -365,3 +485,34 @@ const KEYS: [(KeyCode, Key); 51] = [
     (KeyCode::AltRight, Key::AltRight),
     (KeyCode::ArrowUp, Key::Up), (KeyCode::ArrowDown, Key::Down), (KeyCode::ArrowLeft, Key::Left), (KeyCode::ArrowRight, Key::Right),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn download_takes_chunks_in_any_order_and_restarts_on_a_bad_hash() {
+        let mut client = Client {
+            game: None,
+            started: false,
+            fetch: Fetch::Asking,
+            error: None,
+            netcode: NetClient::new(50),
+            incompatible: false,
+            wrong_build: None,
+        };
+        let module: Vec<u8> = (0..3000).map(|i| i as u8).collect();
+        // The server claims a different hash than the bytes it sends, so nothing gets cached or loaded.
+        on_game(&mut client, sha256(b"something else"), module.len() as u32, 7);
+        let Fetch::Downloading { cookie: 7, ref have, .. } = client.fetch else { panic!("should be downloading") };
+        assert_eq!(have.len(), 3);
+        for i in [2, 0, 0, 2] {
+            on_chunk(&mut client, i, &module.chunks(CHUNK).nth(i as usize).unwrap());
+        }
+        let Fetch::Downloading { left: 1, ref data, .. } = client.fetch else { panic!("one chunk left") };
+        assert_eq!(&data[..CHUNK], &module[..CHUNK]);
+        on_chunk(&mut client, 9, &[1, 2, 3]);
+        on_chunk(&mut client, 1, &module[CHUNK..2 * CHUNK]);
+        assert!(matches!(client.fetch, Fetch::Asking) && client.game.is_none(), "hash mismatch: ask again");
+    }
+}

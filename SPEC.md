@@ -3,15 +3,18 @@
 Deadline: playable before 00:00. One weapon, one simple map.
 
 ## Run
-- `cargo run --release -- server [port] [--game game.wasm]` (headless, default 5000; `--game` runs the game from a
-  wasm module instead of the linked-in one: `cargo build -p dust --release --target wasm32-unknown-unknown`)
-- `cargo run --release -- client <host:port> [--game game.wasm] [--lag ms] [--jitter ms] [--interp ms]` (`--lag`/`--jitter` fake delay and bursty arrival to test netcode, `--interp` is the minimum remote-player buffer, default 50)
+- `cargo build -p dust --release --target wasm32-unknown-unknown` builds the game module. The host has no game built
+  in: servers run a module and clients download it from the server.
+- `cargo run --release -- server [port] [--game game.wasm]` (headless, default port 5000; the game defaults to
+  `dust.wasm` next to the executable, so in development pass `--game target/wasm32-unknown-unknown/release/dust.wasm`)
+- `cargo run --release -- client <host:port> [--game game.wasm] [--lag ms] [--jitter ms] [--interp ms]` (`--game` uses a local module instead of downloading the server's, `--lag`/`--jitter` fake delay and bursty arrival to test netcode, `--interp` is the minimum remote-player buffer, default 50)
 
 ## Distribution
-- `tools/release.sh` builds `dist/fps16-mac.zip`: a universal, unsigned `fps16.app` whose launcher self-updates from
-  `$FPS16_PUBLIC/fps16.sha256` + `fps16.gz`, then asks to Join an address or Host a server on that Mac.
-- `tools/release.sh publish` bumps `build_number.txt` and uploads to the VPS; the sha256 file goes last since it is the
-  update trigger. The build number is compiled in; the server rejects clients on another build and they are told
+- `tools/release.sh` builds `dist/fps16-mac.zip`: a universal, unsigned `fps16.app` with the binary and `dust.wasm`,
+  whose launcher self-updates each from `$FPS16_PUBLIC/<file>.sha256` + `<file>.gz`, then asks to Join an address or
+  Host a server on that Mac (which runs the `dust.wasm` beside the binary).
+- `tools/release.sh publish` bumps `build_number.txt` and uploads to the VPS; the sha256 files go last since they are
+  the update triggers. The build number is compiled in; the server rejects clients on another build and they are told
   to restart (which updates them).
 
 ## Gameplay
@@ -98,8 +101,11 @@ Deadline: playable before 00:00. One weapon, one simple map.
   `predict` step, entity interpolation, net_graph stats), `src/client.rs` (window, raw input, overlays: connection
   status and net graph, Esc always releases the mouse, screenshot and synthetic-input debug switches),
   `src/render.rs` (commands to Bevy), wasmtime loader (`src/wasm.rs`: memory cap, 1 s per call limit).
-- Goal: games are downloadable wasm modules that own rules, assets and HUD. Next: the server sends its module and
-  clients download and cache it.
+- Game distribution: a client without `--game` says hello (padded to 64 bytes) and the server answers which game it
+  runs: its module's sha256 and size, plus a cookie (keyed hash of the address).
+  Clients load a cached module from `~/Library/Application Support/fps16/games/<sha256>.wasm`, or pull it in 1200
+  byte chunks (up to 32 per request, cookie required so the server can't be used to flood a spoofed address),
+  verify the hash, cache it and load it. Only then do they send input and join. Modules over 64 MB are refused.
 
 ## Netcode (server authoritative, Valve-style)
 - Plain UDP, postcard-serialized messages. Fixed tick 128 Hz on both sides; snapshots sent at 32 Hz, input packets at 64 Hz

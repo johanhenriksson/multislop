@@ -4,8 +4,9 @@
 #   tools/release.sh            build dist/fps16-mac.zip and the update payload
 #   tools/release.sh publish    build, then upload to the VPS
 #
-# Same scheme as zulkan's package-mac.sh, minus assets: the payload is just the
-# gzipped binary, and its sha256 file is the update trigger, uploaded last.
+# Same scheme as zulkan's package-mac.sh, minus assets: the payload is the gzipped
+# binary and the gzipped game module (dust.wasm, which servers run and send to
+# clients), each with a sha256 file that is its update trigger, uploaded last.
 set -eu
 
 PUBLIC="${FPS16_PUBLIC:-http://game.stackpoint.se/fps16}"
@@ -35,9 +36,14 @@ strip "$bin"
 codesign --force --sign - "$bin"
 codesign --verify "$bin"
 
-shasum -a 256 "$bin" | cut -d' ' -f1 > "$app/Contents/Resources/fps16.sha256"
-cp "$app/Contents/Resources/fps16.sha256" "$out/fps16.sha256"
-gzip -c "$bin" > "$out/fps16.gz"
+cargo build -p dust --release --target wasm32-unknown-unknown
+cp target/wasm32-unknown-unknown/release/dust.wasm "$app/Contents/Resources/dust.wasm"
+
+for f in fps16 dust.wasm; do
+    shasum -a 256 "$app/Contents/Resources/$f" | cut -d' ' -f1 > "$app/Contents/Resources/$f.sha256"
+    cp "$app/Contents/Resources/$f.sha256" "$out/$f.sha256"
+    gzip -c "$app/Contents/Resources/$f" > "$out/$f.gz"
+done
 
 default_host="$(ipconfig getifaddr en0 || echo 127.0.0.1):5000"
 
@@ -53,14 +59,16 @@ bundled=$(cd "$(dirname "$0")/../Resources" && pwd)
 xattr -dr com.apple.quarantine "$(cd "$(dirname "$0")/../.." && pwd)" 2>/dev/null || true
 # The game runs from a writable copy: an app opened from Downloads can be translocated by macOS to a read-only path,
 # where updating the binary inside the bundle silently fails.
-# ponytail: the bundled binary only seeds a missing copy; a newer re-downloaded app is picked up via the update check.
+# ponytail: the bundled files only seed missing copies; a newer re-downloaded app is picked up via the update check.
 data="$HOME/Library/Application Support/fps16"
 mkdir -p "$data"
-if [ ! -x "$data/fps16" ]; then
-    cp "$bundled/fps16" "$data/fps16"
-    cp "$bundled/fps16.sha256" "$data/fps16.sha256"
-    chmod u+w "$data/fps16" "$data/fps16.sha256"
-fi
+for f in fps16 dust.wasm; do
+    if [ ! -f "$data/$f" ]; then
+        cp "$bundled/$f" "$data/$f"
+        cp "$bundled/$f.sha256" "$data/$f.sha256"
+        chmod u+w "$data/$f" "$data/$f.sha256"
+    fi
+done
 cd "$data"
 
 if [ ! -t 1 ]; then
@@ -69,25 +77,26 @@ if [ ! -t 1 ]; then
     echo "=== $(date) ==="
 fi
 
-# Any failure keeps the current binary: a flaky connection must not break the install.
+# Any failure keeps the current file: a flaky connection must not break the install.
 update() {
     [ -n "$UPDATE_BASE" ] || return 0
-    published=$(curl -fsS -m 10 "$UPDATE_BASE/fps16.sha256" 2>/dev/null) || return 0
+    published=$(curl -fsS -m 10 "$UPDATE_BASE/$1.sha256" 2>/dev/null) || return 0
     [ -n "$published" ] || return 0
-    [ "$published" = "$(cat fps16.sha256 2>/dev/null || true)" ] && return 0
-    echo "==> updating to $published"
-    if ! curl -fsS -m 600 "$UPDATE_BASE/fps16.gz" | gunzip > fps16.part; then
-        echo "    download failed, playing current build" >&2; rm -f fps16.part; return 0
+    [ "$published" = "$(cat "$1.sha256" 2>/dev/null || true)" ] && return 0
+    echo "==> updating $1 to $published"
+    if ! curl -fsS -m 600 "$UPDATE_BASE/$1.gz" | gunzip > "$1.part"; then
+        echo "    download failed, keeping current $1" >&2; rm -f "$1.part"; return 0
     fi
-    if [ "$(shasum -a 256 fps16.part | cut -d' ' -f1)" != "$published" ]; then
-        echo "    checksum mismatch, playing current build"; rm -f fps16.part; return 0
+    if [ "$(shasum -a 256 "$1.part" | cut -d' ' -f1)" != "$published" ]; then
+        echo "    checksum mismatch, keeping current $1"; rm -f "$1.part"; return 0
     fi
-    chmod +x fps16.part
-    mv fps16.part fps16
-    printf '%s\n' "$published" > fps16.sha256
-    echo "==> updated"
+    chmod +x "$1.part"
+    mv "$1.part" "$1"
+    printf '%s\n' "$published" > "$1.sha256"
+    echo "==> updated $1"
 }
-update
+update fps16
+update dust.wasm
 
 if [ $# -gt 0 ]; then exec ./fps16 "$@"; fi
 
@@ -127,12 +136,12 @@ cat > "$app/Contents/Info.plist" <<'EOF'
 EOF
 
 (cd "$out" && ditto -ck --sequesterRsrc --keepParent fps16.app fps16-mac.zip)
-du -sh "$out/fps16-mac.zip" "$out/fps16.gz"
+du -sh "$out/fps16-mac.zip" "$out/fps16.gz" "$out/dust.wasm.gz"
 
 if [ "${1:-}" = publish ]; then
     echo "==> publishing to $HOST:$REMOTE"
     ssh "$HOST" "mkdir -p $REMOTE"
-    rsync -az "$out/fps16.gz" "$out/fps16-mac.zip" "$HOST:$REMOTE/"
-    rsync -az "$out/fps16.sha256" "$HOST:$REMOTE/"
+    rsync -az "$out/fps16.gz" "$out/dust.wasm.gz" "$out/fps16-mac.zip" "$HOST:$REMOTE/"
+    rsync -az "$out/fps16.sha256" "$out/dust.wasm.sha256" "$HOST:$REMOTE/"
     echo "published: $PUBLIC/fps16-mac.zip"
 fi

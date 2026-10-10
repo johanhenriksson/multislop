@@ -1,5 +1,7 @@
 use crate::net::*;
 use sdk::{Event, ServerGame, TICK_HZ, decode, encode};
+use sha2::{Digest, Sha256};
+use std::hash::BuildHasher;
 use std::collections::{HashMap, VecDeque};
 use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
@@ -32,10 +34,14 @@ const STATS_EVERY: Duration = Duration::from_secs(5);
 /// Above this many queued inputs, simulate two per tick to catch up. Each queued input is a tick of added latency.
 const QUEUE_CATCH_UP: usize = INPUT_EVERY as usize + 1;
 
-pub fn run(port: u16, mut game: Box<dyn ServerGame>) {
+/// Runs `game`; `module` is its wasm, sent to clients that don't have it yet.
+pub fn run(port: u16, mut game: Box<dyn ServerGame>, module: Vec<u8>) {
     let sock = UdpSocket::bind(("0.0.0.0", port)).expect("bind");
     println!("server build {BUILD} listening on :{port}");
     let mut rejected = std::collections::HashSet::new();
+    let (hash, size) = (Sha256::digest(&module).into(), module.len() as u32);
+    // Cookies are a keyed hash of the address, so a spoofed hello can't make us send chunks to someone else.
+    let cookies = std::hash::RandomState::new();
 
     let mut clients: HashMap<SocketAddr, Client> = HashMap::new();
     let mut tick: u32 = 0;
@@ -53,13 +59,29 @@ pub fn run(port: u16, mut game: Box<dyn ServerGame>) {
             sock.set_read_timeout(Some(wait)).unwrap();
             let Ok((n, addr)) = sock.recv_from(&mut buf) else { continue };
             let build = postcard::take_from_bytes::<&str>(&buf[..n]).map_or("unknown", |(b, _)| b);
-            let packet = (build == BUILD).then(|| decode::<InputPacket>(&buf[..n])).flatten();
-            let Some(InputPacket { time, inputs, name, ping, .. }) = packet else {
+            let packet = (build == BUILD).then(|| decode::<ClientPacket>(&buf[..n])).flatten();
+            let Some(ClientPacket { msg, .. }) = packet else {
                 if rejected.insert(addr) {
                     println!("rejected {addr}: client is build {build}, server is build {BUILD}");
                 }
                 let _ = sock.send_to(&encode(&ServerMsg::WrongBuild { server: BUILD.into() }), addr);
                 continue;
+            };
+            let cookie = cookies.hash_one(addr);
+            let InputPacket { time, inputs, name, ping } = match msg {
+                ClientMsg::Hello { .. } if n >= HELLO_SIZE => {
+                    let _ = sock.send_to(&encode(&ServerMsg::Game { hash, size, cookie }), addr);
+                    continue;
+                }
+                ClientMsg::Chunks { cookie: c, chunks } if c == cookie => {
+                    for index in chunks.into_iter().take(CHUNKS_PER_REQUEST) {
+                        let Some(data) = module.chunks(CHUNK).nth(index as usize) else { continue };
+                        let _ = sock.send_to(&encode(&ServerMsg::Chunk { index, data: data.to_vec() }), addr);
+                    }
+                    continue;
+                }
+                ClientMsg::Input(p) => p,
+                _ => continue,
             };
             let c = clients.entry(addr).or_insert_with(|| {
                 let id = game.connect(&name);

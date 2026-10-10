@@ -16,6 +16,35 @@ pub enum ServerMsg {
     /// Keep as the first variant so its encoding never changes between builds.
     WrongBuild { server: String },
     Snapshot(Snapshot),
+    /// The game this server runs: the sha256 and size of its module. `cookie` must come back with chunk requests, so
+    /// only the real sender of a hello can make the server send chunks.
+    Game { hash: [u8; 32], size: u32, cookie: u64 },
+    Chunk { index: u32, data: Vec<u8> },
+}
+
+/// Module bytes per `ServerMsg::Chunk`, small enough for one unfragmented UDP packet.
+pub const CHUNK: usize = 1200;
+/// Most chunks sent for one request.
+pub const CHUNKS_PER_REQUEST: usize = 32;
+/// A hello must be at least this big, so the answer is never larger than the question.
+pub const HELLO_SIZE: usize = 64;
+
+/// Every packet a client sends.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ClientPacket {
+    /// Must stay the first field: the server reads it alone before decoding the rest, so a mismatch is caught even
+    /// when the rest of the format has changed.
+    pub build: String,
+    pub msg: ClientMsg,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum ClientMsg {
+    /// Which game do you run? Padded up to `HELLO_SIZE`.
+    Hello { pad: Vec<u8> },
+    /// Module chunks wanted, by index.
+    Chunks { cookie: u64, chunks: Vec<u32> },
+    Input(InputPacket),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -44,9 +73,6 @@ pub struct InputMsg {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct InputPacket {
-    /// Must stay the first field: the server reads it alone before decoding the rest, so a mismatch is caught even
-    /// when the rest of the format has changed.
-    pub build: String,
     /// Player name: the logged-in user on the client's machine.
     pub name: String,
     /// The client's measured round trip, shown on everyone's scoreboard.
