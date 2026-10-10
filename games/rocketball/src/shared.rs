@@ -1,5 +1,5 @@
-//! What client and server both run: movement (the arena's: Quake style, fast and floaty), the rocket launcher, the
-//! ball's physics and the wire format.
+//! What client and server both run: movement (the arena's: Quake style, fast and floaty), the rocket launcher and the
+//! AWP, the ball's physics and the wire format.
 
 use crate::map::{MAP, WALL_TOP};
 use glam::Vec3;
@@ -52,7 +52,7 @@ pub const BLAST_RADIUS: f32 = 4.5;
 pub const KNOCKBACK: f32 = 11.0;
 const KNOCK_LIFT: f32 = 0.4;
 
-/// The only weapon: a straight rocket that goes off on whatever it touches. Hold fire to keep shooting.
+/// A straight rocket that goes off on whatever it touches. Hold fire to keep shooting.
 pub const ROCKET: Ability = Ability {
     trigger: Trigger::Auto,
     cost: Cost::Ammo { mag: 4, reserve: SPAWN_RESERVE, reload: 2.0 },
@@ -61,6 +61,47 @@ pub const ROCKET: Ability = Ability {
     delivery: Delivery::Projectile { speed: ROCKET_SPEED, gravity: 0.0, bounce: 0.0, fuse: ROCKET_FUSE, contact: true },
     payload: Payload::Explode { damage: BLAST_DAMAGE, radius: BLAST_RADIUS, armor_pen: 1.0 - ARMOR_TAKES },
 };
+
+/// Dust's AWP, for picking off attackers from the back: one body shot kills without armor. Unscoped spread; scoped
+/// is `AWP_SCOPED_SPREAD`.
+pub const AWP: Ability = Ability {
+    trigger: Trigger::Semi,
+    cost: Cost::Ammo { mag: 5, reserve: SPAWN_ROUNDS, reload: 3.0 },
+    cycle: 1.45,
+    accuracy: Accuracy { spread: 0.06, moving: 0.1, airborne: 0.12, kick: 0.03 },
+    delivery: Delivery::Hitscan { range: RANGE, falloff: 1.0 },
+    payload: Payload::Damage { amount: AWP_DAMAGE, armor_pen: 1.0 - ARMOR_TAKES },
+};
+pub const AWP_DAMAGE: f32 = 115.0;
+pub const AWP_SCOPED_SPREAD: f32 = 0.0005;
+/// Running speed kept while scoped in.
+const SCOPED_SPEED: f32 = 0.6;
+/// AWP rounds carried besides the magazine.
+pub const SPAWN_ROUNDS: u16 = 10;
+pub const MAX_ROUNDS: u16 = 20;
+/// An AWP round into the ball sends it on at this speed, along the shot.
+pub const SHOT_PUSH: f32 = 10.0;
+/// Seconds to take out the other gun.
+pub const DRAW_SECS: f32 = 0.6;
+/// How far back AWP shots are lag compensated.
+pub const MAX_REWIND_TICKS: f32 = (0.4 * TICK_HZ) as f32;
+
+/// What a player holds. Everyone carries both: the launcher to play the ball, the AWP to guard from the back.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Gun {
+    #[default]
+    Launcher,
+    Awp,
+}
+
+impl Gun {
+    pub fn ability(self) -> &'static Ability {
+        match self {
+            Gun::Launcher => &ROCKET,
+            Gun::Awp => &AWP,
+        }
+    }
+}
 
 pub const BALL_RADIUS: f32 = 1.2;
 const BALL_GRAVITY: f32 = 9.0;
@@ -122,7 +163,7 @@ pub enum Item {
     Health,
     /// +50 armor up to 100.
     Armor,
-    /// +8 rockets in reserve up to 16.
+    /// +8 rockets in reserve up to 16, and +5 AWP rounds up to 20.
     Rockets,
     /// +100 HP up to 200.
     Mega,
@@ -158,15 +199,22 @@ pub struct Input {
     /// Stamped by the host, not sent as part of the input.
     #[serde(skip)]
     pub seq: u32,
+    /// The server tick the client was seeing, stamped by the host like `seq`; AWP shots are rewound to it.
+    #[serde(skip)]
+    pub view_tick: f32,
     pub forward: f32,
     pub right: f32,
     pub yaw: f32,
     pub pitch: f32,
     /// Held: jumps again on every landing.
     pub jump: bool,
-    /// Held: fires a rocket every cycle.
+    /// Held: fires a rocket every cycle, or the AWP once per press.
     pub fire: bool,
     pub reload: bool,
+    /// The gun wanted in hand; a change takes `DRAW_SECS`.
+    pub gun: Gun,
+    /// Scoped in (AWP).
+    pub zoom: bool,
 }
 
 /// Position and view travel in the player's `sdk::Entity`, so they're skipped here.
@@ -183,8 +231,11 @@ pub struct PlayerState {
     pub pitch: f32,
     pub on_ground: bool,
     pub hands: Hands,
+    pub gun: Gun,
     /// Rockets (loaded, reserve).
     pub ammo: (u8, u16),
+    /// AWP rounds (loaded, reserve).
+    pub rounds: (u8, u16),
     /// Kickoff countdown, goal and end screens: look around, nothing else. Part of the state so prediction agrees
     /// with the server.
     pub frozen: bool,
@@ -193,7 +244,16 @@ pub struct PlayerState {
 impl PlayerState {
     /// Standing at `pos` facing `yaw` with a fresh load.
     pub fn spawn(pos: Vec3, yaw: f32, frozen: bool) -> PlayerState {
-        PlayerState { pos, yaw, ammo: (ROCKET.full_ammo().unwrap().0, SPAWN_RESERVE), frozen, ..Default::default() }
+        let (ammo, rounds) = ((ROCKET.full_ammo().unwrap().0, SPAWN_RESERVE), AWP.full_ammo().unwrap());
+        PlayerState { pos, yaw, ammo, rounds, frozen, ..Default::default() }
+    }
+
+    /// The held gun's (loaded, reserve).
+    pub fn loaded(&self) -> (u8, u16) {
+        match self.gun {
+            Gun::Launcher => self.ammo,
+            Gun::Awp => self.rounds,
+        }
     }
 }
 
@@ -282,6 +342,8 @@ pub enum HitKind {
     Push,
     /// Thrown by a blast.
     Blast,
+    /// Hit by an AWP round.
+    Shot,
 }
 
 // ponytail: events are sent once, so a dropped snapshot loses that effect. Resend for a few ticks if that shows.
@@ -289,6 +351,8 @@ pub enum HitKind {
 pub enum Event {
     /// A rocket left `from` going `dir`: the launch flash and sound. The rocket itself is an entity.
     Launch { shooter: u32, from: Vec3, dir: Vec3 },
+    /// An AWP round from `from` that stopped at `to`.
+    Shot { shooter: u32, from: Vec3, to: Vec3 },
     /// A rocket went off; `team` is its shooter's.
     Explosion { pos: Vec3, radius: f32, team: Team },
     /// The ball was sent off at `strength` m/s, from `pos` (its center).
@@ -302,7 +366,7 @@ pub enum Event {
 /// What happened to a player in one tick, for effects and sounds.
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct Step {
-    /// A rocket left, this way.
+    /// The held gun went off, this way.
     pub fired: Option<Vec3>,
     pub jumped: bool,
     /// Thrown by a jump pad.
@@ -335,11 +399,16 @@ pub fn aim_dir(s: &PlayerState) -> Vec3 {
     look_rot(s.yaw, s.pitch) * Vec3::NEG_Z
 }
 
-/// Advances one tick of movement and the launcher.
+/// Advances one tick of movement and the gun in hand.
 pub fn step_player(s: &mut PlayerState, inp: &Input) -> Step {
     s.yaw = inp.yaw;
     s.pitch = inp.pitch.clamp(-1.55, 1.55);
     let mut step = Step::default();
+    if inp.gun != s.gun {
+        s.gun = inp.gun;
+        s.hands.draw(DRAW_SECS);
+    }
+    let scoped = s.gun == Gun::Awp && inp.zoom;
 
     let fwd = Vec3::new(-s.yaw.sin(), 0.0, -s.yaw.cos());
     let right = Vec3::new(s.yaw.cos(), 0.0, -s.yaw.sin());
@@ -361,19 +430,29 @@ pub fn step_player(s: &mut PlayerState, inp: &Input) -> Step {
             let drop = speed.max(STOP_SPEED) * FRICTION * DT;
             s.vel *= (speed - drop).max(0.0) / speed;
         }
-        accelerate(&mut s.vel, wish, MAX_SPEED, ACCEL);
+        accelerate(&mut s.vel, wish, MAX_SPEED * if scoped { SCOPED_SPEED } else { 1.0 }, ACCEL);
     } else {
         accelerate(&mut s.vel, wish, AIR_CAP, AIR_ACCEL);
     }
     s.vel.y -= GRAVITY * DT;
     move_and_collide(s);
 
-    let (mut hands, mut ammo) = (s.hands, s.ammo);
-    if hands.tick(&ROCKET, Some(&mut ammo), inp.fire, inp.reload, s.frozen).is_some() {
-        step.fired = Some(aim_dir(s));
+    let (mut hands, mut ammo) = (s.hands, s.loaded());
+    if hands.tick(s.gun.ability(), Some(&mut ammo), inp.fire, inp.reload, s.frozen).is_some() {
+        step.fired = Some(match s.gun {
+            Gun::Launcher => aim_dir(s),
+            Gun::Awp => {
+                let speed = (s.vel.with_y(0.0).length() / MAX_SPEED).min(1.0);
+                hands.aim(&AWP, scoped.then_some(AWP_SCOPED_SPREAD), speed, s.on_ground, s.yaw, s.pitch, inp.seq)
+            }
+        });
     }
     step.reloaded = s.hands.reloading == 0 && hands.reloading > 0;
-    (s.hands, s.ammo) = (hands, ammo);
+    s.hands = hands;
+    match s.gun {
+        Gun::Launcher => s.ammo = ammo,
+        Gun::Awp => s.rounds = ammo,
+    }
     step
 }
 
@@ -654,6 +733,23 @@ mod tests {
         // 4 at 0.8 s apart (2.4 s), a 2 s reload, then the next load.
         assert_eq!((shots, steps.iter().filter(|s| s.reloaded).count()), (6, 1));
         assert_eq!(s.ammo.1, SPAWN_RESERVE - 4);
+    }
+
+    #[test]
+    fn switching_to_the_awp_takes_a_draw_then_fires_once_per_press() {
+        let mut s = PlayerState::spawn(MAP.spawns[0][0], 0.0, false);
+        let awp = Input { gun: Gun::Awp, zoom: true, ..Default::default() };
+        let fire = Input { fire: true, ..awp };
+        for _ in 0..secs(DRAW_SECS) - 2 {
+            step_player(&mut s, &awp);
+        }
+        assert!(step_player(&mut s, &fire).fired.is_none(), "still drawing");
+        for _ in 0..2 {
+            step_player(&mut s, &awp);
+        }
+        let shots = (0..secs(3.0)).filter(|_| step_player(&mut s, &fire).fired.is_some()).count();
+        assert_eq!(shots, 1, "held: one shot");
+        assert_eq!((s.rounds.0, s.ammo.0), (AWP.full_ammo().unwrap().0 - 1, 4));
     }
 
     #[test]

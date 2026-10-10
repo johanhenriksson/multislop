@@ -1,5 +1,5 @@
-//! Sound effects synthesized at startup, so the game needs no asset files. The launcher, explosion, reload, hit and
-//! hurt sounds are dust's; the stadium (crowd, horn, whistle) and the ball are new.
+//! Sound effects synthesized at startup, but for dust's recorded AWP. The launcher, explosion, reload, hit and hurt
+//! sounds are dust's; the stadium (crowd, horn, whistle) and the ball are new.
 
 use std::f32::consts::TAU;
 
@@ -11,6 +11,11 @@ pub fn launch() -> Vec<u8> {
     let mut s = shot(&mut rng, 0.9, 0.2, 42.0, 1.2).echo(0.2, 0.35, 2);
     s.normalize(1.0);
     wav(&s.0)
+}
+
+/// Dust's AWP, the real thing from the soundboard.
+pub fn awp() -> Vec<u8> {
+    include_bytes!("../../../dust/assets/sfx/awp.wav").to_vec()
 }
 
 /// Low-passed noise with a long tail.

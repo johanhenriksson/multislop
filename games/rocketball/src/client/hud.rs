@@ -1,9 +1,9 @@
-//! The HUD: a Rocket League style score bug with the clock, health and armor, rockets loaded and in reserve, the
-//! crosshair, a marker over the ball, the kill feed, big centered messages (kickoff count, goals, the winner), the
+//! The HUD: a Rocket League style score bug with the clock, health and armor, the gun in hand with its load and
+//! reserve, the crosshair or the AWP's scope, a marker over the ball, the kill feed, big centered messages (kickoff count, goals, the winner), the
 //! respawn count and the scoreboard (Tab, and at the end of a match).
 
 use super::{BallClient, ORANGE, BLUE, team_text};
-use crate::shared::{BALL_RADIUS, NetPlayer, Phase, Team};
+use crate::shared::{BALL_RADIUS, Gun, NetPlayer, Phase, Team};
 use glam::Vec3;
 use sdk::client::*;
 
@@ -23,7 +23,10 @@ pub struct Hud {
     overtime: u32,
     health: u32,
     armor: u32,
-    pips: [u32; 4],
+    /// One per round in the biggest magazine (the AWP's 5).
+    pips: [u32; 5],
+    crosshair: u32,
+    scope: u32,
     reserve: u32,
     reload: u32,
     marker: u32,
@@ -98,8 +101,8 @@ impl BallClient {
         s.ui(Some(h.overtime), UiNode { text: Some(Text::new("OVERTIME", 15.0, Color::WHITE)), ..node() });
 
         // Crosshair: a dot and four ticks around the exact center.
-        let layer = s.ui(None, screen());
-        let anchor = s.ui(Some(layer), UiNode { width: px(0.0), height: px(0.0), ..node() });
+        h.crosshair = s.ui(None, screen());
+        let anchor = s.ui(Some(h.crosshair), UiNode { width: px(0.0), height: px(0.0), ..node() });
         let tick = |left: f32, top: f32, w: f32, h: f32| UiNode {
             absolute: true,
             left: px(left),
@@ -112,6 +115,20 @@ impl BallClient {
         };
         for t in [tick(-1.0, -1.0, 2.0, 2.0), tick(-13.0, -1.0, 7.0, 2.0), tick(6.0, -1.0, 7.0, 2.0), tick(-1.0, -13.0, 2.0, 7.0), tick(-1.0, 6.0, 2.0, 7.0)] {
             s.ui(Some(anchor), t);
+        }
+
+        // Dust's scope: a round lens whose huge black outline blacks out the rest of the screen, with thin crosshair
+        // lines through it.
+        h.scope = s.ui(None, UiNode { hidden: true, ..screen() });
+        let lens = UiNode { width: vh(96.0), height: vh(96.0), radius: Corners::all(1e5), outline: Some((4000.0, Color::BLACK)), ..node() };
+        let lens = s.ui(Some(h.scope), lens);
+        for horizontal in [true, false] {
+            let hair = if horizontal {
+                UiNode { left: percent(0.0), top: percent(50.0), width: percent(100.0), height: px(2.0), margin: Edges::top(-1.0), ..node() }
+            } else {
+                UiNode { left: percent(50.0), top: percent(0.0), width: px(2.0), height: percent(100.0), margin: Edges::left(-1.0), ..node() }
+            };
+            s.ui(Some(lens), UiNode { absolute: true, background: Color::BLACK, ..hair });
         }
 
         // Health and armor, bottom left.
@@ -136,12 +153,12 @@ impl BallClient {
         s.ui(Some(vitals), shield);
         h.armor = s.ui(Some(vitals), UiNode { width: px(76.0), ..text(42.0, TEXT) });
 
-        // Rockets, bottom right: the load as pips, the reserve as a number.
+        // The gun in hand, bottom right: its name, the load as pips, the reserve as a number.
         let reload = UiNode { absolute: true, right: px(28.0), bottom: px(86.0), ..text(17.0, ROCKET_LIT) };
         h.reload = s.ui(None, reload);
         let ammo = s.ui(None, panel(None));
         let pips = s.ui(Some(ammo), UiNode { gap: 5.0, align: Align::Center, ..node() });
-        h.pips = [0; 4].map(|_| s.ui(Some(pips), UiNode { width: px(11.0), height: px(32.0), radius: Corners { top_left: 6.0, top_right: 6.0, bottom_left: 2.0, bottom_right: 2.0 }, background: ROCKET_LIT, ..node() }));
+        h.pips = [0; 5].map(|_| s.ui(Some(pips), UiNode { width: px(11.0), height: px(32.0), radius: Corners { top_left: 6.0, top_right: 6.0, bottom_left: 2.0, bottom_right: 2.0 }, background: ROCKET_LIT, ..node() }));
         s.ui(Some(ammo), UiNode { width: px(2.0), height: px(32.0), background: DIM, ..node() });
         h.reserve = s.ui(Some(ammo), UiNode { width: px(54.0), ..text(42.0, TEXT) });
 
@@ -208,10 +225,14 @@ impl BallClient {
             (t.value, t.color) = (if alive { hp.to_string() } else { "0".into() }, low(hp, 25));
         });
         s.ui_text(h.armor, armor.to_string());
-        let (loaded, reserve) = self.pred.ammo;
+        let (gun, (loaded, reserve)) = (self.pred.gun, self.pred.loaded());
+        let mag = gun.ability().full_ammo().unwrap().0;
         for (i, &pip) in h.pips.iter().enumerate() {
-            s.ui_set(pip, |n| n.background = if (i as u8) < loaded && alive { ROCKET_LIT } else { DIM });
+            s.ui_set(pip, |n| (n.background, n.hidden) = (if (i as u8) < loaded && alive { ROCKET_LIT } else { DIM }, i as u8 >= mag));
         }
+        let scoped = self.zoom && alive;
+        s.ui_hidden(h.scope, !scoped);
+        s.ui_hidden(h.crosshair, scoped);
         s.ui_set(h.reserve, |n| {
             let t = n.text.as_mut().unwrap();
             (t.value, t.color) = (reserve.to_string(), if reserve == 0 { LOW } else { TEXT });
@@ -220,9 +241,10 @@ impl BallClient {
         let reload = match () {
             _ if !alive => "",
             _ if reloading => "RELOADING",
-            _ if loaded == 0 && reserve == 0 => "OUT OF ROCKETS",
+            _ if loaded == 0 && reserve == 0 => "OUT OF AMMO",
             _ if loaded == 0 => "R TO RELOAD",
-            _ => "",
+            _ if gun == Gun::Awp => "2  AWP",
+            _ => "1  LAUNCHER",
         };
         s.ui_text(h.reload, reload);
 
