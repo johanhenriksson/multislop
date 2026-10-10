@@ -520,7 +520,7 @@ pub fn browse(
         hoverable(commands.spawn((ChildOf(options), tile.clone(), children![text(label.into(), 15.0, INK)])), base, CARD_HOT, false)
             .observe(|_: On<PointerClick>, mut b: ResMut<Browser>| (b.rotate, b.shown_games) = (!b.rotate, None));
         if b.rotate {
-            commands.spawn((ChildOf(*host_list), text("Each game in turn: 10 rounds, 3 races or 3 matches.".into(), 13.0, FAINT)));
+            commands.spawn((ChildOf(*host_list), text("Each game in turn: 10 rounds, 3 races or 2-3 matches.".into(), 13.0, FAINT)));
         }
         match &games {
             None => _ = commands.spawn((ChildOf(*host_list), tile, BackgroundColor(CARD), children![text("Finding games...".into(), 16.0, DIM)])),
