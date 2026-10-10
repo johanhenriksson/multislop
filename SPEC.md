@@ -44,10 +44,14 @@ Deadline: playable before 00:00. One weapon, one simple map.
 
 ## Weapons and economy (`src/weapons.rs`, CS 1.6 stats)
 - Knife (always), Glock (T) / USP (CT) free, Deagle $650, MP5 $1500, AK-47 (T) $2500 / M4A1 (CT) $3100, AWP $4750
-  (right-click scope), Kevlar+Helmet $1000, HE grenade $300, Rocket Launcher $13000. Buy with B then 1-6 during freeze + 20 s, within 15 m
+  (right-click scope), Kevlar+Helmet $1000, HE grenade $300, Flashbang $200, Rocket Launcher $13000. Buy with B then 1-8 during freeze + 20 s, within 15 m
   of your spawn.
 - HE grenade: hold fire to wind up (harder throw the longer, up to 0.6 s), release to throw (up to 25 m/s); it
   bounces and goes off after 2 s, up to 98 damage to enemies in the open within 8.9 m. Survivors keep it.
+- Flashbang ($200 each, up to 2, sharing the grenade slot with the HE): thrown like the HE, goes off after 1.5 s
+  with a bang and a white burst, blinding everyone within 25 m with a line of sight to it (teammates and thrower
+  too) for up to 4 s looking at it, far less facing away; the screen whites out and fades with a ringing tone, and
+  blinded bots hold fire with their aim drifting.
 - Rocket launcher (primary, 4 + 16 rockets, one every 0.7 s, 3 s reload, 75% move speed): a straight 35 m/s rocket
   that explodes on touching a wall, the floor or an enemy, up to 250 damage within 7 m; smoke trail, launch flash and sound for all,
   fireball and smoke on impact (explosions from grenades too).

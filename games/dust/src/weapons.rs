@@ -17,6 +17,7 @@ pub enum Weapon {
     Awp,
     He,
     Rocket,
+    Flash,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -156,6 +157,21 @@ const HE: Spec = gun(
         payload: Payload::Explode { damage: 98.0, radius: 8.9, armor_pen: 0.5 },
     },
 );
+/// Thrown like the HE, but goes off in a blinding flash. Two can be carried, bought one at a time.
+const FLASH: Spec = gun(
+    "Flashbang",
+    200,
+    None,
+    Slot::Grenade,
+    Ability {
+        trigger: Trigger::Charge { full: 0.6 },
+        cost: Cost::Ammo { mag: 2, reserve: 0, reload: 0.0 },
+        cycle: 0.5,
+        accuracy: Accuracy { spread: 0.0, moving: 0.0, airborne: 0.0, kick: 0.0 },
+        delivery: Delivery::Projectile { speed: 25.0, gravity: 20.3, bounce: 0.45, fuse: 1.5, contact: false },
+        payload: Payload::Flash { radius: 25.0, secs: 4.0 },
+    },
+);
 /// A rocket launcher: four rockets to a load, flying straight and fast and going off on whatever they touch.
 const ROCKET: Spec = Spec {
     speed: 0.75,
@@ -175,7 +191,7 @@ const ROCKET: Spec = Spec {
     )
 };
 
-pub const ALL_WEAPONS: [Weapon; 10] = [
+pub const ALL_WEAPONS: [Weapon; 11] = [
     Weapon::Knife,
     Weapon::Glock,
     Weapon::Usp,
@@ -186,6 +202,7 @@ pub const ALL_WEAPONS: [Weapon; 10] = [
     Weapon::Awp,
     Weapon::He,
     Weapon::Rocket,
+    Weapon::Flash,
 ];
 
 pub const AWP_SCOPED_SPREAD: f32 = 0.0005;
@@ -207,6 +224,7 @@ impl Weapon {
             Weapon::Awp => &AWP,
             Weapon::He => &HE,
             Weapon::Rocket => &ROCKET,
+            Weapon::Flash => &FLASH,
         }
     }
 
@@ -242,10 +260,11 @@ pub enum Buy {
 }
 
 /// The buy menu, numbered from 1. The rifle entry depends on the team.
-pub fn buy_menu(team: Team) -> [Buy; 7] {
+pub fn buy_menu(team: Team) -> [Buy; 8] {
     let rifle = if team == Team::T { Weapon::Ak47 } else { Weapon::M4a1 };
     let guns = [Weapon::Deagle, Weapon::Mp5, rifle, Weapon::Awp].map(Buy::Weapon);
-    [guns[0], guns[1], guns[2], guns[3], Buy::Armor, Buy::Weapon(Weapon::He), Buy::Weapon(Weapon::Rocket)]
+    let more = [Weapon::He, Weapon::Flash, Weapon::Rocket].map(Buy::Weapon);
+    [guns[0], guns[1], guns[2], guns[3], Buy::Armor, more[0], more[1], more[2]]
 }
 
 impl Buy {

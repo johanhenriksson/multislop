@@ -29,6 +29,8 @@ struct Player {
     inputs: Vec<Input>,
     /// Bumped on every respawn; see `sdk::Entity::teleport`.
     teleport: u8,
+    /// Flashed: can't see (bots can't shoot) until this tick.
+    blind_until: u32,
     /// Server-controlled player filling a team slot.
     bot: Option<Bot>,
     name: String,
@@ -50,6 +52,7 @@ impl Player {
             radio_quiet_until: 0,
             inputs: Vec::new(),
             teleport: 0,
+            blind_until: 0,
             bot,
             name,
             ping: 0,
@@ -158,8 +161,8 @@ impl ServerGame for Dust {
             (g.id, self.next_id) = (self.next_id, self.next_id + 1);
             self.grenades.push(g);
         }
-        let mut booms = Vec::new();
-        update_grenades(&mut self.grenades, &mut self.players, self.tick, &mut self.hits, &mut booms);
+        let (mut booms, mut flashes) = (Vec::new(), Vec::new());
+        update_grenades(&mut self.grenades, &mut self.players, self.tick, &mut self.hits, &mut booms, &mut flashes);
         self.tick += 1;
         update_match(&mut self.m, &mut self.players, self.tick);
         drop_from_the_dead(&mut self.players, &alive, &mut dropped);
@@ -195,6 +198,10 @@ impl ServerGame for Dust {
         let mut events: Vec<sdk::Event> = self.shots.drain(..).map(|s| everyone(Event::Shot(s))).collect();
         events.extend(self.hits.drain(..).map(|h| everyone(Event::Hit(h))));
         events.extend(booms.into_iter().map(|(pos, radius)| everyone(Event::Explosion { pos, radius })));
+        for f in flashes {
+            events.push(everyone(Event::Flashbang { pos: f.pos }));
+            events.extend(f.blinded.into_iter().map(|(id, secs)| sdk::Event { to: Some(vec![id]), data: encode(&Event::Flashed { secs }) }));
+        }
         for r in self.radio.drain(..) {
             let Some(team) = self.players.get(&r.from).map(|c| c.team) else { continue };
             let to = self.players.values().filter(|c| c.team == team).map(|c| c.id).collect();
@@ -265,7 +272,12 @@ fn run_inputs(
     let callouts = [callout(Team::T), callout(Team::Ct)];
     for c in players.values_mut() {
         if let Some(bot) = &mut c.bot {
-            let inp = bot.think(c.id, &c.state, c.team, &game.round, &seen, callouts[c.team as usize], game.t_site, tick);
+            let mut inp = bot.think(c.id, &c.state, c.team, &game.round, &seen, callouts[c.team as usize], game.t_site, tick);
+            // Flashed: holds fire and the aim drifts.
+            if tick < c.blind_until {
+                inp.fire = false;
+                inp.yaw += (tick as f32 * 0.7 + c.id as f32).sin() * 0.03;
+            }
             if let Some(call) = bot.radio.take() {
                 radio.push(RadioCall { from: c.id, call });
             }
@@ -673,8 +685,15 @@ struct Grenade {
 }
 
 /// Moves grenades, and sets off those whose fuse has burnt: damage to enemies in the open within the radius.
-/// `booms` gets (where, radius) of each explosion.
-fn update_grenades(grenades: &mut Vec<Grenade>, players: &mut Players, tick: u32, hits: &mut Vec<Hit>, booms: &mut Vec<(Vec3, f32)>) {
+/// A flashbang that went off, and who it blinded for how long.
+#[derive(Default)]
+struct Flash {
+    pos: Vec3,
+    blinded: Vec<(u32, f32)>,
+}
+
+/// `booms` gets (where, radius) of each explosion, `flashes` each flashbang.
+fn update_grenades(grenades: &mut Vec<Grenade>, players: &mut Players, tick: u32, hits: &mut Vec<Hit>, booms: &mut Vec<(Vec3, f32)>, flashes: &mut Vec<Flash>) {
     for g in grenades.iter_mut() {
         let Delivery::Projectile { gravity, bounce, contact, .. } = g.weapon.ability().delivery else { continue };
         // Contact-fused: a direct hit on an enemy in the way this tick sets it off right there.
@@ -697,6 +716,10 @@ fn update_grenades(grenades: &mut Vec<Grenade>, players: &mut Players, tick: u32
     let (live, done): (Vec<Grenade>, Vec<Grenade>) = std::mem::take(grenades).into_iter().partition(|g| tick < g.fuse);
     *grenades = live;
     for g in done {
+        if let Payload::Flash { radius, secs } = g.weapon.ability().payload {
+            flashes.push(flash(players, g.pos, radius, secs, tick));
+            continue;
+        }
         let Payload::Explode { damage, radius, armor_pen } = g.weapon.ability().payload else { continue };
         booms.push((g.pos, radius));
         let team = players.get(&g.owner).map(|c| c.team);
@@ -717,6 +740,26 @@ fn update_grenades(grenades: &mut Vec<Grenade>, players: &mut Players, tick: u32
     }
 }
 
+/// Blinds everyone (thrower and teammates too) who has the flash in sight: longest looking right at it and up close.
+fn flash(players: &mut Players, at: Vec3, radius: f32, secs: f32, tick: u32) -> Flash {
+    let mut out = Flash { pos: at, blinded: vec![] };
+    for c in players.values_mut().filter(|c| c.hp > 0) {
+        let eye = eye(&c.state);
+        let (to, dist) = ((at - eye).normalize_or_zero(), at.distance(eye));
+        if dist > radius || trace_world(eye, to) < dist - 0.2 {
+            continue;
+        }
+        let facing = aim_dir(&c.state).dot(to);
+        let look = if facing > 0.5 { 1.0 } else if facing > -0.2 { 0.5 } else { 0.15 };
+        let blind = secs * look * (1.0 - 0.6 * dist / radius);
+        if blind > 0.3 {
+            c.blind_until = c.blind_until.max(tick + ticks(blind));
+            out.blinded.push((c.id, blind));
+        }
+    }
+    out
+}
+
 /// Spends money on a buy menu item if it's buy time and the player is near their spawn.
 fn try_buy(m: &Match, c: &mut Player, item: u8, tick: u32) {
     let buy_time = m.round.phase == Phase::Freeze || (m.round.phase == Phase::Live && tick < m.buy_until);
@@ -729,12 +772,14 @@ fn try_buy(m: &Match, c: &mut Player, item: u8, tick: u32) {
         Buy::Armor if c.armor >= 100 => return,
         Buy::Armor => c.armor = 100,
         Buy::Weapon(w) if w.spec().team.is_some_and(|t| t != c.team) => return,
+        // One at a time, up to as many as it carries, and one kind of grenade at a time.
         Buy::Weapon(w) if w.spec().slot == Slot::Grenade => {
-            if c.state.grenade.is_some() {
-                return;
+            let most = w.ability().full_ammo().map_or(1, |a| a.0);
+            match c.state.grenade {
+                None => (c.state.grenade, c.state.ammo[2]) = (Some(w), (1, 0)),
+                Some(g) if g == w && c.state.ammo[2].0 < most => c.state.ammo[2].0 += 1,
+                Some(_) => return,
             }
-            c.state.grenade = Some(w);
-            c.state.ammo[2] = w.ability().full_ammo().unwrap_or((1, 0));
         }
         Buy::Weapon(w) if w.spec().slot == Slot::Primary => {
             let secondary = c.state.secondary;
@@ -980,7 +1025,7 @@ mod tests {
             for inp in script {
                 player_mut(&mut players, 1).inputs.push(inp);
                 run_inputs(&m, &mut players, &history, tick, &mut vec![], &mut hits, &mut vec![], &mut rockets, &mut vec![]);
-                update_grenades(&mut rockets, &mut players, tick, &mut hits, &mut booms);
+                update_grenades(&mut rockets, &mut players, tick, &mut hits, &mut booms, &mut vec![]);
                 if !booms.is_empty() && boom_tick.is_none() {
                     boom_tick = Some(tick);
                 }
@@ -1049,6 +1094,34 @@ mod tests {
         assert_eq!(weapons, [Weapon::Awp, Weapon::He], "best gun and the grenade");
         drop_from_the_dead(&mut players, &[1], &mut dropped);
         assert_eq!(dropped.len(), 2, "nothing left to drop twice");
+    }
+
+    /// A flash blinds whoever can see it: longest looking straight at it, much less facing away, not at all behind
+    /// a wall. Teammates and the thrower too.
+    #[test]
+    fn flashbangs_blind_whoever_sees_them() {
+        let mut players = Players::new();
+        let start = yard();
+        let east = -std::f32::consts::FRAC_PI_2;
+        for (id, yaw) in [(1, east), (2, std::f32::consts::FRAC_PI_2), (3, east)] {
+            let mut c = client(id, Team::T);
+            (c.state.pos, c.state.yaw) = (start, yaw);
+            players.insert(id, c);
+        }
+        // Player 3 stands somewhere close but with a wall in the way.
+        let at = start + Vec3::new(6.0, 1.5, 0.0);
+        let cells = (0..MAP.depth()).flat_map(|z| (0..MAP.width()).map(move |x| (x, z))).filter(|&(x, z)| MAP.walkable(x, z));
+        let hidden = cells.map(|(x, z)| MAP.ground(x, z)).find(|g| {
+            let eye = *g + Vec3::Y * EYE;
+            g.distance(at) < 20.0 && trace_world(eye, (at - eye).normalize()) < eye.distance(at) - 1.0
+        });
+        player_mut(&mut players, 3).state.pos = hidden.unwrap();
+        let f = flash(&mut players, at, 25.0, 4.0, 100);
+        let blind = |id: u32| f.blinded.iter().find(|b| b.0 == id).map(|b| b.1);
+        let (looking, away) = (blind(1).unwrap(), blind(2).unwrap());
+        assert!(looking > 3.0 && away < looking / 3.0, "looking {looking} s, facing away {away} s");
+        assert_eq!(blind(3), None, "behind a wall");
+        assert!(player_mut(&mut players, 1).blind_until > 100 + ticks(3.0));
     }
 
     /// A crouched target is shorter: chest-high shots over it miss, its head is still a head, and the shooter's
@@ -1125,7 +1198,7 @@ mod tests {
         for inp in script {
             player_mut(&mut players, 1).inputs.push(inp);
             run_inputs(&m, &mut players, &history, tick, &mut vec![], &mut hits, &mut vec![], &mut grenades, &mut vec![]);
-            update_grenades(&mut grenades, &mut players, tick, &mut hits, &mut booms);
+            update_grenades(&mut grenades, &mut players, tick, &mut hits, &mut booms, &mut vec![]);
             tick += 1;
         }
         assert_eq!(booms.len(), 1, "one explosion");

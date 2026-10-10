@@ -262,6 +262,12 @@ fn parts(weapon: Weapon) -> Vec<(Shape, Finish)> {
             b([0.012, 0.03, 0.06], [0.0, 0.03, -0.03], 0.0, Steel),
             t(0.012, 0.005, [0.02, 0.035, -0.06], Steel),
         ],
+        // Flashbang: a pale canister with a steel spoon and pin.
+        Weapon::Flash => vec![
+            t(0.026, 0.1, [0.0, 0.0, -0.045], Silver),
+            b([0.012, 0.03, 0.06], [0.0, 0.028, -0.03], 0.0, Steel),
+            t(0.012, 0.005, [0.02, 0.033, -0.06], Steel),
+        ],
         // Rocket launcher: a fat olive tube with rings at both ends, two grips and a sight.
         Weapon::Rocket => vec![
             t(0.055, 0.95, [0.0, 0.03, -0.12], Green),
@@ -278,7 +284,7 @@ fn parts(weapon: Weapon) -> Vec<(Shape, Finish)> {
 /// the barrel for two-handed weapons. Forearms run back towards the bottom corners of the screen.
 fn hands(weapon: Weapon) -> Vec<(Shape, Finish)> {
     let grip = match weapon {
-        Weapon::Knife | Weapon::He => [0.0, 0.0, 0.03],
+        Weapon::Knife | Weapon::He | Weapon::Flash => [0.0, 0.0, 0.03],
         Weapon::Glock | Weapon::Usp | Weapon::Deagle => [0.0, -0.05, 0.03],
         _ => [0.0, -0.075, 0.075],
     };
@@ -293,7 +299,7 @@ fn hands(weapon: Weapon) -> Vec<(Shape, Finish)> {
         Weapon::Awp => Some(-0.3),
         Weapon::Rocket => Some(-0.26),
         Weapon::Glock | Weapon::Usp | Weapon::Deagle => Some(0.0),
-        Weapon::Knife | Weapon::He => None,
+        Weapon::Knife | Weapon::He | Weapon::Flash => None,
     };
     if let Some(z) = support {
         let y = if z == 0.0 { -0.06 } else { -0.05 };
@@ -314,7 +320,7 @@ pub fn barrel_length(weapon: Weapon) -> f32 {
         Weapon::Ak47 => 0.61,
         Weapon::M4a1 => 0.63,
         Weapon::Awp => 0.86,
-        Weapon::He => 0.1,
+        Weapon::He | Weapon::Flash => 0.1,
         Weapon::Rocket => 0.61,
     }
 }
@@ -322,7 +328,7 @@ pub fn barrel_length(weapon: Weapon) -> f32 {
 /// First-person position of each weapon's origin, relative to the camera.
 pub fn viewmodel_offset(weapon: Weapon) -> Vec3 {
     match weapon {
-        Weapon::Knife | Weapon::He => Vec3::new(0.22, -0.22, -0.34),
+        Weapon::Knife | Weapon::He | Weapon::Flash => Vec3::new(0.22, -0.22, -0.34),
         Weapon::Glock | Weapon::Usp | Weapon::Deagle => Vec3::new(0.19, -0.19, -0.4),
         Weapon::Awp => Vec3::new(0.21, -0.21, -0.12),
         _ => Vec3::new(0.23, -0.21, -0.26),

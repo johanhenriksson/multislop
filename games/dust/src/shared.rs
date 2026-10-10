@@ -214,6 +214,10 @@ pub enum Event {
     /// Sent to the caller's team only.
     Radio(RadioCall),
     Explosion { pos: Vec3, radius: f32 },
+    /// A flashbang going off.
+    Flashbang { pos: Vec3 },
+    /// Sent to whoever it blinded, for how long.
+    Flashed { secs: f32 },
 }
 
 /// Client-side prediction of our own player: one input on top of `me`. Returns the use that went off, if any.

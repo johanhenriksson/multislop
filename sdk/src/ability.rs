@@ -57,6 +57,8 @@ pub enum Payload {
     Damage { amount: f32, armor_pen: f32 },
     /// Full damage at the center, falling off to nothing at `radius`.
     Explode { damage: f32, radius: f32, armor_pen: f32 },
+    /// A blinding flash: up to `secs` for anyone within `radius` who can see it, less when facing away.
+    Flash { radius: f32, secs: f32 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

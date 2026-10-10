@@ -35,7 +35,7 @@ pub fn gunshot(weapon: Weapon) -> Vec<u8> {
     let mut rng = 0xC0FF_EE11u32 ^ weapon as u32;
     let mut s = match weapon {
         // A swing for both: the knife slashes, the grenade is thrown.
-        Weapon::Knife | Weapon::He => return knife(),
+        Weapon::Knife | Weapon::He | Weapon::Flash => return knife(),
         // Light, high, short pop with a little slide ping.
         Weapon::Glock => shot(&mut rng, 0.18, 0.6, 240.0, 0.7)
             .mix(tone(0.04, 2600.0, 60.0), 0.0, 0.15)
@@ -221,6 +221,19 @@ pub fn impact() -> Vec<u8> {
         low += (n - low) * 0.3;
         (n - low) * (-t * 90.0).exp() * 1.2
     })
+}
+
+/// A flashbang: a sharp, hard crack.
+pub fn flashbang() -> Vec<u8> {
+    let mut rng = 0xF1A5_B4A6u32;
+    let mut s = shot(&mut rng, 0.5, 1.0, 140.0, 1.4).clip(0.5).echo(0.15, 0.3, 2);
+    s.normalize(1.0);
+    wav(&s.0)
+}
+
+/// The ringing in your ears after being flashed: a high tone fading out.
+pub fn ringing() -> Vec<u8> {
+    synth(3.0, |_| 3200.0, |t| 0.35 * (1.0 - t / 3.0).powi(2), |p| (p * TAU).sin())
 }
 
 /// Swish: band of noise sweeping down.

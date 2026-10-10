@@ -43,6 +43,8 @@ enum FxKind {
     Muzzle(Vec3),
     /// A puff of rocket smoke.
     Smoke(Vec3),
+    /// A flashbang's white burst.
+    Flash(Vec3),
     /// An explosion this big: a fireball and a cloud of smoke.
     Blast(Vec3, f32),
     /// Bullet striking the map: dust puff and a hole, at a position with the surface normal.
@@ -86,6 +88,8 @@ struct Sounds {
     death: u32,
     beep: u32,
     explosion: u32,
+    flashbang: u32,
+    ringing: u32,
     steps: Vec<u32>,
     impact: u32,
     wind: u32,
@@ -121,6 +125,7 @@ struct Hud {
     chat: u32,
     scope: u32,
     hurt: u32,
+    flash: u32,
     ammo: u32,
     buy_menu: u32,
     buy_title: u32,
@@ -217,6 +222,8 @@ pub struct DustClient {
     kill_feed: VecDeque<KillLine>,
     feed_dirty: bool,
     hurt_at: Option<f64>,
+    /// Flashed at (clock) for this long.
+    flashed: Option<(f64, f32)>,
     fx: Vec<FxKind>,
     /// Everyone as of the newest snapshot, for the scoreboard.
     players: Vec<NetPlayer>,
@@ -281,6 +288,7 @@ impl Default for DustClient {
             kill_feed: VecDeque::new(),
             feed_dirty: false,
             hurt_at: None,
+            flashed: None,
             fx: Vec::new(),
             players: Vec::new(),
             stride: 0.0,
@@ -344,6 +352,15 @@ impl ClientGame for DustClient {
                     self.fx.push(FxKind::Blast(pos, radius));
                     let volume = 1.0 / (1.0 + pos.distance(self.pred.pos) / 30.0);
                     self.sound(self.sounds.explosion, volume);
+                }
+                Event::Flashbang { pos } => {
+                    self.fx.push(FxKind::Flash(pos));
+                    let volume = 1.0 / (1.0 + pos.distance(self.pred.pos) / 25.0);
+                    self.sound(self.sounds.flashbang, volume);
+                }
+                Event::Flashed { secs } => {
+                    self.flashed = Some((self.time, secs));
+                    self.sound(self.sounds.ringing, (secs / 4.0).min(1.0));
                 }
                 Event::Radio(r) => {
                     self.sound(self.radio_sound(r.call), 0.75);
@@ -530,6 +547,8 @@ impl DustClient {
             death: sound(sfx::death()),
             beep: sound(sfx::beep()),
             explosion: sound(sfx::explosion()),
+            flashbang: sound(sfx::flashbang()),
+            ringing: sound(sfx::ringing()),
             steps: (0..4).map(|v| sound(sfx::footstep(v))).collect(),
             impact: sound(sfx::impact()),
             wind: sound(sfx::wind()),
@@ -636,7 +655,7 @@ impl DustClient {
 
     fn add_tracer(&mut self, weapon: Weapon, from: Vec3, to: Vec3) {
         let life = match weapon {
-            Weapon::Knife | Weapon::He | Weapon::Rocket => return,
+            Weapon::Knife | Weapon::He | Weapon::Flash | Weapon::Rocket => return,
             Weapon::Awp => 0.35,
             _ => 0.06,
         };
@@ -657,7 +676,7 @@ impl DustClient {
         if !can_buy || raw.pressed(Key::Escape) {
             self.menu = false;
         }
-        let digits = [Key::Digit1, Key::Digit2, Key::Digit3, Key::Digit4, Key::Digit5, Key::Digit6, Key::Digit7];
+        let digits = [Key::Digit1, Key::Digit2, Key::Digit3, Key::Digit4, Key::Digit5, Key::Digit6, Key::Digit7, Key::Digit8];
         if raw.pressed(Key::Z) && self.hp > 0 {
             (self.radio_menu, self.menu) = (!self.radio_menu, false);
         }
@@ -990,6 +1009,13 @@ impl DustClient {
                 FxKind::Smoke(at) => {
                     let smoke = fading(&mut self.scene, at, Color::srgba(0.75, 0.73, 0.7, 0.5), 0.08, 0.8, 3.0);
                     self.live_fx.push(smoke);
+                }
+                FxKind::Flash(at) => {
+                    let burst = fading(&mut self.scene, at, Color::srgba(1.0, 1.0, 1.0, 0.95), 0.4, 0.25, 6.0);
+                    self.live_fx.push(burst);
+                    let kind = NodeKind::PointLight { color: Color::WHITE, intensity: 20_000_000.0, range: 40.0 };
+                    let node = self.scene.spawn(None, kind, Transform::at(at + Vec3::Y * 0.3), true);
+                    self.live_fx.push(Fx { node, pos: at, material: None, light: Some(20_000_000.0), age: 0.0, life: 0.3, grow: 0.0, size: 1.0 });
                 }
                 FxKind::Blast(at, radius) => {
                     let fire = fading(&mut self.scene, at, Color::srgba(1.0, 0.55, 0.1, 0.95), radius * 0.15, 0.35, 4.0);

@@ -105,12 +105,13 @@ impl DustClient {
             s.ui(Some(lens), UiNode { absolute: true, background: Color::BLACK, ..hair });
         }
         h.hurt = s.ui(None, UiNode { absolute: true, width: percent(100.0), height: percent(100.0), ..node() });
+        h.flash = s.ui(None, UiNode { absolute: true, width: percent(100.0), height: percent(100.0), ..node() });
         h.ammo = s.ui(None, UiNode { absolute: true, right: px(20.0), bottom: px(14.0), ..big("") });
 
         // CS 1.6 buy menu: dark panel, amber title, numbered entries, unaffordable ones grayed out.
         h.buy_menu = s.ui(None, UiNode { column: true, gap: 6.0, ..panel() });
         h.buy_title = s.ui(Some(h.buy_menu), text("", 20.0, HUD_AMBER));
-        h.buy_rows = (0..7).map(|_| s.ui(Some(h.buy_menu), text("", 18.0, Color::WHITE))).collect();
+        h.buy_rows = (0..8).map(|_| s.ui(Some(h.buy_menu), text("", 18.0, Color::WHITE))).collect();
         s.ui(Some(h.buy_menu), text("B / Esc  close", 13.0, Color::srgb(0.55, 0.55, 0.55)));
         let feed = UiNode { absolute: true, right: px(16.0), top: px(12.0), column: true, align: Align::End, gap: 3.0, ..node() };
         h.kill_feed = s.ui(None, feed);
@@ -146,6 +147,12 @@ impl DustClient {
         s.ui_set(h.death_fade, |n| n.background = Color::BLACK.with_alpha(fade));
         let hurt = self.hurt_at.map_or(0.0, |t| (0.35 * (1.0 - (time - t) as f32 / 0.4)).max(0.0));
         s.ui_set(h.hurt, |n| n.background = Color::srgba(0.8, 0.0, 0.0, hurt));
+        // Flashed: white for the first part, then fading back.
+        let flash = self.flashed.map_or(0.0, |(at, secs)| {
+            let k = (time - at) as f32 / secs;
+            if k < 0.4 { 1.0 } else { (1.0 - (k - 0.4) / 0.6).max(0.0) }
+        });
+        s.ui_set(h.flash, |n| n.background = Color::WHITE.with_alpha(flash));
         s.ui_hidden(h.scope, !(self.zoom && self.hp > 0));
         s.ui_text(h.announce, match &self.announce {
             Some((line, at)) if time - at < 3.5 => line.clone(),
