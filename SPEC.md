@@ -368,7 +368,7 @@ health). It comes back after its respawn time; clients learn whether each is up 
   (up to 200, anything over 100 drains 1 HP/s), 35 s; `A` heavy armor +100 (up to 150), 35 s.
 - Armor takes 2/3 of damage until it runs out.
 - Ammo and small health sit near each team's goal and along the sidelines; light armor on the flanks of each half.
-- Ammo packs: the dead drop their launcher with what's loaded, and the rocket reserve as an ammo pack beside it. Anyone
+- Ammo packs: the dead drop their rockets, loaded and reserve, as an ammo pack (no weapon). Anyone
   with a launcher walking over it takes as many rockets as fit (the rest stay in it). Packs lie for 20 s and are
   cleared at the next match.
 
@@ -382,7 +382,8 @@ health). It comes back after its respawn time; clients learn whether each is up 
   toucher ("X scored!"). If only the defending team touched it, it's an own goal for the scorer's side.
 - Clock: 5:00, running only during play. Most goals wins. A tie goes to golden goal overtime for up to 2 minutes,
   then it's a draw. Then 8 s of the scoreboard, and a new match. Rotation: 2 matches per turn.
-- Dying: you drop your primary (and an ammo pack, see Pickups) where you fell. Respawn after 5 s, automatically, at a
+- Dying: you drop an ammo pack (see Pickups) where you fell; your weapons go with you, and an AWP you held turns up
+  again at the center. Respawn after 5 s, automatically, at a
   free respawn spot of your team, with 100 HP, no armor, the knife and the launcher with 4 + 8 rockets.
   Kills score nothing on their own (they buy time), but the scoreboard counts them.
 - Scoreboard (Tab, and at the end): per team, the players with goals, kills, deaths and ping.

@@ -395,22 +395,14 @@ impl Rocketball {
         self.loot.push(Dropped { id, loot, pos, vel, owner, mine_until: self.tick + ticks(0.6), expires });
     }
 
-    /// What the dead leave where they fell: their primary with what's loaded and, from a launcher, the rocket reserve
-    /// as an ammo pack beside it.
+    /// What the dead leave where they fell: their rockets, loaded and reserve, as an ammo pack. Weapons go with them;
+    /// an AWP they held turns up again at the center.
     fn drop_from_the_dead(&mut self, id: u32) {
         let s = &mut self.players.get_mut(&id).unwrap().net.state;
-        let (pos, vel, primary, (loaded, reserve)) = (s.pos + Vec3::Y * 0.8, s.vel * 0.5, s.primary.take(), s.ammo);
-        s.ammo = (0, 0);
-        let expires = Some(self.tick + ticks(LOOT_SECS));
-        match primary {
-            Some(Gun::Launcher) => {
-                self.put(Loot::Gun(Gun::Launcher, (loaded, 0)), pos, vel + Vec3::new(-0.6, 1.5, 0.0), id, expires);
-                if reserve > 0 {
-                    self.put(Loot::Rockets(reserve), pos, vel + Vec3::new(0.6, 1.5, 0.0), id, expires);
-                }
-            }
-            Some(gun) => self.put(Loot::Gun(gun, (loaded, reserve)), pos, vel + Vec3::Y * 1.5, id, expires),
-            None => {}
+        let (pos, vel, (loaded, reserve)) = (s.pos + Vec3::Y * 0.8, s.vel * 0.5, s.ammo);
+        let rockets = if s.primary == Some(Gun::Launcher) { loaded as u16 + reserve } else { 0 };
+        if rockets > 0 {
+            self.put(Loot::Rockets(rockets), pos, vel + Vec3::Y * 1.5, id, Some(self.tick + ticks(LOOT_SECS)));
         }
     }
 
@@ -960,14 +952,10 @@ mod tests {
         hold(&mut game, a, Input::default(), DRAW_SECS);
         assert_eq!(game.players[&a].net.state.gun, Gun::Awp);
         assert!(game.loot.iter().any(|d| Some(d.id) == launcher), "and stays there: we have a primary");
-        // Dead, a drops it far from its spot, where it lies until it turns up back on its spot.
+        // Dead, a takes it along, and it turns up back on its spot.
         place(&mut game, a, Vec3::new(10.0, 0.0, 10.0));
         game.hurt(a, a, 500.0);
         game.tick();
-        assert!(awps(&game).len() == 2 && awps(&game).iter().any(|p| p.distance(Vec3::new(10.0, 0.0, 10.0)) < 1.5), "{:?}", awps(&game));
-        for _ in 0..ticks(LOOT_SECS) {
-            game.tick();
-        }
         assert_eq!(awps(&game).len(), 2);
         assert!(AWP_SPOTS.iter().all(|&at| awps(&game).contains(&at)), "{:?}", awps(&game));
     }
@@ -1005,7 +993,7 @@ mod tests {
     }
 
     #[test]
-    fn the_dead_drop_their_launcher_and_an_ammo_pack_others_pick_up() {
+    fn the_dead_drop_their_rockets_as_an_ammo_pack_others_pick_up() {
         let (mut game, a, b) = duel();
         game.tick();
         let at = Vec3::new(10.0, 0.0, 10.0);
@@ -1016,13 +1004,13 @@ mod tests {
             game.tick();
         }
         let dropped: Vec<(Loot, Vec3)> = game.loot.iter().filter(|d| !matches!(d.loot, Loot::Gun(Gun::Awp, _))).map(|d| (d.loot, d.pos)).collect();
-        assert_eq!(dropped.iter().map(|d| d.0).collect::<Vec<_>>(), [Loot::Gun(Gun::Launcher, (2, 0)), Loot::Rockets(8)]);
+        assert_eq!(dropped.iter().map(|d| d.0).collect::<Vec<_>>(), [Loot::Rockets(10)], "loaded and reserve, no launcher");
         assert!(dropped.iter().all(|d| d.1.with_y(0.0).distance(at) < 1.0 && d.1.y < 0.1), "where a fell: {dropped:?}");
         game.players.get_mut(&b).unwrap().net.state.ammo = (4, 3);
-        place(&mut game, b, dropped[1].1.with_y(0.0));
+        place(&mut game, b, dropped[0].1.with_y(0.0));
         game.tick();
-        assert_eq!(game.players[&b].net.state.ammo, (4, 11), "the pack's rockets, not the launcher");
-        assert_eq!(game.loot.iter().filter(|d| !matches!(d.loot, Loot::Gun(Gun::Awp, _))).count(), 1);
+        assert_eq!(game.players[&b].net.state.ammo, (4, 13));
+        assert_eq!(game.loot.iter().filter(|d| !matches!(d.loot, Loot::Gun(Gun::Awp, _))).count(), 0, "all of it fit");
         for _ in 0..ticks(LOOT_SECS) {
             game.tick();
         }
