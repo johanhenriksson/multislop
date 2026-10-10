@@ -1,4 +1,4 @@
-//! Ballslop: two teams of four, a giant ball and rocket launchers. Rockets blast the ball and running into it pushes
+//! Rocketball: two teams of four, a giant ball and rocket launchers. Rockets blast the ball and running into it pushes
 //! it; most goals in 5 minutes wins, a tie goes to golden goal. Bots fill both teams while anyone is playing.
 
 use crate::bot::{Bot, Role, Seen, View};
@@ -78,7 +78,7 @@ const fn ticks(secs: f32) -> u32 {
     (secs * TICK_HZ as f32) as u32
 }
 
-pub struct Ballslop {
+pub struct Rocketball {
     map: String,
     players: Players,
     rockets: Vec<Rocket>,
@@ -108,9 +108,9 @@ pub struct Ballslop {
     played: u32,
 }
 
-impl Default for Ballslop {
-    fn default() -> Ballslop {
-        let mut game = Ballslop {
+impl Default for Rocketball {
+    fn default() -> Rocketball {
+        let mut game = Rocketball {
             map: MAPS[0].into(),
             players: Players::new(),
             rockets: vec![],
@@ -137,13 +137,13 @@ impl Default for Ballslop {
     }
 }
 
-impl Ballslop {
-    pub fn new() -> Ballslop {
-        Ballslop::default()
+impl Rocketball {
+    pub fn new() -> Rocketball {
+        Rocketball::default()
     }
 }
 
-impl ServerGame for Ballslop {
+impl ServerGame for Rocketball {
     fn connect(&mut self, name: &str) -> u32 {
         let (id, name) = (self.next_id, clean_name(name));
         self.next_id += 1;
@@ -218,7 +218,7 @@ impl ServerGame for Ballslop {
     fn info(&mut self) -> GameInfo {
         let bots = self.players.values().filter(|p| p.bot.is_some()).count() as u32;
         let maps = MAPS.map(String::from).to_vec();
-        GameInfo { game: "Ballslop".into(), map: self.map.clone(), maps, players: self.players.len() as u32 - bots, bots }
+        GameInfo { game: "Rocketball".into(), map: self.map.clone(), maps, players: self.players.len() as u32 - bots, bots }
     }
 
     fn set_map(&mut self, map: &str) {
@@ -235,7 +235,7 @@ impl ServerGame for Ballslop {
     }
 }
 
-impl Ballslop {
+impl Rocketball {
     /// Scores, stats, clock and pickups back to the start, and kickoff.
     fn new_match(&mut self) {
         (self.score, self.clock, self.overtime) = ([0; 2], ticks(MATCH_SECS), false);
@@ -569,14 +569,14 @@ fn fill_bots(players: &mut Players, next_id: &mut u32, tick: u32, bots: Option<u
 mod tests {
     use super::*;
 
-    fn place(game: &mut Ballslop, id: u32, pos: Vec3) {
+    fn place(game: &mut Rocketball, id: u32, pos: Vec3) {
         let s = &mut game.players.get_mut(&id).unwrap().net.state;
         (s.pos, s.vel) = (pos, Vec3::ZERO);
     }
 
     /// Two humans, one a side, no bots, in play.
-    fn duel() -> (Ballslop, u32, u32) {
-        let mut game = Ballslop::new();
+    fn duel() -> (Rocketball, u32, u32) {
+        let mut game = Rocketball::new();
         game.set_bots(0);
         let (a, b) = (game.connect("a"), game.connect("b"));
         game.phase = Phase::Play;
@@ -585,10 +585,10 @@ mod tests {
 
     #[test]
     fn teams_balance_and_bots_fill_each_side() {
-        let mut game = Ballslop::new();
+        let mut game = Rocketball::new();
         let a = game.connect("a");
         game.tick();
-        let team = |game: &Ballslop, t: Team| game.players.values().filter(|p| p.net.team == t).count();
+        let team = |game: &Rocketball, t: Team| game.players.values().filter(|p| p.net.team == t).count();
         assert_eq!((team(&game, Team::Orange), team(&game, Team::Blue)), (TEAM_SIZE, TEAM_SIZE));
         let b = game.connect("b");
         assert_ne!(game.players[&a].net.team, game.players[&b].net.team, "humans split");
@@ -648,7 +648,7 @@ mod tests {
 
     #[test]
     fn rockets_hit_teammates_too() {
-        let mut game = Ballslop::new();
+        let mut game = Rocketball::new();
         game.set_bots(0);
         let (a, b, c) = (game.connect("a"), game.connect("b"), game.connect("c"));
         game.phase = Phase::Play;
@@ -717,7 +717,7 @@ mod tests {
     /// Two full teams of bots for five minutes, no network: they should score and fight, and nothing leaves the map.
     #[test]
     fn bots_play_a_match() {
-        let mut game = Ballslop::new();
+        let mut game = Rocketball::new();
         game.connect("observer");
         // Kickoffs bring the observer back, so it's taken off the pitch every tick.
         let observer = *game.players.keys().next().unwrap();

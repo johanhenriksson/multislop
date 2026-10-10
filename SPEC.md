@@ -134,7 +134,7 @@ Deadline: playable before 00:00. One weapon, one simple map.
   client host tears down the world and starts a fresh instance of the client game with `start(map)`.
 - Game rotation (off by default; `--rotate`, or "Rotate games" in "Host a LAN game", which starts with the picked
   game and then each other one): a game sets `Frame::finished` once its turn is played (dust 20 rounds, race 3
-  races, arena 3 matches, ball 2 matches, each counted when its end screen is over, reset by `set_map`). The server then disconnects
+  races, arena 3 matches, rocketball 2 matches, each counted when its end screen is over, reset by `set_map`). The server then disconnects
   everyone from it, starts the next on its first map and bumps a game counter. All modules are loaded up front, and
   each game keeps its own tick (lag compensation rewinds by it). Input for an earlier game is answered with
   `ServerMsg::Game` (hash, size, counter), so clients notice, tear down and load the new game like on connect, then
@@ -210,7 +210,7 @@ Grenades, dropped/pickup weapons, match end, team switching, map height (ramps, 
   `cargo run --release -- server --game target/wasm32-unknown-unknown/release/race.wasm`. Shipped in releases next to
   `dust.wasm`, so it shows up under "Host a LAN game".
 
-## Ballslop (`games/ball`)
+## Rocketball (`games/rocketball`)
 CS meets Rocket League: two teams of four on a walled pitch with goals at both ends, a giant ball, and rocket
 launchers. You score by moving the ball into the other goal: rockets blast it, running into it pushes it. Rockets kill
 too, so every shot is a choice between the ball and the player guarding it.
@@ -330,6 +330,6 @@ health). It comes back after its respawn time; clients learn whether each is up 
   crosshair, a kill feed top right, centered messages (kickoff countdown "3, 2, 1, GO!", goals, "Respawning in 2"),
   and the Tab scoreboard.
 
-- Run: `cargo build -p ball --release --target wasm32-unknown-unknown`, then
-  `cargo run --release -- server --game target/wasm32-unknown-unknown/release/ball.wasm`. Shipped in releases next to
+- Run: `cargo build -p rocketball --release --target wasm32-unknown-unknown`, then
+  `cargo run --release -- server --game target/wasm32-unknown-unknown/release/rocketball.wasm`. Shipped in releases next to
   the others.

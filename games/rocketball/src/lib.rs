@@ -4,5 +4,5 @@ pub mod game;
 pub mod map;
 pub mod shared;
 
-sdk::export_server!(game::Ballslop::new());
+sdk::export_server!(game::Rocketball::new());
 sdk::export_client!(client::BallClient::new());

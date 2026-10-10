@@ -1,4 +1,4 @@
-//! The Ballslop client: a floodlit night stadium, the ball glowing in the color of the last team to touch it, players
+//! The Rocketball client: a floodlit night stadium, the ball glowing in the color of the last team to touch it, players
 //! and rockets in their team colors, a launcher in hand, goal celebrations and the HUD.
 
 mod hud;
