@@ -168,6 +168,7 @@ enum Announce {
     Planted,
     Defused,
     Go,
+    EnemyDown,
 }
 
 #[derive(Component)]
@@ -391,6 +392,7 @@ fn setup(
             (Announce::Planted, sfx::VOICE_PLANTED),
             (Announce::Defused, sfx::VOICE_DEFUSED),
             (Announce::Go, sfx::VOICE_GO),
+            (Announce::EnemyDown, sfx::VOICE_ENEMY_DOWN),
         ]
         .into_iter()
         .map(|(a, wav)| (a, sound(sfx::radio(wav))))
@@ -777,6 +779,7 @@ fn on_snapshot(g: &mut Game, snap: Snapshot) {
             g.sounds.push((if h.headshot { Sound::Headshot } else { Sound::HitBody }, 0.7));
             if h.killed {
                 g.sounds.push((Sound::Kill, 0.6));
+                g.sounds.push((Sound::Voice(Announce::EnemyDown), 0.6));
             }
         }
         if Some(h.victim) == g.me {

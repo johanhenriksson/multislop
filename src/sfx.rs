@@ -133,15 +133,17 @@ fn tone(secs: f32, hz: f32, decay: f32) -> Samples {
     samples(secs, |t| (t * hz * TAU).sin() * (-t * decay).exp())
 }
 
-/// Announcer lines rendered at build time (see build.rs).
-pub const VOICE_T_WIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/t_win.wav"));
-pub const VOICE_CT_WIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ct_win.wav"));
-pub const VOICE_PLANTED: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/planted.wav"));
-pub const VOICE_DEFUSED: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/defused.wav"));
-pub const VOICE_GO: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/go.wav"));
+/// Announcer lines, voiced with ElevenLabs ("Adam") and embedded so the game stays one binary.
+pub const VOICE_T_WIN: &[u8] = include_bytes!("../assets/voice/t_win.wav");
+pub const VOICE_CT_WIN: &[u8] = include_bytes!("../assets/voice/ct_win.wav");
+pub const VOICE_PLANTED: &[u8] = include_bytes!("../assets/voice/planted.wav");
+pub const VOICE_DEFUSED: &[u8] = include_bytes!("../assets/voice/defused.wav");
+pub const VOICE_GO: &[u8] = include_bytes!("../assets/voice/go.wav");
+pub const VOICE_ENEMY_DOWN: &[u8] = include_bytes!("../assets/voice/enemy_down.wav");
 
 /// Makes a clean voice recording sound like CS radio: telephone band, a little grit, and a click either side.
 pub fn radio(wav_bytes: &[u8]) -> Vec<u8> {
+    let rate = wav_bytes.get(24..28).map_or(RATE, |b| u32::from_le_bytes(b.try_into().unwrap()));
     let data = wav_bytes.windows(4).position(|w| w == b"data").map_or(44, |i| i + 8);
     let pcm: Vec<f32> = wav_bytes[data.min(wav_bytes.len())..]
         .chunks_exact(2)
@@ -161,7 +163,7 @@ pub fn radio(wav_bytes: &[u8]) -> Vec<u8> {
         out.push((low * 3.0).tanh() * 0.9);
     }
     click(&mut rng, &mut out);
-    wav(&out)
+    wav_at(&out, rate)
 }
 
 /// A footstep on sand and stone; four variants so a run doesn't sound like a metronome.
@@ -250,10 +252,14 @@ fn render(secs: f32, sample: impl FnMut(f32) -> f32) -> Vec<u8> {
 }
 
 fn wav(samples: &[f32]) -> Vec<u8> {
+    wav_at(samples, RATE)
+}
+
+fn wav_at(samples: &[f32], rate: u32) -> Vec<u8> {
     let n = samples.len() as u32;
     let mut out = Vec::with_capacity(44 + n as usize * 2);
     for chunk in [&b"RIFF"[..], &(36 + n * 2).to_le_bytes(), b"WAVEfmt ", &16u32.to_le_bytes(), &1u16.to_le_bytes(),
-        &1u16.to_le_bytes(), &RATE.to_le_bytes(), &(RATE * 2).to_le_bytes(), &2u16.to_le_bytes(), &16u16.to_le_bytes(),
+        &1u16.to_le_bytes(), &rate.to_le_bytes(), &(rate * 2).to_le_bytes(), &2u16.to_le_bytes(), &16u16.to_le_bytes(),
         b"data", &(n * 2).to_le_bytes()]
     {
         out.extend_from_slice(chunk);
