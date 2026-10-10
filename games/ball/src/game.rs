@@ -290,13 +290,14 @@ impl Ballslop {
         }
     }
 
-    /// Flies rockets, setting off those that touch the world, an enemy or the ball, or whose fuse has burnt.
+    /// Flies rockets, setting off those that touch the world, anyone but the shooter, or the ball, or whose fuse has
+    /// burnt.
     fn update_rockets(&mut self) {
         let mut blasts = vec![];
         self.rockets.retain_mut(|r| {
             let (len, dir) = (r.vel.length() * DT, r.vel.normalize_or_zero());
-            let enemies = self.players.values().filter(|p| p.net.alive && p.net.team != r.team);
-            let hit = enemies
+            let others = self.players.values().filter(|p| p.net.alive && p.net.id != r.owner);
+            let hit = others
                 .filter_map(|p| trace_capsule(r.pos, dir, p.net.state.pos))
                 .chain(trace_ball(r.pos, dir, self.ball))
                 .fold(trace_world(r.pos, dir).0, f32::min);
@@ -313,7 +314,7 @@ impl Ballslop {
         }
     }
 
-    /// Damages enemies (and the shooter, by half) in the open within the blast radius, throws everyone in it, and
+    /// Damages everyone in the open within the blast radius, teammates too (the shooter by half), throws them, and
     /// pushes the ball.
     fn explode(&mut self, at: Vec3, owner: u32, team: Team) {
         self.events.push(Event::Explosion { pos: at, radius: BLAST_RADIUS, team });
@@ -328,10 +329,7 @@ impl Ballslop {
             p.net.state.vel += push;
             p.net.state.on_ground &= push.y <= 0.0;
             let full = BLAST_DAMAGE * (1.0 - dist / BLAST_RADIUS);
-            let damage = if id == owner { full / 2.0 } else if p.net.team != team { full } else { 0.0 };
-            if damage > 0.0 {
-                self.hurt(owner, id, damage);
-            }
+            self.hurt(owner, id, if id == owner { full / 2.0 } else { full });
         }
         if let Some(strength) = blast_ball(self.ball, &mut self.ball_vel, at) {
             self.touch(owner, team);
@@ -339,7 +337,8 @@ impl Ballslop {
         }
     }
 
-    /// Armor takes its share until it runs out; at 0 HP the victim dies and the attacker (if not themself) gets a kill.
+    /// Armor takes its share until it runs out; at 0 HP the victim dies, and the attacker gets a kill for an enemy and
+    /// loses one for a teammate.
     fn hurt(&mut self, attacker: u32, victim: u32, damage: f32) {
         let v = &mut self.players.get_mut(&victim).unwrap().net;
         let absorbed = ((damage * ARMOR_TAKES) as i32).min(v.armor);
@@ -349,11 +348,12 @@ impl Ballslop {
             return;
         }
         (v.hp, v.alive, v.deaths) = (0, false, v.deaths + 1);
+        let team = v.team;
         self.players.get_mut(&victim).unwrap().died_at = self.tick;
         if attacker != victim
             && let Some(k) = self.players.get_mut(&attacker)
         {
-            k.net.kills += 1;
+            k.net.kills += if k.net.team == team { -1 } else { 1 };
         }
         self.events.push(Event::Kill { killer: attacker, victim });
     }
@@ -643,19 +643,19 @@ mod tests {
     }
 
     #[test]
-    fn rockets_kill_enemies_and_pass_teammates() {
+    fn rockets_hit_teammates_too() {
         let mut game = Ballslop::new();
         game.set_bots(0);
         let (a, b, c) = (game.connect("a"), game.connect("b"), game.connect("c"));
         game.phase = Phase::Play;
         assert_eq!(game.players[&a].net.team, game.players[&c].net.team);
         game.ball = Vec3::new(20.0, BALL_RADIUS, 30.0);
-        // c stands between a and b; a fires along +x, a little down, at b's legs.
+        // c, a teammate, stands between a and b; a fires along +x, a little down, at b's legs and hits c's.
         let start = Vec3::new(-14.0, 0.0, 6.0);
         for (id, x) in [(a, 0.0), (c, 5.0), (b, 10.0)] {
             place(&mut game, id, start + Vec3::X * x);
         }
-        game.players.get_mut(&b).unwrap().net.hp = 50;
+        game.players.get_mut(&c).unwrap().net.hp = 50;
         let fire = Input { fire: true, yaw: -std::f32::consts::FRAC_PI_2, pitch: -0.12, ..Default::default() };
         game.input(a, 1, 0.0, &encode(&fire));
         let mut kills = vec![];
@@ -665,9 +665,9 @@ mod tests {
                 _ => None,
             }));
         }
-        assert_eq!(kills, [(a, b)]);
-        assert_eq!((game.players[&a].net.kills, game.players[&b].net.deaths), (1, 1));
-        assert_eq!((game.players[&a].net.hp, game.players[&c].net.hp), (MAX_HP, MAX_HP), "nobody else hurt");
+        assert_eq!(kills, [(a, c)]);
+        assert_eq!((game.players[&a].net.kills, game.players[&c].net.deaths), (-1, 1), "a teamkill costs a kill");
+        assert_eq!((game.players[&a].net.hp, game.players[&b].net.hp), (MAX_HP, MAX_HP), "nobody else hurt");
     }
 
     #[test]
@@ -717,14 +717,18 @@ mod tests {
         game.connect("observer");
         // Kickoffs bring the observer back, so it's taken off the pitch every tick.
         let observer = *game.players.keys().next().unwrap();
-        let (mut rockets, mut kills, mut goals, mut touches, mut own) = (0, 0, 0, 0, 0);
+        let (mut rockets, mut kills, mut goals, mut touches, mut own, mut team_kills) = (0, 0, 0, 0, 0, 0);
         for _ in 0..ticks(MATCH_SECS) {
             let o = game.players.get_mut(&observer).unwrap();
             (o.net.alive, o.died_at) = (false, u32::MAX / 2);
             for e in game.tick().events {
                 match decode::<Event>(&e.data) {
                     Some(Event::Launch { .. }) => rockets += 1,
-                    Some(Event::Kill { .. }) => kills += 1,
+                    Some(Event::Kill { killer, victim }) => {
+                        let team = |id| game.players.get(&id).map(|p: &Player| p.net.team);
+                        kills += 1;
+                        team_kills += (killer != victim && team(killer) == team(victim)) as u32;
+                    }
                     Some(Event::Goal { own_goal, .. }) => (goals, own) = (goals + 1, own + own_goal as u32),
                     Some(Event::BallHit { .. }) => touches += 1,
                     _ => {}
@@ -735,7 +739,7 @@ mod tests {
             }
             assert!(in_bounds(game.ball) && game.ball.x.abs() < 24.0, "ball at {}", game.ball);
         }
-        println!("5 min: {goals} goals ({own} own), score {:?}, {kills} kills, {rockets} rockets, {touches} ball hits", game.score);
+        println!("5 min: {goals} goals ({own} own), score {:?}, {kills} kills ({team_kills} teammates), {rockets} rockets, {touches} ball hits", game.score);
         assert!(goals >= 2, "bots should score: {goals}");
         assert!(kills >= 10, "and fight: {kills}");
     }

@@ -241,9 +241,10 @@ too, so every shot is a choice between the ball and the player guarding it.
 
 ### Rocket launcher (the only weapon)
 - A straight, 40 m/s rocket, no gravity, one every 0.8 s, 4 to a load, a 2 s reload. It goes off on touching the
-  world, an enemy, or the ball. It flies through teammates, and goes off after 5 s at most.
-- Blast: up to 100 damage at the center, falling off linearly to 0 at 4.5 m, through open line of sight only. No team
-  damage. Self damage is half, so a rocket jump costs about 30 HP.
+  world, any player but the shooter, or the ball, and goes off after 5 s at most.
+- Blast: up to 100 damage at the center, falling off linearly to 0 at 4.5 m, through open line of sight only. Friendly
+  fire is on: teammates take full damage, and a teamkill takes a kill off the scoreboard. Self damage is half, so a
+  rocket jump costs about 30 HP.
 - Ammo: you spawn with 4 loaded + 8 reserve, and carry at most 16 reserve. When you're out, you're out until you find
   an ammo pickup (or die).
 - Shooting uses `sdk::ability` (`Hands`) in the predicted step, like dust's rocket. Rockets are server entities;

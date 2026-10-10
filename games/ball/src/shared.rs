@@ -209,7 +209,7 @@ pub struct NetPlayer {
     pub armor: i32,
     pub alive: bool,
     pub goals: u32,
-    pub kills: u32,
+    pub kills: i32,
     pub deaths: u32,
     pub bot: bool,
     pub name: String,
