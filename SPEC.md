@@ -5,7 +5,7 @@ Deadline: playable before 00:00. One weapon, one simple map.
 ## Run
 - `cargo build -p dust --release --target wasm32-unknown-unknown` builds the game module. The host has no game built
   in: servers run a module and clients download it from the server.
-- `cargo run --release -- server [port] [--game game.wasm] [--map map]` (headless, default port 5000; the game defaults to
+- `cargo run --release -- server [port] [--game game.wasm] [--map map] [--bots n]` (headless, default port 5000; the game defaults to
   `dust.wasm` next to the executable, so in development pass `--game target/wasm32-unknown-unknown/release/dust.wasm`)
 - `cargo run --release -- client [host:port] [--game game.wasm] [--lag ms] [--jitter ms] [--interp ms]` (`--game` uses a local module instead of downloading the server's, `--lag`/`--jitter` fake delay and bursty arrival to test netcode, `--interp` is the minimum remote-player buffer, default 50)
 
@@ -25,7 +25,8 @@ Deadline: playable before 00:00. One weapon, one simple map.
   `~/Library/Application Support/fps16/host`) and press Enter.
 - Back to the browser, with the reason shown, when the server goes quiet for 5 s in a game, never answers for 10 s,
   or runs another build; the game's scene, HUD, sounds and environment are torn down and the mouse is freed.
-- "Host a LAN game" lists every map of the game modules it can find (`--game`, `.wasm` files next to the binary,
+- "Host a LAN game" has a bot count (- / +: the game's default, or 0 to 31; `--bots` on a server) passed to the game
+  with `ServerGame::set_bots`, and lists every map of the game modules it can find (`--game`, `.wasm` files next to the binary,
   downloaded ones in `games/`), e.g. "Counterslop on dust", using only the newest file of each game. The scan runs
   in the background from when the browser opens. The picked one runs as a server on a thread in the client, on the
   first free port of 5000-5009, named "<user>'s game", and the client joins it. Compiled module code is cached in
@@ -160,3 +161,16 @@ Deadline: playable before 00:00. One weapon, one simple map.
 
 ## Out of scope (for now)
 Grenades, dropped/pickup weapons, halftime/match end, team switching, map height (ramps, stairs), anti-cheat, encryption, connection handshake/timeouts beyond the basics.
+
+## Instaslop (`games/arena`)
+- A second game module: instagib free-for-all on one 80 x 80 m map, "arena" (four-way symmetric: corner balconies up
+  stairs, wall-side perches and a central tower reached by jump pads, pillars and low crates). Blocks on a height grid
+  in half meters; a 0.5 m rise is walked up as a stair.
+- Movement: Quake style, faster (9 m/s) and floatier (gravity 12 m/s², jumps 1.75 m), hold space (or backspace) to keep hopping,
+  strafe jumping builds speed. Jump pads throw you ~7 m up, carrying up to 6.5 m/s of your run.
+- Railgun only: hitscan, lag-compensated, one-shot frag through everyone along the beam, 1 s recharge (coils on the gun
+  and a bar under the crosshair). Beams in the shooter's color; the fragged burst into bouncing gibs.
+- Click to respawn after 1 s (automatic after 3 s), at the spawn furthest from the living. First to 25 frags or most
+  after 10 min wins; 8 s scoreboard, then a fresh match. Bots fill up to 8 players while anyone is on.
+- Run: `cargo build -p arena --release --target wasm32-unknown-unknown`, then
+  `cargo run --release -- server --game target/wasm32-unknown-unknown/release/arena.wasm`. Not in releases yet.

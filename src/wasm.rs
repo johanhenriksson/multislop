@@ -113,6 +113,8 @@ pub struct WasmGame {
     tick: TypedFunc<(), u64>,
     info: TypedFunc<(), u64>,
     set_map: TypedFunc<u32, ()>,
+    /// Missing from modules built before bot counts were configurable.
+    set_bots: Option<TypedFunc<u32, ()>>,
 }
 
 impl WasmGame {
@@ -126,6 +128,7 @@ impl WasmGame {
             tick: wasm.func("fps16_tick")?,
             info: wasm.func("fps16_info")?,
             set_map: wasm.func("fps16_set_map")?,
+            set_bots: wasm.func("fps16_set_bots").ok(),
             wasm,
         })
     }
@@ -163,6 +166,12 @@ impl ServerGame for WasmGame {
     fn set_map(&mut self, map: &str) {
         let len = self.wasm.arg(map.as_bytes());
         self.wasm.call(&self.set_map, len)
+    }
+
+    fn set_bots(&mut self, bots: u32) {
+        if let Some(f) = self.set_bots.clone() {
+            self.wasm.call(&f, bots)
+        }
     }
 }
 

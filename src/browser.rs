@@ -57,6 +57,8 @@ pub struct Browser {
     shown_games: Option<usize>,
     /// A game picked to host, by index into `games`.
     host_pick: Option<usize>,
+    /// Bots for a hosted game; None leaves it to the game.
+    bots: Option<u32>,
     error: String,
     /// The list changed and its rows need rebuilding.
     dirty: bool,
@@ -77,9 +79,23 @@ impl Browser {
             host_open: false,
             shown_games: None,
             host_pick: None,
+            bots: None,
             error: String::new(),
             dirty: true,
         }
+    }
+}
+
+/// Most bots the host menu offers.
+const MAX_BOTS: u32 = 31;
+
+/// One step through the bot counts the host menu offers: the game's default, then 0 to MAX_BOTS.
+fn step_bots(bots: Option<u32>, up: bool) -> Option<u32> {
+    match (bots, up) {
+        (None, true) => Some(0),
+        (None, false) | (Some(0), false) => None,
+        (Some(n), true) => Some((n + 1).min(MAX_BOTS)),
+        (Some(n), false) => Some(n - 1),
     }
 }
 
@@ -270,6 +286,15 @@ pub fn browse(
         commands.entity(*host_list).despawn_children();
         let row = (Node { padding: UiRect::axes(px(12), px(6)), ..default() }, BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.08)));
         let font = TextFont { font_size: FontSize::Px(16.0), ..default() };
+        let label = b.bots.map_or("Bots: game default".to_string(), |n| format!("Bots: {n}"));
+        let bots = commands.spawn((ChildOf(*host_list), Node { column_gap: px(14), align_items: AlignItems::Center, ..row.0.clone() }, row.1)).id();
+        commands.spawn((ChildOf(bots), Node { width: px(170), ..default() }, Text::new(label), font.clone()));
+        for (sign, up) in [("-", false), ("+", true)] {
+            let button = Node { padding: UiRect::axes(px(9), px(0)), border: UiRect::all(px(1)), ..default() };
+            commands
+                .spawn((ChildOf(bots), button, BorderColor::all(Color::srgb(0.6, 0.6, 0.6)), children![(Text::new(sign), font.clone())]))
+                .observe(move |_: On<PointerClick>, mut b: ResMut<Browser>| (b.bots, b.shown_games) = (step_bots(b.bots, up), None));
+        }
         match &games {
             None => _ = commands.spawn((ChildOf(*host_list), row, children![(Text::new("Finding games..."), font)])),
             Some(list) if list.is_empty() => _ = commands.spawn((ChildOf(*host_list), row, children![(Text::new("No games found to host"), font)])),
@@ -285,7 +310,7 @@ pub fn browse(
     if let Some(game) = b.host_pick.take().and_then(|i| games.as_ref()?.get(i).cloned()) {
         let user = std::env::var("USER").unwrap_or_else(|_| "someone".into());
         crate::client::store(&game.module);
-        match crate::server::host(format!("{user}'s game"), game.module, game.map) {
+        match crate::server::host(format!("{user}'s game"), game.module, game.map, b.bots) {
             Ok(port) => join = Some(SocketAddr::from(([127, 0, 0, 1], port))),
             Err(e) => b.error = e,
         }

@@ -95,6 +95,8 @@ pub struct Dust {
     /// Weapons lying around, and the round they were dropped in (all go at the next).
     dropped: Vec<Dropped>,
     dropped_round: u32,
+    /// Bots to play with, set by the host; None fills both teams to `TEAM_SIZE`.
+    bots: Option<usize>,
 }
 
 impl Dust {
@@ -112,6 +114,7 @@ impl Dust {
             grenades: Vec::new(),
             dropped: Vec::new(),
             dropped_round: 0,
+            bots: None,
         }
     }
 }
@@ -152,7 +155,7 @@ impl ServerGame for Dust {
     }
 
     fn tick(&mut self) -> Frame {
-        balance_bots(&mut self.m, &mut self.players, &mut self.next_id);
+        balance_bots(&mut self.m, &mut self.players, &mut self.next_id, self.bots);
         let alive: Vec<u32> = self.players.values().filter(|c| c.hp > 0).map(|c| c.id).collect();
         let (mut throws, mut dropped) = (Vec::new(), Vec::new());
         let (m, players, history, tick) = (&self.m, &mut self.players, &self.history, self.tick);
@@ -224,6 +227,11 @@ impl ServerGame for Dust {
         // A new match: round 1 starts next tick with everyone respawned and money reset.
         (self.map, self.m) = (map.into(), new_match());
         self.grenades.clear();
+    }
+
+    fn set_bots(&mut self, bots: u32) {
+        log(&format!("{bots} bots"));
+        self.bots = Some(bots as usize);
     }
 }
 
@@ -345,13 +353,18 @@ fn smaller_team(players: &Players) -> Team {
 /// Teams always have at least this many players; bots fill the gaps.
 const TEAM_SIZE: usize = 16;
 
-/// Adds or removes bots so both teams are TEAM_SIZE, or the bigger human team if larger. No humans, no bots.
-fn balance_bots(m: &mut Match, players: &mut Players, next_id: &mut u32) {
+/// Adds or removes bots so there are `bots` of them, each on whichever side is smaller. By default both teams are
+/// filled to TEAM_SIZE, or to the bigger human team if larger. No humans, no bots.
+fn balance_bots(m: &mut Match, players: &mut Players, next_id: &mut u32, bots: Option<usize>) {
     let humans = |team: Team| players.values().filter(|c| c.bot.is_none() && c.team == team).count();
     let (ts, cts) = (humans(Team::T), humans(Team::Ct));
-    let size = if ts + cts == 0 { 0 } else { ts.max(cts).max(TEAM_SIZE) };
+    let total = if ts + cts == 0 { 0 } else { bots.unwrap_or(2 * ts.max(cts).max(TEAM_SIZE) - ts - cts) };
+    let mut size = [ts, cts];
+    for _ in 0..total {
+        size[(size[1] < size[0]) as usize] += 1;
+    }
     for (team, human_count) in [(Team::T, ts), (Team::Ct, cts)] {
-        let want = size - human_count;
+        let want = size[team as usize] - human_count;
         let mut bots: Vec<u32> = players.values().filter(|c| c.bot.is_some() && c.team == team).map(|c| c.id).collect();
         while bots.len() > want {
             let c = players.remove(&bots.pop().unwrap()).unwrap();
@@ -949,22 +962,30 @@ mod tests {
     fn bots_fill_both_teams() {
         let mut players = Players::new();
         let (mut m, mut next_id) = (new_match(), 100);
-        balance_bots(&mut m, &mut players, &mut next_id);
+        balance_bots(&mut m, &mut players, &mut next_id, None);
         assert!(players.is_empty(), "no humans, no bots");
         let count = |c: &Players, t: Team| c.values().filter(|c| c.team == t).count();
         players.insert(1, client(1, Team::T));
-        balance_bots(&mut m, &mut players, &mut next_id);
+        balance_bots(&mut m, &mut players, &mut next_id, None);
         assert_eq!((count(&players, Team::T), count(&players, Team::Ct)), (TEAM_SIZE, TEAM_SIZE));
         // More humans on one side than a full team: the other side gets bots up to the same size.
         for i in 2..=(TEAM_SIZE + 2) as u32 {
             players.insert(i, client(i, Team::Ct));
         }
-        balance_bots(&mut m, &mut players, &mut next_id);
+        balance_bots(&mut m, &mut players, &mut next_id, None);
         let big = TEAM_SIZE + 1;
         assert_eq!((count(&players, Team::T), count(&players, Team::Ct)), (big, big), "Ts topped up to the human CTs");
         players.retain(|_, c| c.bot.is_some());
-        balance_bots(&mut m, &mut players, &mut next_id);
+        balance_bots(&mut m, &mut players, &mut next_id, None);
         assert!(players.is_empty(), "bots leave with the last human");
+
+        // A set number of bots, evening out the teams.
+        players.insert(1, client(1, Team::T));
+        players.insert(2, client(2, Team::T));
+        balance_bots(&mut m, &mut players, &mut next_id, Some(3));
+        assert_eq!((count(&players, Team::T), count(&players, Team::Ct)), (3, 2));
+        balance_bots(&mut m, &mut players, &mut next_id, Some(0));
+        assert_eq!(players.len(), 2, "no bots");
     }
 
     /// The big open yard in the south-east, with a long clear line east.

@@ -33,6 +33,10 @@ fn main() {
             let maps = sdk::ServerGame::info(&mut game).maps;
             let map = flag("--map").cloned().or_else(|| maps.first().cloned()).unwrap_or_default();
             sdk::ServerGame::set_map(&mut game, &map);
+            // --bots plays with that many bots instead of the game's default.
+            if let Some(bots) = flag("--bots").map(|b| b.parse().expect("--bots takes a number")) {
+                sdk::ServerGame::set_bots(&mut game, bots);
+            }
             let name = flag("--name").cloned().unwrap_or(format!("{}'s server", user()));
             let sock = std::net::UdpSocket::bind(("0.0.0.0", port)).unwrap_or_else(|e| panic!("can't use port {port}: {e}"));
             server::run(sock, &name, Box::new(game), module)
@@ -51,7 +55,7 @@ fn main() {
             client::run(addr, local, hostable, num("--lag").unwrap_or(0), num("--jitter").unwrap_or(0), num("--interp").unwrap_or(50));
         }
         _ => eprintln!(
-            "usage: fps16 server [port] [--game game.wasm] [--map map] [--name name] | fps16 client [host:port] [--game game.wasm] [--lag ms] [--jitter ms] [--interp ms]"
+            "usage: fps16 server [port] [--game game.wasm] [--map map] [--name name] [--bots n] | fps16 client [host:port] [--game game.wasm] [--lag ms] [--jitter ms] [--interp ms]"
         ),
     }
 }
