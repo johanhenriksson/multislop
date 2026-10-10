@@ -1,12 +1,14 @@
-//! The dust map, traced from a top-down overview image (12 px per cell). North is up: bomb site B top-left,
+//! The maps. Dust, traced from a top-down overview image (12 px per cell): north is up, bomb site B top-left,
 //! A bottom-left, CT spawn between them on the left, T spawn at the back on the right, as far from A as from B,
-//! tunnels through the middle.
+//! tunnels through the middle. Aztec (`maps/aztec*.txt`): CT spawn west, A north-west, B south-middle, T spawn east,
+//! the rope bridge a raised walkway along the north wall of a sunken water room.
 //!
 //! `#` wall, `X` tall crate, `x` low crate (jumpable), `A`/`B` bomb site floor, `T`/`C` team spawns, `.` floor.
 // ponytail: one floor per spot (a height field), so no bridges over tunnels. Add layers if a map needs them.
 
 use crate::shared::Team;
 use glam::Vec3;
+use std::cell::Cell;
 use std::sync::LazyLock;
 
 /// Meters per grid cell.
@@ -123,11 +125,43 @@ const DUST2_HEIGHTS: &str = "\
 88888888888888888888888888888889aaaaaaaaaaaaaaaaaaaaaaaa
 88888888888888888888888888888889999999999999999999999999";
 
-// ponytail: one map, so one global. Make the map part of the game's state (server and client) when a second arrives.
-pub static MAP: LazyLock<Map> = LazyLock::new(|| Map::parse(DUST2, DUST2_HEIGHTS));
-
 /// The maps this game can play.
-pub const MAPS: [&str; 1] = ["dust"];
+pub const MAPS: [&str; 2] = ["dust", "aztec"];
+
+static PARSED: [LazyLock<Map>; 2] = [
+    LazyLock::new(|| Map::parse(DUST2, DUST2_HEIGHTS)),
+    LazyLock::new(|| Map::parse(include_str!("maps/aztec.txt"), include_str!("maps/aztec_heights.txt"))),
+];
+
+thread_local! {
+    static CURRENT: Cell<usize> = const { Cell::new(0) };
+}
+
+/// The map being played: dust until `load` picks another. A game module plays one map at a time, so it's a global
+/// rather than threaded through everything that looks at the map.
+pub static MAP: Current = Current;
+
+pub struct Current;
+
+impl std::ops::Deref for Current {
+    type Target = Map;
+
+    fn deref(&self) -> &Map {
+        &PARSED[CURRENT.with(Cell::get)]
+    }
+}
+
+/// Makes `name`, one of `MAPS`, the map; false for any other name.
+pub fn load(name: &str) -> bool {
+    let Some(i) = MAPS.iter().position(|m| *m == name) else { return false };
+    CURRENT.with(|c| c.set(i));
+    true
+}
+
+/// The name of the map being played.
+pub fn name() -> &'static str {
+    MAPS[CURRENT.with(Cell::get)]
+}
 
 /// Walls go from below the lowest floor to well above the highest one.
 const WALL_BOTTOM: f32 = -1.0;
@@ -342,8 +376,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dust2_parses() {
-        let m = &*MAP;
+    fn maps_parse() {
+        for m in &PARSED {
+            check(m);
+        }
+    }
+
+    fn check(m: &Map) {
         assert!(m.rows.iter().all(|r| r.len() == m.width()), "ragged rows");
         assert!(m.heights.len() == m.rows.len() && m.heights.iter().all(|r| r.len() == m.width()), "height grid size");
         let tunnel = m.site_cells().count() > 0 && (0..m.depth()).any(|z| (0..m.width()).any(|x| m.walkable(x, z) && m.heights[z][x] == 0.0));

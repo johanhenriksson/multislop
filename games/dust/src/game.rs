@@ -226,13 +226,17 @@ impl ServerGame for Dust {
     }
 
     fn set_map(&mut self, map: &str) {
-        if !MAPS.contains(&map) {
+        if !crate::map::load(map) {
             return log(&format!("no map called {map}; playing {}", self.map));
         }
         log(&format!("map {map}"));
-        // A new match: round 1 starts next tick with everyone respawned and money reset.
+        // A new match: round 1 starts next tick with everyone respawned and money reset, bots learning the new map.
         (self.map, self.m) = (map.into(), new_match());
         self.grenades.clear();
+        self.dropped.clear();
+        for c in self.players.values_mut().filter(|c| c.bot.is_some()) {
+            c.bot = Some(Bot::new(c.id));
+        }
     }
 
     fn set_min_players(&mut self, players: u32) {
@@ -947,6 +951,16 @@ mod tests {
     /// Full teams of bots, no network: they should move, fight, plant and finish rounds on their own.
     #[test]
     fn bots_play_rounds() {
+        play_rounds("dust");
+    }
+
+    #[test]
+    fn bots_play_rounds_on_aztec() {
+        play_rounds("aztec");
+    }
+
+    fn play_rounds(map: &str) {
+        assert!(crate::map::load(map));
         let mut players = Players::new();
         for id in 1..=2 * TEAM_SIZE as u32 {
             let team = if id <= TEAM_SIZE as u32 { Team::T } else { Team::Ct };
@@ -971,7 +985,7 @@ mod tests {
         let [t, ct] = m.round.score;
         let accuracy = 100.0 * hits.len() as f32 / shots.len().max(1) as f32;
         println!(
-            "{} rounds in {:.0} min, T {t} - {ct} CT, {kills} kills, {plants} plants, {} shots, {accuracy:.0}% accuracy",
+            "{map}: {} rounds in {:.0} min, T {t} - {ct} CT, {kills} kills, {plants} plants, {} shots, {accuracy:.0}% accuracy",
             t + ct,
             tick as f32 / TICK_HZ as f32 / 60.0,
             shots.len()

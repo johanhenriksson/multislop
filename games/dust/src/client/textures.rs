@@ -1,5 +1,6 @@
 //! Procedural textures in the style of de_dust: sandstone blocks, frieze trim, flagstone floor, wooden and green
-//! crates, arched doors and shutters. Generated at startup so the game stays a single binary.
+//! crates, arched doors and shutters; and de_aztec's mossy grey stone, carved key frieze, overgrown paving and
+//! vines. Generated at startup so the game stays a single binary.
 
 use sdk::client::Command;
 
@@ -102,8 +103,9 @@ pub fn frieze() -> Texture {
     })
 }
 
-/// Ground, 4 m square: sand with worn flagstones (Voronoi cells) showing through.
-pub fn ground() -> Texture {
+/// Ground, 4 m square: worn flagstones (Voronoi cells) with sand drifted over them, or on aztec grey paving with
+/// grass and moss growing through.
+pub fn ground(aztec: bool) -> Texture {
     let points: Vec<(f32, f32)> = (0..14).map(|i| (hash(i, 0, 7) * 256.0, hash(i, 1, 7) * 256.0)).collect();
     texture(256, 256, move |x, y| {
         let (px, py) = (x as f32, y as f32);
@@ -119,14 +121,86 @@ pub fn ground() -> Texture {
                 d2 = d;
             }
         }
+        let stone = 0.88 + 0.12 * hash(id as i32, 3, 8);
+        let grain = 0.86 + 0.18 * noise(px, py, 2.0, 128, 10) + 0.06 * noise(px, py, 8.0, 32, 11);
+        if aztec {
+            let overgrown = noise(px, py, 32.0, 8, 9) * 0.7 + noise(px, py, 8.0, 32, 14) * 0.3;
+            let blade = 0.7 + 0.5 * noise(px, py, 1.5, 171, 15);
+            return if overgrown > 0.72 || d2 - d1 < 1.5 + 5.0 * overgrown.powi(3) {
+                rgb(0.24, 0.31, 0.15, blade)
+            } else {
+                let worn = 0.85 + 0.15 * noise(px, py, 16.0, 16, 16);
+                rgb(0.5, 0.48, 0.43, grain * stone * worn)
+            };
+        }
         // Sand drifts over the stones; joints only show where the sand is thin.
         let sand = noise(px, py, 40.0, 6, 9);
         let crack = d2 - d1 < 1.6 && sand < 0.55;
-        let stone = 0.88 + 0.12 * hash(id as i32, 3, 8);
-        let grain = 0.86 + 0.18 * noise(px, py, 2.0, 128, 10) + 0.06 * noise(px, py, 8.0, 32, 11);
         let base = if sand > 0.55 { 1.0 } else { stone };
         let k = if crack { 0.82 } else { grain * base };
         rgb(0.82, 0.6, 0.36, k)
+    })
+}
+
+/// Aztec wall, 4 m square: rough grey stone blocks of uneven size in uneven courses, grime streaking down, moss in
+/// patches.
+pub fn aztec_stone() -> Texture {
+    const COURSES: [u32; 9] = [28, 22, 34, 20, 30, 26, 36, 24, 36];
+    texture(256, 256, |x, y| {
+        let (px, py) = (x as f32, y as f32);
+        let (mut row, mut top) = (0, 0);
+        while y >= top + COURSES[row] {
+            top += COURSES[row];
+            row += 1;
+        }
+        let by = y - top;
+        // Joints at jittered spots along the course, wrapping round so the texture tiles.
+        let n = 4 + (hash(row as i32, 0, 30) * 3.0) as i32;
+        let joint = |i: i32| (i as f32 + 0.8 * hash(row as i32, i.rem_euclid(n), 31)) * 256.0 / n as f32;
+        let col = (0..n).rev().find(|&i| joint(i) <= px).unwrap_or(-1);
+        let bx = (px - joint(col)).min(joint(col + 1) - px);
+        let mortar = bx < 2.0 || by < 2 || by + 1 >= COURSES[row];
+        let block = 0.8 + 0.3 * hash(col.rem_euclid(n), row as i32, 32);
+        let rough = 0.8 + 0.2 * noise(px, py, 2.0, 128, 33) + 0.12 * noise(px, py, 8.0, 32, 34);
+        let chipped = if bx < 5.0 || by < 4 { 0.85 } else { 1.0 };
+        // Vertical streaks of grime, strongest in broad patches.
+        let streak = noise(px, 0.0, 4.0, 64, 35) * noise(px, py, 64.0, 4, 36);
+        let grime = 1.0 - 0.35 * ((streak - 0.25) * 2.5).clamp(0.0, 1.0);
+        let moss = ((noise(px, py, 32.0, 8, 37) * 0.8 + noise(px, py, 4.0, 64, 38) * 0.2 - 0.55) * 4.0).clamp(0.0, 1.0);
+        let k = if mortar { 0.5 } else { block * rough * chipped };
+        let c = [0.58 * (1.0 - moss) + 0.3 * moss, 0.56 * (1.0 - moss) + 0.37 * moss, 0.49 * (1.0 - moss) + 0.2 * moss];
+        rgb(c[0], c[1], c[2], k * grime)
+    })
+}
+
+/// Aztec frieze, 4 m x 0.5 m: a carved stepped key pattern between moldings, in grey stone.
+pub fn aztec_frieze() -> Texture {
+    const KEY: [&str; 8] = ["#######.", "#.....#.", "#.###.#.", "#.#.#.#.", "#.#...#.", "#.#####.", "#.......", "########"];
+    texture(256, 32, |x, y| {
+        let grain = 0.88 + 0.14 * noise(x as f32, y as f32, 3.0, 86, 40);
+        if !(5..=26).contains(&y) {
+            let step = if y < 5 { y < 2 } else { y > 29 };
+            return rgb(0.6, 0.59, 0.54, grain * if step { 0.75 } else { 0.95 });
+        }
+        let row = (((y - 5) as f32 / 22.0 * 8.0) as usize).min(7);
+        let carved = KEY[row].as_bytes()[(x % 32 / 4) as usize] == b'#';
+        if carved { rgb(0.3, 0.3, 0.27, grain) } else { rgb(0.64, 0.63, 0.57, grain) }
+    })
+}
+
+/// Vines hanging from under the aztec frieze, 2 x 1.5 m, transparent between the strands.
+pub fn vines() -> Texture {
+    texture(64, 96, |x, y| {
+        let strand = x / 4;
+        let length = hash(strand as i32, 0, 50) * 110.0 - 20.0;
+        let sway = ((y as f32 * 0.15 + strand as f32).sin() * 1.2 + 2.0) as u32;
+        let leaves = noise(x as f32, y as f32, 2.0, 32, 51) > 0.45 && (x % 4).abs_diff(sway) <= 2;
+        if (y as f32) < length && (x % 4 == sway || leaves) {
+            let k = 0.7 + 0.5 * noise(x as f32, y as f32, 2.0, 32, 52);
+            rgb(0.2, 0.34, 0.1, k)
+        } else {
+            [0.0; 4]
+        }
     })
 }
 

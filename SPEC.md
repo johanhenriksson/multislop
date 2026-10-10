@@ -89,10 +89,15 @@ Deadline: playable before 00:00. One weapon, one simple map.
   fights and only shoot once slowed down (counter-strafing), plant/defuse, call out spotted enemies so teammates rotate, and
   only notice enemies in a 120° field of view (callouts too), aim with a reaction delay, limited turn speed and angular aim error (~30% accuracy bot vs bot; `src/bot.rs`
   constants are the difficulty knobs).
-- The game is Counterslop; its one map is dust, traced from a top-down overview image into an ASCII grid in `src/map.rs` (2 m cells, flat): B site
+- The game is Counterslop, on two maps (`MAPS`, the host picks; `map::load` switches the per-thread current `MAP`).
+  Dust is traced from a top-down overview image into an ASCII grid in `src/map.rs` (2 m cells, flat): B site
   top-left, A bottom-left, CT spawn between them, T spawn at the back on the right (as far from A as from B),
   tunnels through the middle. A stack of tall crates
   across mid keeps T spawn from seeing down it to the CT side (a test checks the line of sight). Sites tinted red.
+- Aztec (`games/dust/src/maps/aztec*.txt`, same format, 85x47, ported from the old pre-wasm counter-slop branch):
+  CT spawn west, A site north-west, B south-middle, T spawn east, 16 spawn spots each; the rope bridge is a raised
+  walkway along the north wall of a sunken water room, plus sunken grass pits and double doors. Bots play it with the
+  same logic (a test plays 10 rounds there).
 - Height: a second grid (`DUST2_HEIGHTS`, quarter meters, base 36) gives each cell a floor height: 2 m streets, tunnels
   sunk to 0 with ramps (from the dark areas of the overview), B site and T spawn yard raised 1 m. The floor is
   interpolated between cell corners; you walk up rises under 0.5 m, stay glued going down, and bullets/sight lines
@@ -112,6 +117,9 @@ Deadline: playable before 00:00. One weapon, one simple map.
   doors and shutters on walls facing open ground; sand-over-flagstone floor on a terrain mesh (darker in tunnels);
   wooden X-braced and green ammo crates; clouds, two rings of mountains, desert beyond the map, distance haze,
   warm hard sun. First-person weapons are held by gloved hands.
+- Aztec swaps in its own look: rough grey stone blocks with grime streaks, moss and hanging vines under a carved key
+  frieze; grey paving with grass in the joints, greener and darker down low, murky water at the bottom of the pits;
+  damp weathered wood; overcast grey sky, dim cool light, greenish haze, dark green jungle hills and jungle floor.
 - Combat effects: muzzle flash with a light burst, dust puff and bullet hole where shots land (last 80 holes kept),
   blood on player hits: droplets sprayed mostly out the far side (more for damage, headshots and kills) that splat
   where they land, a big splash on a wall up to 3 m behind, pools spreading under the dead, blood over your own

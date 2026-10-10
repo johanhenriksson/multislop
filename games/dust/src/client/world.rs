@@ -1,9 +1,10 @@
 //! The map as the host should draw it: terrain, sandstone walls with a frieze along the top, crates, doors and
-//! shutters, sky, clouds and mountains on the horizon, plus the C4 model.
+//! shutters, sky, clouds and mountains on the horizon, plus the C4 model. Aztec swaps in mossy grey stone, vines,
+//! overgrown paving, an overcast sky and jungle hills.
 
 use super::scene::Scene;
 use super::textures;
-use crate::map::{CELL, MAP};
+use crate::map::{self, CELL, MAP};
 use glam::{Vec2, Vec3};
 use sdk::client::{Blend, Color, Environment, Material, MeshData, NodeKind, Transform};
 
@@ -16,8 +17,9 @@ pub struct Bomb {
 }
 
 pub fn build(scene: &mut Scene) -> Bomb {
-    // Desert sky, hazy distance, warm hard sunlight.
-    scene.push(sdk::client::Command::Environment(Environment {
+    let aztec = map::name() == "aztec";
+    // Desert sky, hazy distance, warm hard sunlight; aztec is overcast jungle with a greenish haze and dim cool light.
+    let desert = Environment {
         sky: Color::srgb(0.5, 0.68, 0.9),
         ambient: Color::srgb(0.8, 0.85, 1.0),
         ambient_brightness: 350.0,
@@ -29,23 +31,50 @@ pub fn build(scene: &mut Scene) -> Bomb {
         fog_sun_exponent: 30.0,
         fog_start: 140.0,
         fog_end: 700.0,
-    }));
+    };
+    let environment = if aztec {
+        Environment {
+            sky: Color::srgb(0.55, 0.6, 0.62),
+            ambient: Color::srgb(0.8, 0.9, 0.85),
+            ambient_brightness: 400.0,
+            sun_color: Color::srgb(0.85, 0.9, 0.95),
+            sun_illuminance: 9000.0,
+            fog_color: Color::srgb(0.5, 0.56, 0.54),
+            fog_sun_color: Color::NONE,
+            fog_start: 50.0,
+            ..desert
+        }
+    } else {
+        desert
+    };
+    scene.push(sdk::client::Command::Environment(environment));
 
     let mut texture = |t: textures::Texture| {
         let id = scene.id();
         scene.push(t.command(id));
         id
     };
-    let (stone_tex, frieze_tex, ground_tex) = (texture(textures::sandstone()), texture(textures::frieze()), texture(textures::ground()));
+    let (stone_tex, frieze_tex) = if aztec { (textures::aztec_stone(), textures::aztec_frieze()) } else { (textures::sandstone(), textures::frieze()) };
+    let (stone_tex, frieze_tex, ground_tex) = (texture(stone_tex), texture(frieze_tex), texture(textures::ground(aztec)));
     let (wood_tex, ammo_tex, door_tex) = (texture(textures::wood_crate()), texture(textures::ammo_crate()), texture(textures::door()));
     let clouds_tex = texture(textures::clouds());
-    let textured = |tex: u32| Material { texture: Some(tex), roughness: 0.95, ..Default::default() };
+    let vines_tex = aztec.then(|| texture(textures::vines()));
+    // Damp, dull stone on aztec, without the overcast sky glinting off it.
+    let textured = |tex: u32| Material { texture: Some(tex), roughness: if aztec { 1.0 } else { 0.95 }, ..Default::default() };
     let stone_mat = textured(stone_tex);
     let (stone, frieze, ground) = (scene.material(stone_mat), scene.material(textured(frieze_tex)), scene.material(textured(ground_tex)));
-    let (wood, ammo) = (scene.material(textured(wood_tex)), scene.material(textured(ammo_tex)));
-    let door = scene.material(Material { blend: Blend::Mask(0.5), ..textured(door_tex) });
+    // Weathered, damp wood on aztec.
+    let wood_tint = if aztec { Color::srgb(0.62, 0.64, 0.6) } else { Color::WHITE };
+    let (wood, ammo) = (scene.material(Material { color: wood_tint, ..textured(wood_tex) }), scene.material(textured(ammo_tex)));
+    let door = scene.material(Material { blend: Blend::Mask(0.5), color: wood_tint, ..textured(door_tex) });
+    let vines = vines_tex.map(|tex| scene.material(Material { blend: Blend::Mask(0.5), ..textured(tex) }));
     // A few shades of the same stone so neighboring buildings don't look cut from one block.
-    let stones: Vec<u32> = [Color::WHITE, Color::srgb(0.93, 0.88, 0.82), Color::srgb(1.0, 0.94, 0.86)]
+    let shades = if aztec {
+        [Color::WHITE, Color::srgb(0.9, 0.92, 0.88), Color::srgb(1.0, 0.97, 0.9)]
+    } else {
+        [Color::WHITE, Color::srgb(0.93, 0.88, 0.82), Color::srgb(1.0, 0.94, 0.86)]
+    };
+    let stones: Vec<u32> = shades
         .into_iter()
         .map(|tint| scene.material(Material { color: tint, ..stone_mat }))
         .collect();
@@ -53,10 +82,11 @@ pub fn build(scene: &mut Scene) -> Bomb {
         scene.spawn(None, NodeKind::Mesh { mesh, material, shadows: false }, t, true);
     };
 
-    let terrain = scene.mesh(terrain_mesh());
+    let terrain = scene.mesh(terrain_mesh(aztec));
     scene.mesh_node(None, terrain, ground, Transform::default());
-    // Desert out to the mountains, just below the lowest floor so it never shows inside the map.
-    let desert = scene.material(Material { uv_scale: 300.0, ..textured(ground_tex) });
+    // Desert (or jungle floor) out to the mountains, just below the lowest floor so it never shows inside the map.
+    let outside = if aztec { Color::srgb(0.3, 0.42, 0.2) } else { Color::WHITE };
+    let desert = scene.material(Material { uv_scale: 300.0, color: outside, ..textured(ground_tex) });
     let plane = scene.mesh(MeshData::Plane(Vec2::splat(1200.0)));
     unshadowed(scene, plane, desert, Transform::at(Vec3::new(0.0, -0.5, 0.0)));
 
@@ -76,6 +106,11 @@ pub fn build(scene: &mut Scene) -> Bomb {
             // Cap stone ledge along the top.
             let cap = Vec3::new(c.x, top - 0.1, c.z);
             boxed(scene, cap, Vec3::new(h.x + 0.12, 0.1, h.z + 0.12), Vec2::splat(4.0), true, shade);
+            // Vines hanging from under the band on some aztec walls.
+            if let Some(vines) = vines.filter(|_| (c.x * 1.7 + c.z * 2.3).sin() > -0.2) {
+                let at = Vec3::new(c.x, top - 1.75, c.z);
+                boxed(scene, at, Vec3::new(h.x + 0.03, 0.75, h.z + 0.03), Vec2::new(2.0, 1.5), false, vines);
+            }
         } else {
             // Crates: wooden ones and green ammo boxes, a crate per meter. Tall ones are drawn as two crates stacked,
             // alternating wood and ammo like the original's crate piles (same footprint, so collision is unchanged).
@@ -92,7 +127,8 @@ pub fn build(scene: &mut Scene) -> Bomb {
 
     // A darker base course along walls where they meet open ground, at that spot's floor height. Two shared meshes
     // (one per wall direction) since there are hundreds of them.
-    let base_mat = scene.material(Material { color: Color::srgb(0.78, 0.7, 0.62), ..stone_mat });
+    let base_tint = if aztec { Color::srgb(0.62, 0.68, 0.6) } else { Color::srgb(0.78, 0.7, 0.62) };
+    let base_mat = scene.material(Material { color: base_tint, ..stone_mat });
     let base_meshes = [
         scene.mesh(textured_box(Vec3::ZERO, Vec3::new(0.05, 0.2, CELL / 2.0), Vec2::new(4.0, 4.0), false)),
         scene.mesh(textured_box(Vec3::ZERO, Vec3::new(CELL / 2.0, 0.2, 0.05), Vec2::new(4.0, 4.0), false)),
@@ -137,18 +173,22 @@ pub fn build(scene: &mut Scene) -> Bomb {
         }
     }
 
-    // Sky dome: pale and hazy at the horizon, deeper blue overhead, like the desert skybox.
-    let sky = scene.mesh(sky_dome(900.0));
+    // Sky dome: pale and hazy at the horizon, deeper blue overhead, like the desert skybox; grey and rainy on aztec.
+    // Linear colors: on dust roughly sRGB (0.78, 0.85, 0.92) at the horizon to (0.33, 0.55, 0.85) at the top.
+    let (horizon, zenith) = if aztec { (Vec3::new(0.25, 0.3, 0.3), Vec3::new(0.12, 0.15, 0.2)) } else { (Vec3::new(0.58, 0.69, 0.82), Vec3::new(0.09, 0.26, 0.69)) };
+    let sky = scene.mesh(sky_dome(900.0, horizon, zenith));
     let backdrop = Material { unlit: true, fog: false, double_sided: true, ..Default::default() };
     let sky_mat = scene.material(backdrop);
     unshadowed(scene, sky, sky_mat, Transform::default());
     // A cloud layer high overhead, outside the fog.
     let clouds = scene.mesh(MeshData::Plane(Vec2::splat(2400.0)));
-    let clouds_mat = scene.material(Material { texture: Some(clouds_tex), blend: Blend::Blend, uv_scale: 4.0, ..backdrop });
+    let overcast = if aztec { Color::srgb(0.62, 0.65, 0.68) } else { Color::WHITE };
+    let clouds_mat = scene.material(Material { texture: Some(clouds_tex), blend: Blend::Blend, uv_scale: 4.0, color: overcast, ..backdrop });
     unshadowed(scene, clouds, clouds_mat, Transform::at(Vec3::new(0.0, 220.0, 0.0)));
-    // Two rings of mountains: brown ones nearer, bluish ones behind, softened by the fog.
-    // Vertex colors are linear: these are roughly sRGB (0.55, 0.45, 0.36) and (0.6, 0.6, 0.66).
-    for (radius, low, high, color, seed) in [(230.0, 25.0, 70.0, [0.24, 0.15, 0.09], 1.0), (340.0, 50.0, 130.0, [0.3, 0.27, 0.27], 4.0)] {
+    // Two rings of mountains: brown ones nearer, bluish ones behind, softened by the fog (dark green jungle hills on
+    // aztec). Vertex colors are linear: the desert ones are roughly sRGB (0.55, 0.45, 0.36) and (0.6, 0.6, 0.66).
+    let (near, far) = if aztec { ([0.05, 0.08, 0.04], [0.12, 0.15, 0.14]) } else { ([0.24, 0.15, 0.09], [0.3, 0.27, 0.27]) };
+    for (radius, low, high, color, seed) in [(230.0, 25.0, 70.0, near, 1.0), (340.0, 50.0, 130.0, far, 4.0)] {
         let ring = scene.mesh(mountain_ring(radius, low, high, color, seed));
         let mat = scene.material(backdrop);
         unshadowed(scene, ring, mat, Transform::default());
@@ -203,8 +243,9 @@ fn custom(positions: Vec<[f32; 3]>, normals: Vec<[f32; 3]>, uvs: Vec<[f32; 2]>, 
     MeshData::Custom { positions, normals, uvs, colors, indices }
 }
 
-/// The floor as one mesh following the height field, sand colored and darker the lower it goes.
-fn terrain_mesh() -> MeshData {
+/// The floor as one mesh following the height field, sand colored and darker the lower it goes; on aztec low ground
+/// is overgrown, and the bottom of the pits is murky water.
+fn terrain_mesh(aztec: bool) -> MeshData {
     let (w, d) = MAP.size();
     let (mut pos, mut normals, mut colors, mut uvs, mut idx) = (vec![], vec![], vec![], vec![], vec![]);
     for z in 0..MAP.depth() {
@@ -222,8 +263,10 @@ fn terrain_mesh() -> MeshData {
                 let shade = (0.55 + 0.45 * (p.y / 2.0).clamp(0.0, 1.0)) * (1.0 - 0.14 * solid);
                 pos.push(p.to_array());
                 normals.push(normal.to_array());
-                // The texture carries the sand color; vertex color only darkens the low tunnels.
-                colors.push([shade, shade * 0.97, shade * 0.94, 1.0]);
+                // The texture carries the floor color; vertex color only darkens the low tunnels, or turns aztec's green.
+                let green = if aztec { 1.0 - (p.y / 1.5).clamp(0.0, 1.0) } else { 0.0 };
+                let tint = if aztec && p.y < 0.3 { [0.04, 0.07, 0.06] } else { [1.0 - 0.8 * green, 0.97 - 0.4 * green, 0.94 - 0.85 * green] };
+                colors.push([shade * tint[0], shade * tint[1], shade * tint[2], 1.0]);
                 uvs.push([p.x / 4.0, p.z / 4.0]);
             }
             idx.extend([base, base + 2, base + 1, base, base + 3, base + 2]);
@@ -279,8 +322,8 @@ fn mountain_ring(radius: f32, low: f32, high: f32, color: [f32; 3], seed: f32) -
     custom(pos, vec![], vec![], colors, idx)
 }
 
-/// A UV sphere colored from pale at the horizon to deep blue overhead.
-fn sky_dome(radius: f32) -> MeshData {
+/// A UV sphere colored from `horizon` to `zenith` overhead (linear colors).
+fn sky_dome(radius: f32, horizon: Vec3, zenith: Vec3) -> MeshData {
     let (sectors, stacks) = (48u32, 24u32);
     let (mut pos, mut normals, mut colors, mut idx) = (vec![], vec![], vec![], vec![]);
     for i in 0..=stacks {
@@ -290,9 +333,8 @@ fn sky_dome(radius: f32) -> MeshData {
             let n = Vec3::new(phi.cos() * theta.cos(), phi.sin(), phi.cos() * theta.sin());
             pos.push((n * radius).to_array());
             normals.push(n.to_array());
-            // Linear colors: roughly sRGB (0.78, 0.85, 0.92) at the horizon to (0.33, 0.55, 0.85) at the top.
             let up = n.y.clamp(0.0, 1.0).powf(0.5);
-            let c = Vec3::new(0.58, 0.69, 0.82).lerp(Vec3::new(0.09, 0.26, 0.69), up);
+            let c = horizon.lerp(zenith, up);
             colors.push([c.x, c.y, c.z, 1.0]);
         }
     }

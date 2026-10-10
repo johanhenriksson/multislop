@@ -309,7 +309,8 @@ impl DustClient {
 
 impl ClientGame for DustClient {
     // ponytail: dust is the only map, so `map` picks nothing yet.
-    fn start(&mut self, _map: &str) -> Vec<Command> {
+    fn start(&mut self, map: &str) -> Vec<Command> {
+        crate::map::load(map);
         self.load_sounds();
         self.bomb = Some(world::build(&mut self.scene));
         // First-person weapons; each barrel tip lines up with `muzzle`.
