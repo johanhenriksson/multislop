@@ -112,14 +112,18 @@ pub fn build(scene: &mut Scene) -> Bomb {
                 boxed(scene, at, Vec3::new(h.x + 0.03, 0.75, h.z + 0.03), Vec2::new(2.0, 1.5), false, vines);
             }
         } else {
-            // Crates: wooden ones and green ammo boxes, a crate per meter. Tall ones are drawn as two crates stacked,
-            // alternating wood and ammo like the original's crate piles (same footprint, so collision is unchanged).
-            let green = (c.x * 7.3 + c.z * 3.1).sin() > 0.2;
+            // Crates, a crate per meter: wooden ones, and green ammo boxes only on and next to the bomb sites so those
+            // read as sites. Tall ones are drawn as two crates stacked (same footprint, so collision is unchanged),
+            // alternating wood and ammo on a site like the original's crate piles.
+            let reach = Vec3::new(h.x + CELL / 2.0, 0.0, h.z + CELL / 2.0);
+            let around = [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0), (1.0, 1.0), (-1.0, 1.0), (1.0, -1.0), (-1.0, -1.0)];
+            let on_site = around.iter().any(|&(sx, sz)| MAP.site_at(c + reach * Vec3::new(sx, 0.0, sz)).is_some());
+            let green = on_site && (c.x * 7.3 + c.z * 3.1).sin() > -0.4;
             let layers = if h.y > 0.8 { 2 } else { 1 };
             let layer = h.y / layers as f32;
             for i in 0..layers {
                 let center = Vec3::new(c.x, c.y - h.y + layer * (2 * i + 1) as f32, c.z);
-                let mat = if green ^ (i == 1) { ammo } else { wood };
+                let mat = if on_site && green ^ (i == 1) { ammo } else { wood };
                 boxed(scene, center, Vec3::new(h.x, layer, h.z), Vec2::new(1.0, layer * 2.0), false, mat);
             }
         }
