@@ -115,6 +115,8 @@ struct Game {
     explosion: Option<(Vec3, f64)>,
     /// The teammate we watch while dead: id, interpolated eye position and view.
     spectate: Option<(u32, Vec3, f32, f32)>,
+    /// The player under the crosshair, if any.
+    aim_target: Option<u32>,
     /// Interpolated position of a remote bomb carrier.
     carrier_pos: Option<Vec3>,
     armor: u8,
@@ -187,6 +189,10 @@ enum Announce {
 
 #[derive(Component)]
 struct AnnounceText;
+
+/// "Friend: name  Health: 100%" / "Enemy: name" under the crosshair target, or who we're spectating.
+#[derive(Component)]
+struct TargetText;
 
 /// A short-lived visual effect to spawn this frame.
 #[derive(Clone, Copy)]
@@ -377,7 +383,7 @@ pub fn run(server: SocketAddr, lag_ms: u64, jitter_ms: u64, interp_ms: u64) {
                 look,
                 controls,
                 (render_remotes, render_self, viewmodel, render_bomb, draw_tracers, bomb_beep, play_sounds, spawn_fx, update_fx),
-                (hud, scoreboard, ammo_hud, buy_menu_hud, kill_feed, death_fade, hurt_flash, crosshair, scope, score_panel, announce, chat, radio_menu),
+                (hud, scoreboard, ammo_hud, buy_menu_hud, kill_feed, death_fade, hurt_flash, crosshair, scope, score_panel, announce, chat, radio_menu, target_id),
             )
                 .chain(),
         )
@@ -544,7 +550,7 @@ fn setup(
     ));
     commands.spawn((
         Node { position_type: PositionType::Absolute, top: percent(26), width: percent(100), justify_content: JustifyContent::Center, ..default() },
-        children![(AnnounceText, Text::new(""), TextFont { font_size: FontSize::Px(40.0), ..default() }, TextShadow::default())],
+        children![(AnnounceText, Text::new(""), TextFont { font_size: FontSize::Px(40.0), ..default() }, TextShadow { offset: Vec2::splat(1.5), color: Color::srgba(0.0, 0.0, 0.0, 0.85) })],
     ));
     let radio_lines: String = std::iter::once("RADIO".to_string())
         .chain(Radio::MENU.iter().enumerate().map(|(i, r)| format!("{}  {}", i + 1, r.text())))
@@ -561,11 +567,15 @@ fn setup(
         Visibility::Hidden,
     ));
     commands.spawn((
+        Node { position_type: PositionType::Absolute, top: percent(58), width: percent(100), justify_content: JustifyContent::Center, ..default() },
+        children![(TargetText, Text::new(""), TextFont { font_size: FontSize::Px(18.0), ..default() }, TextShadow { offset: Vec2::splat(1.5), color: Color::srgba(0.0, 0.0, 0.0, 0.85) })],
+    ));
+    commands.spawn((
         ChatText,
         Text::new(""),
         TextColor(Color::srgb(1.0, 0.85, 0.35)),
         TextFont { font_size: FontSize::Px(16.0), ..default() },
-        TextShadow::default(),
+        TextShadow { offset: Vec2::splat(1.5), color: Color::srgba(0.0, 0.0, 0.0, 0.85) },
         Node { position_type: PositionType::Absolute, left: px(20), bottom: px(70), ..default() },
     ));
     commands.spawn((
@@ -1030,6 +1040,15 @@ fn render_remotes(
         seen.insert(p.id, (pos, yaw, pitch, life, p.state.weapon()));
     }
     (g.spectate, g.carrier_pos) = (spectate, carrier_pos);
+    // Whoever is under the crosshair, walls permitting, for the "Friend: / Enemy:" line.
+    let (eye, dir) = (g.pred.pos + Vec3::Y * EYE, look_rot(g.yaw, g.pitch) * Vec3::NEG_Z);
+    let wall = trace_world(eye, dir);
+    g.aim_target = seen
+        .iter()
+        .filter(|(_, v)| v.3 == Life::Alive)
+        .filter_map(|(&id, v)| trace_capsule(eye, dir, v.0).filter(|&t| t < wall).map(|t| (id, t)))
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(id, _)| id);
     // We're looking out of their eyes, so their own model would only block the view.
     let watched = spectate.filter(|_| spectating(&g)).map(|s| s.0);
 
@@ -1903,4 +1922,21 @@ fn spawn_c4(commands: &mut Commands, meshes: &mut Assets<Mesh>, mats: &mut Asset
         .id();
     let ids: Vec<Entity> = parts.into_iter().map(|p| commands.spawn(p).id()).collect();
     commands.spawn((BombModel, Transform::default(), Visibility::Hidden)).add_children(&ids).add_child(led);
+}
+
+fn target_id(mut q: Single<(&mut Text, &mut TextColor), With<TargetText>>, g: Res<Game>) {
+    let (text, color) = &mut *q;
+    let my_team = g.me.and_then(|me| g.teams.get(&me)).copied();
+    let player = |id: u32| g.players.iter().find(|p| p.id == id);
+    let (line, team) = match (g.hp > 0, g.aim_target, g.spectate) {
+        (true, Some(id), _) => match player(id) {
+            Some(p) if Some(p.team) == my_team => (format!("Friend: {}   Health: {}%", p.name, p.hp), Some(p.team)),
+            Some(p) => (format!("Enemy: {}", p.name), Some(p.team)),
+            None => (String::new(), None),
+        },
+        (false, _, Some((id, ..))) if spectating(&g) => (format!("Spectating {}", name(&g, id)), my_team),
+        _ => (String::new(), None),
+    };
+    text.0 = line;
+    color.0 = team_text_color(team);
 }
