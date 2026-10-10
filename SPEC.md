@@ -30,6 +30,8 @@ Deadline: playable before 00:00. One weapon, one simple map.
   in the background from when the browser opens. The picked one runs as a server on a thread in the client, on the
   first free port of 5000-5009, named "<user>'s game", and the client joins it. Compiled module code is cached in
   `compiled/` by module hash and wasmtime version; `games/` and `compiled/` keep the 4 most recently used files.
+
+## Gameplay
 - Players are capsules ("rounded cylinders"): radius 0.4, height 1.8, eye at 1.6.
 - Movement: Quake/GoldSrc style (ground friction, accel, air accel, gravity, jump). WASD + mouse, space jumps.
 - Ctrl crouches over 0.2 s: 1.0 m tall instead of 1.8, eye at 0.85, 34% speed (silent), 30% less spread; standing up
